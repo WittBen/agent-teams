@@ -2,6 +2,17 @@
 
 All notable changes are documented here. The project follows semantic versioning while APIs remain subject to beta changes.
 
+## 1.1.0-beta.4 - 2026-08-28
+
+### Added
+
+- Group chats without a configured output folder now show a persistent bilingual notice with a direct link to the group settings.
+- The group editor now explains that file-based tasks require an output folder for reliable shared file access.
+
+### Fixed
+
+- Packaged Windows builds now find the native Claude Code installation in the standard user directory even when Explorer starts the app with a stale or reduced `PATH`.
+
 ## 1.1.0-beta.3 - 2026-08-28
 
 ### Changed

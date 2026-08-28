@@ -362,7 +362,7 @@ function GroupModal({ group, agents, onClose, onSave }) {
         </div>
 
         <div className="form-group">
-          <label className="form-label">{t('📁 Projekt-Ordner (optional)')}</label>
+          <label className="form-label">{t('📁 Zielordner für Ausgaben')}</label>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <input className="form-input" value={projectPath} onChange={e => setProjectPath(e.target.value)}
               placeholder={t('Noch kein Ordner gewählt')} style={{ flex: 1, fontSize: 12 }} readOnly />
@@ -380,6 +380,11 @@ function GroupModal({ group, agents, onClose, onSave }) {
           <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
             {t('Agenten können hier Dateien für dieses Projekt ablegen.')}
           </div>
+          {!projectPath && (
+            <div className="project-folder-form-warning" role="status">
+              {t('Noch kein Zielordner eingerichtet. Datei-Aufgaben können erst zuverlässig ausgeführt werden, nachdem du einen Ordner ausgewählt hast.')}
+            </div>
+          )}
         </div>
 
         <div className="form-group quality-config-block">

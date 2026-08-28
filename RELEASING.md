@@ -29,8 +29,8 @@ Windows runner. Generated installers remain outside Git history.
 ```powershell
 git switch main
 git pull --ff-only origin main
-git tag -a v1.1.0-beta.3 -m "Agent Teams v1.1.0-beta.3"
-git push origin v1.1.0-beta.3
+git tag -a v1.1.0-beta.4 -m "Agent Teams v1.1.0-beta.4"
+git push origin v1.1.0-beta.4
 ```
 
 The tag must equal `v` followed by the version in `package.json`. Beta versions
