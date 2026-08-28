@@ -23,14 +23,35 @@ function buildClaudePrompt({ systemContent, merged, attachments = [] }) {
   return `${systemContent || 'Du bist ein hilfreicher Assistent.'}\n\n# Aufgabe\n${transcript || 'Bitte antworte hilfreich.'}${attachmentContext}`;
 }
 
-function buildClaudeArgs({ model, attachments = [] }) {
+function buildClaudeArgs({ model, attachments = [], cwd = '' }) {
   const fallbackModel = fallbackModelFor(model);
-  const attachmentDirectories = [...new Set(attachments
+  const readableDirectories = [...new Set([
+    ...(cwd ? [path.resolve(cwd)] : []),
+    ...attachments
     .filter(attachment => attachment?.path)
-    .map(attachment => path.dirname(attachment.path)))];
+    .map(attachment => path.dirname(attachment.path)),
+  ])];
   const args = ['--print', '--output-format', 'json'];
-  if (attachmentDirectories.length) {
-    args.push('--add-dir', ...attachmentDirectories, '--tools', 'Read', '--allowedTools', 'Read');
+  if (readableDirectories.length) {
+    const projectTools = cwd ? 'Read,Write,Edit' : 'Read';
+    const allowedTools = cwd ? 'Read,Edit(/**),Write(/**)' : 'Read';
+    args.push(
+      '--add-dir', ...readableDirectories,
+      '--tools', projectTools,
+      '--allowedTools', allowedTools,
+      ...(cwd ? [
+        '--permission-mode', 'dontAsk',
+        '--settings', JSON.stringify({
+          permissions: {
+            deny: ['.git', '.svn', 'node_modules'].flatMap(directory => [
+              `Read(/${directory}/**)`,
+              `Edit(/${directory}/**)`,
+              `Write(/${directory}/**)`,
+            ]),
+          },
+        }),
+      ] : []),
+    );
   } else {
     args.push('--tools', '');
   }
@@ -166,7 +187,7 @@ function cancelClaudeRun(requestId) {
 }
 
 async function callClaudeCLI({ systemContent, merged, model, cwd, attachments = [], requestId = '', onProgress = null }) {
-  const { args, fallbackModel } = buildClaudeArgs({ model, attachments });
+  const { args, fallbackModel } = buildClaudeArgs({ model, attachments, cwd });
 
   try {
     const result = await runClaude(args, {

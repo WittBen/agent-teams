@@ -229,9 +229,11 @@ function assertConfiguredMemoryPath(candidate) {
 }
 
 function prepareCliAttachmentParams(params = {}) {
+  const { cwd: requestedCwd, ...safeParams } = params;
   const bundle = resolveAttachmentBundle(params.attachments, chatAttachmentsRoot());
   const merged = appendAttachmentContext(params.merged || [], bundle.textContext, bundle.fileContext);
-  return { ...params, merged, attachments: bundle.attachments };
+  const cwd = requestedCwd ? assertConfiguredProjectPath(requestedCwd) : undefined;
+  return { ...safeParams, ...(cwd ? { cwd } : {}), merged, attachments: bundle.attachments };
 }
 
 handleIpc('pick-chat-attachments', async (_, { chatId } = {}) => {

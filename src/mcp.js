@@ -2,7 +2,7 @@ const MAX_MCP_ROUNDS = 6;
 const MAX_PERMISSION_RECOVERY_ROUNDS = 2;
 const MCP_BLOCK_PATTERN = /\[\[MCP_CALL\]\]([\s\S]*?)\[\[\/MCP_CALL\]\]/gi;
 const MCP_PERMISSION_HALLUCINATION_PATTERN = /(?:berechtigungs|freigabe|permission|approval)[\wäöüß-]*\s*(?:dialog|fenster|window|prompt)|(?:klick|click)[\s\S]{0,80}(?:allow|erlauben)|(?:benötige|brauche|bedarf|needs?|requires?)[\s\S]{0,100}(?:berechtigung|freigabe|permission|approval)|(?:bitte\s+)?(?:erlaube|erlauben\s+sie|allow|approve)[\s\S]{0,140}(?:zugriff|access|tool|werkzeug|dialog|fenster)/i;
-export const MCP_PRESET_VERSION = 1;
+export const MCP_PRESET_VERSION = 2;
 export const MCP_TOOL_PERMISSION_DECISIONS = Object.freeze({
   ALLOW: 'allow',
   ASK: 'ask',
@@ -11,7 +11,7 @@ export const MCP_TOOL_PERMISSION_DECISIONS = Object.freeze({
 export const OFFICIAL_EXCALIDRAW_MCP_SERVER = Object.freeze({
   id: 'mcp-official-excalidraw',
   name: 'Excalidraw',
-  enabled: true,
+  enabled: false,
   transport: 'http',
   url: 'https://mcp.excalidraw.com',
   headers: {},
@@ -23,14 +23,30 @@ export function applyOfficialMcpPresets(servers, presetVersion = 0) {
   if (Number(presetVersion) >= MCP_PRESET_VERSION) {
     return { servers: current, presetVersion: MCP_PRESET_VERSION, changed: false };
   }
+  const previousVersion = Number(presetVersion) || 0;
   const hasExcalidraw = current.some(server => (
     server?.id === OFFICIAL_EXCALIDRAW_MCP_SERVER.id ||
     String(server?.url || '').replace(/\/+$/, '') === OFFICIAL_EXCALIDRAW_MCP_SERVER.url
   ));
+  let changed = false;
+  let next = current;
+  const officialPresetIndex = current.findIndex(server => (
+    server?.id === OFFICIAL_EXCALIDRAW_MCP_SERVER.id ||
+    server?.source === OFFICIAL_EXCALIDRAW_MCP_SERVER.source
+  ));
+  if (officialPresetIndex >= 0 && current[officialPresetIndex]?.enabled !== false) {
+    next = current.map((server, index) => index === officialPresetIndex
+      ? { ...server, enabled: false }
+      : server);
+    changed = true;
+  } else if (previousVersion < 1 && !hasExcalidraw) {
+    next = [...current, { ...OFFICIAL_EXCALIDRAW_MCP_SERVER }];
+    changed = true;
+  }
   return {
-    servers: hasExcalidraw ? current : [...current, { ...OFFICIAL_EXCALIDRAW_MCP_SERVER }],
+    servers: next,
     presetVersion: MCP_PRESET_VERSION,
-    changed: !hasExcalidraw,
+    changed,
   };
 }
 
