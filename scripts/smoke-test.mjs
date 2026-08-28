@@ -1281,7 +1281,11 @@ assert.equal(typeof codexStatus.installed, 'boolean');
 assert.equal(typeof codexStatus.connected, 'boolean');
 if (!codexStatus.connected) {
   const result = await codex.callCodexCLI({ systemContent: 'Test', merged: [], model: 'codex-default' });
-  assert.equal(result.status, 401);
+  if (codexStatus.installed) {
+    assert.equal(result.status, 401);
+  } else {
+    assert.match(result.error, /Codex CLI nicht gefunden/i);
+  }
 }
 
 const { McpManager } = require(path.join(root, 'electron/mcp-manager.js'));
