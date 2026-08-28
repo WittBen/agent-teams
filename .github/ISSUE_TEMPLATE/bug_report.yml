@@ -1,0 +1,50 @@
+name: Bug report
+description: Report a reproducible problem in Agent Teams
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include API keys, OAuth tokens, private prompts, or sensitive attachments.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      placeholder: 1.1.0-beta.1
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows 11
+        - Windows 10
+        - Linux (unsupported preview)
+        - macOS (unsupported preview)
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include the smallest safe example that reproduces the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: providers
+    attributes:
+      label: Relevant provider or MCP setup
+      description: Names and versions only. Never paste credentials.
