@@ -1,0 +1,116 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: Build and publish Windows release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Validate version tag
+        id: metadata
+        shell: pwsh
+        run: |
+          $version = (Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json).version
+          $expectedTag = "v$version"
+          if ($env:GITHUB_REF_NAME -ne $expectedTag) {
+            throw "Tag $env:GITHUB_REF_NAME does not match package version $version. Expected $expectedTag."
+          }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
+
+      - name: Build Windows installer
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+        run: npm run dist:win
+
+      - name: Create checksum and inspect signature
+        id: release_files
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem -LiteralPath release -Filter '*.exe' -File)
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one Windows installer, found $($installers.Count)."
+          }
+
+          $installer = $installers[0]
+          $hash = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash
+          "$hash  $($installer.Name)" | Set-Content -LiteralPath release/SHA256SUMS.txt -Encoding ascii
+
+          $signature = Get-AuthenticodeSignature -LiteralPath $installer.FullName
+          $signed = $signature.Status -eq 'Valid'
+          "signed=$($signed.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Preserve build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: Agent-Teams-${{ github.ref_name }}-windows
+          path: |
+            release/*.exe
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $version = '${{ steps.metadata.outputs.version }}'
+          $releaseKind = if ($tag.Contains('-')) { 'public beta release' } else { 'release' }
+          $signatureText = if ('${{ steps.release_files.outputs.signed }}' -eq 'true') {
+            'The Windows installer has a valid Authenticode signature.'
+          } else {
+            'This beta installer is unsigned. Windows SmartScreen may display a warning.'
+          }
+          $notes = @"
+          Agent Teams $version is a $releaseKind for Windows 10 and 11.
+
+          **Windows security:** $signatureText
+
+          Download the installer and `SHA256SUMS.txt`, then verify the SHA-256 checksum before installation.
+          "@
+
+          $assets = @(Get-ChildItem -LiteralPath release -Filter '*.exe' -File | ForEach-Object { $_.FullName })
+          $assets += (Resolve-Path -LiteralPath release/SHA256SUMS.txt).Path
+          $releaseArgs = @(
+            'release', 'create', $tag,
+            '--repo', $env:GITHUB_REPOSITORY,
+            '--title', "Agent Teams $version",
+            '--verify-tag',
+            '--generate-notes',
+            '--notes', $notes
+          )
+          if ($tag.Contains('-')) {
+            $releaseArgs += '--prerelease'
+            $releaseArgs += '--latest=false'
+          }
+          $releaseArgs += $assets
+          gh @releaseArgs

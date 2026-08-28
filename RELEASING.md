@@ -1,40 +1,64 @@
 # Releasing Agent Teams
 
-Agent Teams is currently released as beta software. Public Windows installers
-must be built from a clean checkout and code-signed before distribution.
+Agent Teams is currently released as beta software. Version tags trigger the
+Windows release workflow in `.github/workflows/release.yml`. The workflow builds
+from a clean checkout, verifies the project, creates a SHA-256 checksum and
+publishes the installer as a GitHub Release.
 
 ## Clean verification
 
-Use a supported Node.js and npm version, then run:
+Before tagging, use a supported Node.js and npm version locally:
 
 ```powershell
 npm ci
 npm test
 npm run audit
-npm run dist:win
+npm run build
 ```
 
-`npm ci` also downloads the Electron runtime used by the packager. The Windows
-installer is written to `release/`.
+The GitHub workflow repeats these checks and runs `npm run dist:win` on a clean
+Windows runner. Generated installers remain outside Git history.
+
+## Automated release
+
+1. Update `package.json`, `package-lock.json`, `CHANGELOG.md` and the version in
+   `README.md` through a reviewed pull request.
+2. Wait for the `main` CI workflow to pass on Windows and Ubuntu.
+3. Tag the exact reviewed `main` commit and push the tag:
+
+```powershell
+git switch main
+git pull --ff-only origin main
+git tag -a v1.1.0-beta.1 -m "Agent Teams 1.1.0-beta.1"
+git push origin v1.1.0-beta.1
+```
+
+The tag must equal `v` followed by the version in `package.json`. Tags that
+contain a hyphen, such as beta versions, are published as prereleases. The
+workflow uploads the installer and its generated `SHA256SUMS.txt` file.
+
+To sign future Windows releases, configure the repository secrets `CSC_LINK`
+and `CSC_KEY_PASSWORD`. Electron Builder consumes these values during the build.
+Without them, the workflow publishes an explicitly labelled unsigned beta.
 
 ## Release checks
 
 Before publishing a release:
 
 1. Review `CHANGELOG.md`, the version in `package.json`, and the lockfile.
-2. Run the complete verification commands above on a clean machine or CI runner.
-3. Smoke-test the unpacked application with each supported provider.
+2. Run the complete verification commands above.
+3. Smoke-test the application with each supported provider.
 4. Replace the default Electron icon with an original, project-owned icon.
-5. Sign the installer and executable with a trusted Windows code-signing
-   certificate. Configure electron-builder through its documented `CSC_LINK`
-   and `CSC_KEY_PASSWORD` environment variables or the appropriate certificate
-   store; never commit signing secrets.
-6. Verify the Authenticode signature and publish a SHA-256 checksum.
-7. Tag the exact reviewed commit and attach only artifacts produced from it.
+5. Prefer signing the installer and executable with a trusted Windows
+   code-signing certificate. Never commit signing secrets.
+6. Tag only the exact reviewed `main` commit.
+7. Verify the release workflow, Authenticode status and published SHA-256
+   checksum before announcing the release.
 
-An unsigned installer is suitable for local testing but should not be described
-as a trusted production release. macOS and Linux targets require their own clean
-build, signing/notarization, and smoke-test process before support is claimed.
+An unsigned installer is suitable for a clearly labelled public beta but should
+not be described as a trusted production release. macOS and Linux targets
+require their own clean build, signing/notarization, and smoke-test process
+before support is claimed.
 
 ## Suggested verification commands
 
