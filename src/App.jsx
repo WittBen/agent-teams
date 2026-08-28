@@ -258,6 +258,10 @@ export default function App() {
             <ChatView
               key={activeChat.id}
               chat={activeChat}
+              onEditGroup={group => {
+                setEditGroup(group);
+                setShowGroupModal(true);
+              }}
             />
           ) : (
             <div className="empty-state">

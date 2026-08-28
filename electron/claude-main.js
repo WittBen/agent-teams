@@ -1,12 +1,31 @@
 const { spawn } = require('child_process');
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 const MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 const CLAUDE_TIMEOUT_MS = 120000;
 const activeClaudeRuns = new Map();
 
-function claudeCommand() {
-  return process.platform === 'win32' ? 'claude.exe' : 'claude';
+function resolveClaudeCommand({
+  platform = process.platform,
+  env = process.env,
+  homeDir = os.homedir(),
+  existsSync = fs.existsSync,
+} = {}) {
+  if (platform !== 'win32') return 'claude';
+
+  // Apps launched through Explorer inherit a smaller/stale PATH surprisingly
+  // often. Claude's native Windows installer uses ~/.local/bin, so resolve the
+  // executable there explicitly before falling back to PATH lookup.
+  const candidates = [
+    env.CLAUDE_CODE_CLI_PATH,
+    homeDir && path.win32.join(homeDir, '.local', 'bin', 'claude.exe'),
+    env.LOCALAPPDATA && path.win32.join(env.LOCALAPPDATA, 'Programs', 'Claude', 'claude.exe'),
+  ].filter(Boolean);
+  return candidates.find(candidate => {
+    try { return existsSync(candidate); } catch { return false; }
+  }) || 'claude.exe';
 }
 
 function buildClaudePrompt({ systemContent, merged, attachments = [] }) {
@@ -83,7 +102,7 @@ function runClaude(args, {
     let timer;
 
     try {
-      child = spawn(claudeCommand(), args, {
+      child = spawn(resolveClaudeCommand(), args, {
         cwd,
         env: process.env,
         shell: false,
@@ -237,5 +256,6 @@ module.exports = {
   getClaudeStatus,
   isClaudeRateLimitMessage,
   parseClaudeResult,
+  resolveClaudeCommand,
   runClaude,
 };

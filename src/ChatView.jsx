@@ -560,7 +560,7 @@ function MemoryViewer({ entries, error, loading, busy, namespace, provider, file
   );
 }
 
-export default function ChatView({ chat }) {
+export default function ChatView({ chat, onEditGroup }) {
   const { language, t } = useI18n();
   const {
     agents,
@@ -2987,6 +2987,19 @@ export default function ChatView({ chat }) {
           <MemoryBadge count={memoryCount} onOpen={handleOpenMemory} />
         )}
       </div>
+
+      {chat.type === 'group' && !projectPath && (
+        <div className="project-folder-notice" role="status">
+          <span aria-hidden="true">📁</span>
+          <div>
+            <strong>{t('Noch kein Zielordner eingerichtet')}</strong>
+            <span>{t('Lege einen Zielordner fest, damit Agenten Dateien erstellen, lesen und gemeinsam bearbeiten können.')}</span>
+          </div>
+          <button type="button" className="btn btn-secondary" onClick={() => onEditGroup?.(chat)}>
+            {t('Zielordner auswählen')}
+          </button>
+        </div>
+      )}
 
       {/* Messages */}
       <div className="messages-container">

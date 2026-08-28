@@ -12,7 +12,10 @@ const require = createRequire(import.meta.url);
 const electronMainSource = await fs.readFile(path.join(root, 'electron/main.js'), 'utf8');
 const codexMainSource = await fs.readFile(path.join(root, 'electron/codex-main.js'), 'utf8');
 const preloadSource = await fs.readFile(path.join(root, 'electron/preload.js'), 'utf8');
+const appSource = await fs.readFile(path.join(root, 'src/App.jsx'), 'utf8');
 const chatViewSource = await fs.readFile(path.join(root, 'src/ChatView.jsx'), 'utf8');
+const modalsSource = await fs.readFile(path.join(root, 'src/Modals.jsx'), 'utf8');
+const i18nSource = await fs.readFile(path.join(root, 'src/i18n.jsx'), 'utf8');
 const storeSource = await fs.readFile(path.join(root, 'src/store.jsx'), 'utf8');
 const mcpConfigSource = await fs.readFile(path.join(root, 'src/McpConfig.jsx'), 'utf8');
 const indexCssSource = await fs.readFile(path.join(root, 'src/index.css'), 'utf8');
@@ -30,6 +33,10 @@ assert.match(rendererEntrySource, /isTaskWindow[\s\S]*<TaskGraphWindow \/>/);
 assert.doesNotMatch(chatViewSource, /createPortal|FloatingTaskGraphWindow|floating-task-window/);
 assert.equal((chatViewSource.match(/openTaskGraphWindow\(/g) || []).length, 1);
 assert.match(chatViewSource, /title=\{t\('Aufgabenplan'\)\}[\s\S]*onClick=\{\(\) => openTaskGraphWindow\(\)\}/);
+assert.match(appSource, /<ChatView[\s\S]*onEditGroup=\{group =>/);
+assert.match(chatViewSource, /chat\.type === 'group' && !projectPath[\s\S]*project-folder-notice[\s\S]*Zielordner auswählen/);
+assert.match(modalsSource, /📁 Zielordner für Ausgaben[\s\S]*project-folder-form-warning/);
+assert.match(i18nSource, /'Zielordner auswählen': 'Choose output folder'/);
 assert.match(chatViewSource, /function MemoryBadge\(\{ count, onOpen \}\)/);
 assert.match(chatViewSource, /Memory-Eintrag löschen[\s\S]*Alle Memory-Einträge löschen/);
 assert.match(chatViewSource, /window\.confirm\(t\('Alle Einträge dieses Gruppen-Memorys wirklich löschen\?'\)\)/);
@@ -84,7 +91,6 @@ assert.match(indexCssSource, /\.settings-panel\s*\{[\s\S]*?width:\s*100%/);
 assert.match(indexCssSource, /\.settings-content\s*\{[\s\S]*?padding:\s*24px/);
 assert.match(chatViewSource, /chat\.type === 'group' \? chat\.mcpServers : \[\]/);
 assert.match(chatViewSource, /msg\.diagram && <ExcalidrawDiagram/);
-const modalsSource = await fs.readFile(path.join(root, 'src/Modals.jsx'), 'utf8');
 assert.match(modalsSource, /Globale Agentenrollen/);
 assert.match(modalsSource, /setAgentRoles\(localAgentRoles\)/);
 assert.match(modalsSource, /Weitere API-Anbieter/);
@@ -1220,6 +1226,16 @@ try {
 }
 
 const claude = require(path.join(root, 'electron/claude-main.js'));
+assert.equal(claude.resolveClaudeCommand({
+  platform: 'win32',
+  homeDir: 'C:\\Users\\Example',
+  env: {},
+  existsSync: candidate => candidate === path.win32.join('C:\\Users\\Example', '.local', 'bin', 'claude.exe'),
+}), path.win32.join('C:\\Users\\Example', '.local', 'bin', 'claude.exe'));
+assert.equal(claude.resolveClaudeCommand({
+  platform: 'win32', homeDir: 'C:\\Users\\Example', env: {}, existsSync: () => false,
+}), 'claude.exe');
+assert.equal(claude.resolveClaudeCommand({ platform: 'linux' }), 'claude');
 assert.equal(claude.fallbackModelFor('claude-opus-4-5'), 'sonnet');
 assert.equal(claude.fallbackModelFor('claude-sonnet-4-5'), null);
 assert.equal(claude.isClaudeRateLimitMessage('You have hit your usage limit'), true);
@@ -1354,7 +1370,7 @@ try {
 
 console.log(JSON.stringify({
   ok: true,
-  checks: ['no-artificial-agent-delay', 'safe-auto-parallel-batching', 'lean-fast-mode', 'configurable-run-limits', 'pm-turn-limit-review', 'resumable-run-segments', 'agent-teams-window-branding', 'typing-agent-identity', 'always-focused-chat-composer', 'draft-while-agent-runs', 'persistent-user-request-queue', 'global-agent-role-catalog', 'legacy-agent-role-migration', 'routing', 'direct-chat-conversation-history', 'directed-group-context-window', 'direct-specialist-without-pm-review', 'explicit-memory-commands', 'manual-memory-entry', 'quality-cascade-policy', 'quality-deterministic-gates', 'quality-chat-controls', 'custom-provider-quality-cascade', 'direct-chat-without-pm', 'mixed-provider-routing', 'generic-provider-presets', 'encrypted-provider-credentials', 'provider-protocol-routing', 'claude-cli-oauth-routing', 'anthropic-api-key-routing', 'claude-rate-limit-metadata', 'retryable-provider-queue', 'retry-after-parsing', 'claude-opus-sonnet-fallback', 'claude-cli-status', 'browser-file-attachments', 'persistent-file-attachments', 'provider-native-file-payloads', 'cli-file-access', 'detached-singleton-task-window', 'memory-entry-delete-controls', 'multi-handoffs', 'strict-line-start-mentions', 'left-aligned-mention-layout', 'code-block-mention-isolation', 'direct-user-question-display', 'multi-turn-task-queue', 'direct-handoff-priority', 'deferred-pm-handoff', 'timeout-detection', 'immediate-pm-timeout-recovery', 'stepwise-timeout-review', 'persistent-conversation-checkpoint', 'interrupted-agent-checkpoint', 'resume-without-restarting-pm', 'short-agent-activity', 'pm-final-review-rules', 'pause-resume-user-handoff', 'persistent-task-graph', 'initial-pm-plan-protocol', 'upfront-plan-materialization', 'planned-future-gating', 'sequential-plan-selection-guard', 'agent-role-pool-distribution', 'delegation-tree-hierarchy', 'dependency-cross-links', 'multi-result-review-placement', 'legacy-graph-tree-migration', 'agent-subtask-branching', 'graph-dependencies', 'parallel-selection-validation', 'parallel-batch-execution', 'parallel-file-conflict-guard', 'pm-task-approval', 'project-artifact-protocol', 'nested-markdown-artifact-fences', 'project-review-evidence', 'rephrased-file-task-loop-guard', 'persistent-loop-guard', 'safe-project-writes', 'project-completion-signal', 'task-capsules', 'isolated-sessions', 'shared-local-memory', 'shared-json-file-memory', 'versioned-memory-file', 'legacy-memory-file-migration', 'mcp-global-group-merge', 'mcp-official-excalidraw-preset', 'mcp-direct-chat-global-access', 'mcp-tool-permission-gate', 'mcp-global-tool-catalog', 'mcp-global-tool-policy', 'mcp-unknown-tool-asks', 'full-screen-settings', 'mcp-persistent-chat-grants', 'mcp-once-grant-consumed-on-invocation', 'mcp-timeout-keeps-pending-once-grant', 'mcp-permission-wording-recovery', 'mcp-neutral-json-planner', 'mcp-ui-result-short-circuit', 'mcp-denied-tool-path', 'mcp-app-tool-filtering', 'excalidraw-inline-preview', 'mcp-call-protocol', 'mcp-provider-neutral-tool-loop', 'mcp-stdio-integration', 'codex-progress-events', 'codex-cancel-routing', 'codex-status'],
+  checks: ['no-artificial-agent-delay', 'safe-auto-parallel-batching', 'lean-fast-mode', 'configurable-run-limits', 'pm-turn-limit-review', 'resumable-run-segments', 'agent-teams-window-branding', 'typing-agent-identity', 'always-focused-chat-composer', 'draft-while-agent-runs', 'persistent-user-request-queue', 'global-agent-role-catalog', 'legacy-agent-role-migration', 'routing', 'direct-chat-conversation-history', 'directed-group-context-window', 'direct-specialist-without-pm-review', 'explicit-memory-commands', 'manual-memory-entry', 'quality-cascade-policy', 'quality-deterministic-gates', 'quality-chat-controls', 'custom-provider-quality-cascade', 'direct-chat-without-pm', 'mixed-provider-routing', 'generic-provider-presets', 'encrypted-provider-credentials', 'provider-protocol-routing', 'claude-cli-oauth-routing', 'anthropic-api-key-routing', 'claude-rate-limit-metadata', 'retryable-provider-queue', 'retry-after-parsing', 'claude-opus-sonnet-fallback', 'claude-cli-status', 'claude-windows-native-path', 'group-output-folder-notice', 'browser-file-attachments', 'persistent-file-attachments', 'provider-native-file-payloads', 'cli-file-access', 'detached-singleton-task-window', 'memory-entry-delete-controls', 'multi-handoffs', 'strict-line-start-mentions', 'left-aligned-mention-layout', 'code-block-mention-isolation', 'direct-user-question-display', 'multi-turn-task-queue', 'direct-handoff-priority', 'deferred-pm-handoff', 'timeout-detection', 'immediate-pm-timeout-recovery', 'stepwise-timeout-review', 'persistent-conversation-checkpoint', 'interrupted-agent-checkpoint', 'resume-without-restarting-pm', 'short-agent-activity', 'pm-final-review-rules', 'pause-resume-user-handoff', 'persistent-task-graph', 'initial-pm-plan-protocol', 'upfront-plan-materialization', 'planned-future-gating', 'sequential-plan-selection-guard', 'agent-role-pool-distribution', 'delegation-tree-hierarchy', 'dependency-cross-links', 'multi-result-review-placement', 'legacy-graph-tree-migration', 'agent-subtask-branching', 'graph-dependencies', 'parallel-selection-validation', 'parallel-batch-execution', 'parallel-file-conflict-guard', 'pm-task-approval', 'project-artifact-protocol', 'nested-markdown-artifact-fences', 'project-review-evidence', 'rephrased-file-task-loop-guard', 'persistent-loop-guard', 'safe-project-writes', 'project-completion-signal', 'task-capsules', 'isolated-sessions', 'shared-local-memory', 'shared-json-file-memory', 'versioned-memory-file', 'legacy-memory-file-migration', 'mcp-global-group-merge', 'mcp-official-excalidraw-preset', 'mcp-direct-chat-global-access', 'mcp-tool-permission-gate', 'mcp-global-tool-catalog', 'mcp-global-tool-policy', 'mcp-unknown-tool-asks', 'full-screen-settings', 'mcp-persistent-chat-grants', 'mcp-once-grant-consumed-on-invocation', 'mcp-timeout-keeps-pending-once-grant', 'mcp-permission-wording-recovery', 'mcp-neutral-json-planner', 'mcp-ui-result-short-circuit', 'mcp-denied-tool-path', 'mcp-app-tool-filtering', 'excalidraw-inline-preview', 'mcp-call-protocol', 'mcp-provider-neutral-tool-loop', 'mcp-stdio-integration', 'codex-progress-events', 'codex-cancel-routing', 'codex-status'],
   codex: codexStatus,
   claude: claudeStatus,
 }, null, 2));
