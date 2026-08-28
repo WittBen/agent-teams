@@ -2,6 +2,13 @@
 
 All notable changes are documented here. The project follows semantic versioning while APIs remain subject to beta changes.
 
+## 1.1.0-beta.2 - 2026-08-28
+
+### Fixed
+
+- Disabled Electron Builder's implicit tag publishing so the verified release
+  workflow can generate checksums and publish all release assets explicitly.
+
 ## 1.1.0-beta.1 - 2026-08-27
 
 ### Security

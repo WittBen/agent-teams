@@ -1,7 +1,7 @@
 {
   "name": "agent-teams-desktop",
   "private": true,
-  "version": "1.1.0-beta.1",
+  "version": "1.1.0-beta.2",
   "description": "Local-first Electron desktop app for configurable AI agent teams, shared memory and MCP tools.",
   "author": "Ben Witt",
   "license": "MIT",
@@ -20,8 +20,8 @@
     "test:security": "node --test scripts/security-test.cjs",
     "audit": "npm audit --audit-level=high",
     "electron": "electron .",
-    "dist": "vite build && electron-builder",
-    "dist:win": "vite build && electron-builder --win"
+    "dist": "vite build && electron-builder --publish never",
+    "dist:win": "vite build && electron-builder --win --publish never"
   },
   "dependencies": {
     "@modelcontextprotocol/client": "^2.0.0",
