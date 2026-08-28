@@ -24,10 +24,10 @@ files with `git status` before committing.
 
 ## Publish the Windows beta
 
-Do not commit the installer to the source repository. Create a GitHub Release
-for tag `v1.1.0-beta.1`, attach the `.exe` from the prepared `GitHub-Upload`
-folder, and publish its SHA-256 checksum from `SHA256SUMS.txt`.
+Do not commit the installer to the source repository. After the repository is
+prepared, merge `.github/workflows/release.yml` and push the matching version
+tag. The workflow builds the installer from that tag and publishes a newly
+generated SHA-256 checksum with the GitHub prerelease.
 
-The current installer is unsigned. Mark it clearly as an unsigned beta build,
-or sign it with a trusted code-signing certificate before public distribution.
-See `RELEASING.md` for the complete release checklist.
+When signing secrets are not configured, the workflow marks the installer as an
+unsigned beta build. See `RELEASING.md` for the complete release checklist.

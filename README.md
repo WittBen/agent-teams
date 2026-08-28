@@ -4,6 +4,17 @@ Agent Teams is a local-first Electron and React desktop application for configur
 
 > **Status:** `1.1.0-beta.1`. This project is in public beta. Keep backups of important project data and review every MCP server before granting access.
 
+## Download
+
+Windows users can download the installer and `SHA256SUMS.txt` from the
+[GitHub Releases](https://github.com/WittBen/agent-teams/releases) page. Verify
+the SHA-256 checksum before running the installer. Beta installers without an
+Authenticode signature are marked as unsigned and may trigger a Windows
+SmartScreen warning.
+
+The source archive from **Code → Download ZIP** is intended for development. It
+does not contain dependencies or a prebuilt application.
+
 ## Security model
 
 - Provider API keys are encrypted by Electron `safeStorage` and remain in the Electron main process.
@@ -16,11 +27,10 @@ Read [SECURITY.md](SECURITY.md), [THREAT_MODEL.md](THREAT_MODEL.md) and [PRIVACY
 
 ## Requirements
 
-- Node.js 22 or newer
-- npm 10 or newer
 - Windows 10/11 for the currently tested desktop release
-- Optional: an API key for OpenAI, Anthropic or another configured provider
-- Optional: authenticated Codex CLI or Claude Code CLI
+- Node.js 22 or newer and npm 10 or newer when running from source
+- An API key for OpenAI, Anthropic or another configured provider, or an
+  authenticated Codex CLI or Claude Code CLI session, to run AI requests
 
 macOS and Linux are Electron build targets, but are not yet part of the supported release matrix.
 
@@ -51,6 +61,11 @@ Artifacts are written to `release/` and are intentionally excluded from Git.
 The release checklist, including Windows code signing, is documented in
 [RELEASING.md](RELEASING.md). The process and trust boundaries are described in
 [ARCHITECTURE.md](ARCHITECTURE.md) and [THREAT_MODEL.md](THREAT_MODEL.md).
+
+Pushing a version tag that exactly matches `package.json`, for example
+`v1.1.0-beta.1`, runs the release workflow. GitHub Actions verifies the project,
+builds the Windows installer, generates `SHA256SUMS.txt` and publishes a beta
+tag as a prerelease.
 
 ## Provider configuration
 

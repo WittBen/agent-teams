@@ -20,6 +20,8 @@ All notable changes are documented here. The project follows semantic versioning
 - User messages sent during an active agent run now enter a persistent per-chat FIFO queue and remain immediately visible.
 - PM plans now explicitly inspect same-role agent pools, distribute independent work fairly, and start only conflict-free tasks in parallel.
 - Added release documentation, security tests and CI configuration.
+- Added a tag-driven GitHub Actions release workflow that verifies the project,
+  builds the Windows installer and publishes a generated SHA-256 checksum.
 - Grouped each provider's authentication options together in Settings:
   Anthropic API key with Claude Code CLI, and OpenAI API key with Codex CLI.
 - Added an explicit Claude Code CLI status refresh action alongside its connect
