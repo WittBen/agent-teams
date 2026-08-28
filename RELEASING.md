@@ -29,13 +29,14 @@ Windows runner. Generated installers remain outside Git history.
 ```powershell
 git switch main
 git pull --ff-only origin main
-git tag -a v1.1.0-beta.2 -m "Agent Teams 1.1.0-beta.2"
-git push origin v1.1.0-beta.2
+git tag -a v1.1.0-beta.3 -m "Agent Teams v1.1.0-beta.3"
+git push origin v1.1.0-beta.3
 ```
 
-The tag must equal `v` followed by the version in `package.json`. Tags that
-contain a hyphen, such as beta versions, are published as prereleases. The
-workflow uploads the installer and its generated `SHA256SUMS.txt` file.
+The tag must equal `v` followed by the version in `package.json`. Beta versions
+remain explicitly labelled in the version and notes but are published as the
+latest public release so the installer is visible from the repository page.
+The workflow uploads the installer and its generated `SHA256SUMS.txt` file.
 
 To sign future Windows releases, configure the repository secrets `CSC_LINK`
 and `CSC_KEY_PASSWORD`. Electron Builder consumes these values during the build.

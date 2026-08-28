@@ -277,7 +277,7 @@ async function callCodexCLI({ systemContent, merged, model, cwd, attachments = [
   const args = [
     'exec',
     '--ephemeral',
-    '--sandbox', 'read-only',
+    '--sandbox', cwd ? 'workspace-write' : 'read-only',
     '--skip-git-repo-check',
     '--ignore-rules',
     '--color', 'never',

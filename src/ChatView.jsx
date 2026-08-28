@@ -40,6 +40,7 @@ import {
   buildIsolatedSystemPrompt,
   buildProjectReviewEvidence,
   buildRelevantConversationHistory,
+  buildSharedProjectFileContext,
   buildTaskCapsule,
   buildTurnLimitReviewTask,
   buildTimeoutRecoveryReviewTask,
@@ -1769,7 +1770,6 @@ export default function ChatView({ chat }) {
               rootNodeId: planRootNodeId,
               tasks: normalizedPlanTasks,
             }));
-            openTaskGraphWindow();
           }
         }
         rawReply = rewritePlanHandoffAssignments(rawReply, normalizedPlanTasks);
@@ -1838,7 +1838,11 @@ export default function ChatView({ chat }) {
           }
         }
         if (savedProjectFiles.length) {
-          projectContext += '\n' + savedProjectFiles.map(filename => `- ${filename}`).join('\n');
+          projectContext += buildSharedProjectFileContext({
+            agentName: agent.name,
+            projectFiles,
+            savedProjectFiles,
+          });
           addMessage(chat.id, {
             id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
             text: `📁|${t(
@@ -2355,7 +2359,6 @@ export default function ChatView({ chat }) {
           queueGuard: taskQueue.guardState(),
           planRootGraphNodeId: activePlanRootNodeId,
         });
-        openTaskGraphWindow({ awaitingSchedule: true, running: false });
         addMessage(chat.id, {
           id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
           text: `🗺️|${t('Der PM hat mehrere Aufgaben geplant. Wähle im Aufgabenplan eine parallele Gruppe oder fahre sequenziell fort.')}`,
@@ -2541,7 +2544,6 @@ export default function ChatView({ chat }) {
           queueGuard: taskQueue.guardState(),
           planRootGraphNodeId: activePlanRootNodeId,
         });
-        openTaskGraphWindow({ awaitingSchedule: true, running: false });
         addMessage(chat.id, {
           id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
           text: `🗺️|${t('Der PM hat mehrere Aufgaben geplant. Wähle im Aufgabenplan eine parallele Gruppe oder fahre sequenziell fort.')}`,
@@ -2633,7 +2635,7 @@ export default function ChatView({ chat }) {
       discardConversationCheckpoint();
     }
     setRunning(false);
-  }, [apiKeys, providerConnections, chatAgents, conversationStates, kbPath, projectPath, memoryEnabled, memoryConfig?.namespace, memoryAPI, mcpServers, chat.mcpServers, chat.qualityRouting, qualityRouting, conversationLimits, recordQualityEvent, refreshMemoryCount, chat.id, chat.name, chat.type, addMessage, requestMcpPermission, handleMcpPermissionConsumed, handleMcpToolResult, persistConversationCheckpoint, discardConversationCheckpoint, commitTaskGraph, registerGraphTask, setGraphTaskStatus, openTaskGraphWindow, t]);
+  }, [apiKeys, providerConnections, chatAgents, conversationStates, kbPath, projectPath, memoryEnabled, memoryConfig?.namespace, memoryAPI, mcpServers, chat.mcpServers, chat.qualityRouting, qualityRouting, conversationLimits, recordQualityEvent, refreshMemoryCount, chat.id, chat.name, chat.type, addMessage, requestMcpPermission, handleMcpPermissionConsumed, handleMcpToolResult, persistConversationCheckpoint, discardConversationCheckpoint, commitTaskGraph, registerGraphTask, setGraphTaskStatus, t]);
 
   const handleCancelRun = useCallback(async () => {
     if (!running) return;

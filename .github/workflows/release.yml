@@ -108,9 +108,5 @@ jobs:
             '--generate-notes',
             '--notes', $notes
           )
-          if ($tag.Contains('-')) {
-            $releaseArgs += '--prerelease'
-            $releaseArgs += '--latest=false'
-          }
           $releaseArgs += $assets
           gh @releaseArgs

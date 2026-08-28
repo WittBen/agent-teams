@@ -10,6 +10,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
 
 const electronMainSource = await fs.readFile(path.join(root, 'electron/main.js'), 'utf8');
+const codexMainSource = await fs.readFile(path.join(root, 'electron/codex-main.js'), 'utf8');
 const preloadSource = await fs.readFile(path.join(root, 'electron/preload.js'), 'utf8');
 const chatViewSource = await fs.readFile(path.join(root, 'src/ChatView.jsx'), 'utf8');
 const storeSource = await fs.readFile(path.join(root, 'src/store.jsx'), 'utf8');
@@ -27,6 +28,8 @@ assert.match(electronMainSource, /taskWindow\.loadFile\(distFile, \{ query: \{ t
 assert.match(preloadSource, /openTaskWindow:[\s\S]*onTaskWindowAction:/);
 assert.match(rendererEntrySource, /isTaskWindow[\s\S]*<TaskGraphWindow \/>/);
 assert.doesNotMatch(chatViewSource, /createPortal|FloatingTaskGraphWindow|floating-task-window/);
+assert.equal((chatViewSource.match(/openTaskGraphWindow\(/g) || []).length, 1);
+assert.match(chatViewSource, /title=\{t\('Aufgabenplan'\)\}[\s\S]*onClick=\{\(\) => openTaskGraphWindow\(\)\}/);
 assert.match(chatViewSource, /function MemoryBadge\(\{ count, onOpen \}\)/);
 assert.match(chatViewSource, /Memory-Eintrag löschen[\s\S]*Alle Memory-Einträge löschen/);
 assert.match(chatViewSource, /window\.confirm\(t\('Alle Einträge dieses Gruppen-Memorys wirklich löschen\?'\)\)/);
@@ -36,6 +39,8 @@ assert.match(electronMainSource, /requestSingleInstanceLock\(\)[\s\S]*second-ins
 assert.match(indexSource, /<title>Agent Teams<\/title>/);
 assert.equal(packageJson.build.productName, 'Agent Teams');
 assert.match(electronMainSource, /const PRODUCT_NAME = 'Agent Teams'/);
+assert.match(electronMainSource, /prepareCliAttachmentParams[\s\S]*assertConfiguredProjectPath\(requestedCwd\)/);
+assert.match(codexMainSource, /--sandbox', cwd \? 'workspace-write' : 'read-only'/);
 assert.match(electronMainSource, /ensureOfficialMcpPreset\(store\)/);
 assert.match(electronMainSource, /brandedWindowTitle\(nextState\.windowTitle \|\| 'Aufgabenbaum'\)/);
 assert.match(taskGraphWindowSource, /document\.title = `Agent Teams – \$\{detail\}`/);
@@ -287,7 +292,22 @@ const presetState = mcp.applyOfficialMcpPresets([], 0);
 assert.equal(presetState.changed, true);
 assert.equal(presetState.presetVersion, mcp.MCP_PRESET_VERSION);
 assert.deepEqual(presetState.servers[0], mcp.OFFICIAL_EXCALIDRAW_MCP_SERVER);
+assert.equal(presetState.servers[0].enabled, false);
 assert.deepEqual(mcp.applyOfficialMcpPresets([], mcp.MCP_PRESET_VERSION).servers, []);
+const migratedOfficialPreset = mcp.applyOfficialMcpPresets([
+  { ...mcp.OFFICIAL_EXCALIDRAW_MCP_SERVER, enabled: true },
+], 1);
+assert.equal(migratedOfficialPreset.changed, true);
+assert.equal(migratedOfficialPreset.servers[0].enabled, false);
+assert.deepEqual(mcp.applyOfficialMcpPresets([], 1).servers, []);
+const customExcalidrawServer = {
+  id: 'custom-excalidraw', name: 'Eigenes Excalidraw', enabled: true,
+  transport: 'http', url: mcp.OFFICIAL_EXCALIDRAW_MCP_SERVER.url,
+};
+assert.equal(mcp.applyOfficialMcpPresets([customExcalidrawServer], 1).servers[0].enabled, true);
+assert.equal(mcp.applyOfficialMcpPresets([
+  { ...mcp.OFFICIAL_EXCALIDRAW_MCP_SERVER, enabled: true },
+], mcp.MCP_PRESET_VERSION).servers[0].enabled, true);
 assert.deepEqual(electronMcpPreset.OFFICIAL_EXCALIDRAW_MCP_SERVER, mcp.OFFICIAL_EXCALIDRAW_MCP_SERVER);
 const presetStoreData = new Map();
 const presetStore = {
@@ -296,6 +316,7 @@ const presetStore = {
 };
 assert.equal(electronMcpPreset.ensureOfficialMcpPreset(presetStore).changed, true);
 assert.equal(presetStoreData.get('mcpServers')[0].id, 'mcp-official-excalidraw');
+assert.equal(presetStoreData.get('mcpServers')[0].enabled, false);
 assert.equal(presetStoreData.get('mcpPresetVersion'), electronMcpPreset.MCP_PRESET_VERSION);
 presetStoreData.set('mcpServers', []);
 assert.equal(electronMcpPreset.ensureOfficialMcpPreset(presetStore).changed, false);
@@ -1045,6 +1066,25 @@ assert.match(projectPrompt, /AUFGABENPLAN/);
 assert.match(projectPrompt, /\[\[TASK_PLAN\]\]/);
 assert.match(projectPrompt, /Max \(Developer\)/);
 assert.match(projectPrompt, /Rollenpool mit mindestens zwei Agenten/);
+assert.match(projectPrompt, /gemeinsamen Arbeitsbereich freigegeben/);
+assert.match(projectPrompt, /Verändere niemals \.git, \.svn oder node_modules/);
+const sharedProjectFileContext = orchestration.buildSharedProjectFileContext({
+  agentName: 'Max',
+  projectFiles: [
+    { filename: 'src/sort.js', content: 'export const sort = values => values;\n' },
+    { filename: 'src/unsaved.js', content: 'nicht freigegeben\n' },
+  ],
+  savedProjectFiles: ['src\\sort.js'],
+});
+assert.match(sharedProjectFileContext, /Max/);
+assert.match(sharedProjectFileContext, /src\/sort\.js/);
+assert.match(sharedProjectFileContext, /export const sort/);
+assert.doesNotMatch(sharedProjectFileContext, /unsaved/);
+assert.match(orchestration.buildSharedProjectFileContext({
+  projectFiles: [{ filename: 'large.txt', content: 'x'.repeat(100) }],
+  savedProjectFiles: ['large.txt'],
+  maxCharactersPerFile: 20,
+}), /nach 20 von 100 Zeichen gekürzt/);
 const directChatPrompt = orchestration.buildIsolatedSystemPrompt({
   agent: coder,
   groupName: coder.name,
@@ -1189,6 +1229,14 @@ const claudeAttachmentPath = path.join(os.tmpdir(), 'attachment.bin');
 const claudeAttachmentArgs = claude.buildClaudeArgs({ attachments: [{ kind: 'file', path: claudeAttachmentPath }] }).args;
 assert.equal(claudeAttachmentArgs.includes('--add-dir'), true);
 assert.equal(claudeAttachmentArgs.includes('Read'), true);
+assert.equal(claudeAttachmentArgs.includes('Read,Write,Edit'), false);
+const claudeProjectArgs = claude.buildClaudeArgs({ cwd: path.join(os.tmpdir(), 'shared-project') }).args;
+assert.equal(claudeProjectArgs.includes('Read,Write,Edit'), true);
+assert.equal(claudeProjectArgs.includes('Read,Edit(/**),Write(/**)'), true);
+assert.equal(claudeProjectArgs.includes('dontAsk'), true);
+const claudeProjectSettings = JSON.parse(claudeProjectArgs[claudeProjectArgs.indexOf('--settings') + 1]);
+assert.equal(claudeProjectSettings.permissions.deny.includes('Write(/.git/**)'), true);
+assert.equal(claudeProjectSettings.permissions.deny.includes('Edit(/node_modules/**)'), true);
 assert.match(claude.buildClaudePrompt({ systemContent: 'System', merged: [], attachments: [{ kind: 'file', path: claudeAttachmentPath }] }), /attachment\.bin/);
 const claudeStatus = await claude.getClaudeStatus();
 assert.equal(typeof claudeStatus.installed, 'boolean');

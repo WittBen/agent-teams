@@ -2,6 +2,20 @@
 
 All notable changes are documented here. The project follows semantic versioning while APIs remain subject to beta changes.
 
+## 1.1.0-beta.3 - 2026-08-28
+
+### Changed
+
+- The detached task window now opens only when the user selects the task-plan button.
+- A selected group project folder is shared automatically across team agents for bounded file reading and writing; saved text artifacts are also passed to later API-backed agents as limited context.
+- The bundled Excalidraw MCP preset is disabled by default and can be enabled manually when needed.
+- Automated beta builds are published as the repository's visible latest release while remaining clearly labelled as beta software.
+
+### Security
+
+- CLI project access is accepted only for project folders explicitly configured and trusted through the app.
+- Claude project tools are limited to read, write and edit operations, with protected project paths denied.
+
 ## 1.1.0-beta.2 - 2026-08-28
 
 ### Fixed
