@@ -76,6 +76,9 @@ function createCredentialStore(store, safeStorage) {
     const next = {
       claudeCli: updates.claudeCli === undefined ? Boolean(current.claudeCli) : Boolean(updates.claudeCli),
       claudeSubscriptionType: String(updates.claudeSubscriptionType ?? current.claudeSubscriptionType ?? '').slice(0, 80),
+      // Existing installations used Codex without an explicit enable flag.
+      // Preserve that behavior until the user deliberately clicks "Trennen".
+      codexCli: updates.codexCli === undefined ? current.codexCli !== false : Boolean(updates.codexCli),
     };
     store.set(PROVIDER_SETTINGS_KEY, next);
     return next;
@@ -91,6 +94,7 @@ function createCredentialStore(store, safeStorage) {
       anthropicSource: process.env.ANTHROPIC_API_KEY?.trim() ? 'environment' : hasSecret('anthropic') ? 'secure-storage' : '',
       claudeCli: Boolean(settings.claudeCli),
       claudeSubscriptionType: settings.claudeSubscriptionType || '',
+      codexCli: settings.codexCli !== false,
       providerConfigured: configuredProviders(),
     };
   }
@@ -117,7 +121,7 @@ function createCredentialStore(store, safeStorage) {
     }
     writeEncryptedMap(encrypted);
     updateProviderSecrets(updates.providers);
-    if (updates.claudeCli !== undefined || updates.claudeSubscriptionType !== undefined) {
+    if (updates.claudeCli !== undefined || updates.claudeSubscriptionType !== undefined || updates.codexCli !== undefined) {
       setProviderSettings(updates);
     }
     return status();
@@ -142,6 +146,7 @@ function createCredentialStore(store, safeStorage) {
     setProviderSettings({
       claudeCli: Boolean(legacy.claudeCli || legacy.claudeOAuthToken),
       claudeSubscriptionType: legacy.claudeSubscriptionType || '',
+      codexCli: legacy.codexCli === undefined ? true : Boolean(legacy.codexCli),
     });
 
     // Never keep an OAuth token or API key in the ordinary JSON store. If OS

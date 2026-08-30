@@ -14,7 +14,7 @@
  * Contains: objective, constraints, context, handoff (if any), requested output.
  * Does NOT include full conversation history.
  */
-export function buildTaskCapsule({ agentName, agentRole, objective, constraints = [], context = [], handoff = null, requestedOutput = [] }) {
+export function buildTaskCapsule({ agentName, agentRole, objective, constraints = [], context = [], handoff = null, requestedOutput = [], acceptanceCriteria = [] }) {
   const lines = [`# Task für ${agentName} (${agentRole})`];
   lines.push(`\n## Objective\n${objective}`);
   if (constraints.length) lines.push(`\n## Constraints\n${constraints.map(c => `- ${c}`).join('\n')}`);
@@ -26,6 +26,12 @@ export function buildTaskCapsule({ agentName, agentRole, objective, constraints 
     if (handoff.openQuestions?.length) lines.push(`Offene Fragen:\n${handoff.openQuestions.map(q => `- ${q}`).join('\n')}`);
   }
   if (requestedOutput.length) lines.push(`\n## Erwarteter Output\n${requestedOutput.map(o => `- ${o}`).join('\n')}`);
+  if (acceptanceCriteria.length) {
+    lines.push(`\n## Verbindliche Abnahmekriterien\n${acceptanceCriteria.map(criterion =>
+      `- [${criterion.id}] ${criterion.text} (Prüfung: ${criterion.verification || 'reviewer'}${criterion.required === false ? ', optional' : ', erforderlich'})`
+    ).join('\n')}`);
+    lines.push(`\n## Nachweisformat\nLiefere für jedes bearbeitete Kriterium einen konkreten Nachweis in diesem Block:\n[[TASK_EVIDENCE]]\n{"evidence":[{"criterionId":"kriterium-id","summary":"Konkreter, überprüfbarer Nachweis","kind":"result"}]}\n[[/TASK_EVIDENCE]]`);
+  }
   return lines.join('\n');
 }
 
@@ -350,6 +356,10 @@ export function buildUserAnswerTask({ askingAgent, question = '', answer }) {
 
 const TASK_PLAN_BLOCK = /\[\[TASK_PLAN\]\]\s*([\s\S]*?)\s*\[\[\/TASK_PLAN\]\]/i;
 const TASK_PLAN_BLOCK_GLOBAL = /\[\[TASK_PLAN\]\]\s*[\s\S]*?\s*\[\[\/TASK_PLAN\]\]/gi;
+const TASK_EVIDENCE_BLOCK = /\[\[TASK_EVIDENCE\]\]\s*([\s\S]*?)\s*\[\[\/TASK_EVIDENCE\]\]/i;
+const TASK_EVIDENCE_BLOCK_GLOBAL = /\[\[TASK_EVIDENCE\]\]\s*[\s\S]*?\s*\[\[\/TASK_EVIDENCE\]\]/gi;
+const ACCEPTANCE_REVIEW_BLOCK = /\[\[ACCEPTANCE_REVIEW\]\]\s*([\s\S]*?)\s*\[\[\/ACCEPTANCE_REVIEW\]\]/i;
+const ACCEPTANCE_REVIEW_BLOCK_GLOBAL = /\[\[ACCEPTANCE_REVIEW\]\]\s*[\s\S]*?\s*\[\[\/ACCEPTANCE_REVIEW\]\]/gi;
 
 function normalizePlanId(value) {
   return String(value || '')
@@ -392,6 +402,23 @@ export function extractTaskPlan(reply) {
           : type === 'task' && !parentId && dependsOn.length === 0
             ? 'parallel'
             : 'sequential';
+      const acceptanceCriteria = (Array.isArray(candidate?.acceptanceCriteria) ? candidate.acceptanceCriteria : [])
+        .slice(0, 12)
+        .map((criterion, criterionIndex) => {
+          const text = String(typeof criterion === 'string' ? criterion : criterion?.text || '')
+            .replace(/\s+/g, ' ').trim().slice(0, 300);
+          if (!text) return null;
+          const verification = ['reviewer', 'automatic', 'user'].includes(criterion?.verification)
+            ? criterion.verification
+            : 'reviewer';
+          return {
+            id: normalizePlanId(typeof criterion === 'object' ? criterion?.id : '') || `${id}-criterion-${criterionIndex + 1}`,
+            text,
+            required: criterion?.required !== false,
+            verification,
+          };
+        })
+        .filter(Boolean);
       tasks.push({
         id,
         title,
@@ -400,13 +427,63 @@ export function extractTaskPlan(reply) {
         parentId,
         dependsOn,
         executionMode,
+        acceptanceCriteria,
         order: index,
       });
     }
-    return tasks.length ? { version: 1, tasks } : null;
+    return tasks.length ? { version: 2, tasks } : null;
   } catch {
     return null;
   }
+}
+
+function parseJsonControlBlock(reply, pattern) {
+  const match = String(reply || '').match(pattern);
+  if (!match) return null;
+  try {
+    return JSON.parse(match[1].trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, ''));
+  } catch {
+    return null;
+  }
+}
+
+export function extractTaskEvidence(reply) {
+  const parsed = parseJsonControlBlock(reply, TASK_EVIDENCE_BLOCK);
+  const source = Array.isArray(parsed) ? parsed : parsed?.evidence;
+  if (!Array.isArray(source)) return [];
+  return source.slice(0, 20).map(candidate => {
+    const criterionId = normalizePlanId(candidate?.criterionId || candidate?.id);
+    const summary = String(candidate?.summary || candidate?.evidence || '').replace(/\s+/g, ' ').trim().slice(0, 1200);
+    if (!criterionId || !summary) return null;
+    return {
+      criterionId,
+      summary,
+      kind: String(candidate?.kind || 'result').replace(/\s+/g, '-').toLowerCase().slice(0, 40),
+    };
+  }).filter(Boolean);
+}
+
+export function extractAcceptanceReview(reply) {
+  const parsed = parseJsonControlBlock(reply, ACCEPTANCE_REVIEW_BLOCK);
+  if (!parsed) return [];
+  const flat = Array.isArray(parsed) ? parsed : Array.isArray(parsed.decisions) ? parsed.decisions : [];
+  const nested = Array.isArray(parsed?.tasks)
+    ? parsed.tasks.flatMap(task => (task?.criteria || []).map(criterion => ({ ...criterion, taskId: task.taskId || task.id })))
+    : [];
+  return [...flat, ...nested].slice(0, 100).map(candidate => {
+    const taskId = normalizePlanId(candidate?.taskId);
+    const criterionId = normalizePlanId(candidate?.criterionId || candidate?.id);
+    const statusAliases = { approved: 'passed', accepted: 'passed', rejected: 'failed', exception: 'waived' };
+    const requestedStatus = String(candidate?.status || '').toLowerCase();
+    const status = statusAliases[requestedStatus] || requestedStatus;
+    if (!taskId || !criterionId || !['passed', 'failed', 'waived'].includes(status)) return null;
+    return {
+      taskId,
+      criterionId,
+      status,
+      note: String(candidate?.note || candidate?.reason || '').replace(/\s+/g, ' ').trim().slice(0, 600),
+    };
+  }).filter(Boolean);
 }
 
 export function stripTaskPlan(reply) {
@@ -549,6 +626,8 @@ export function cleanAgentReply(reply) {
   }
   parts.push(value.slice(cursor));
   return stripTaskPlan(parts.join(''))
+    .replace(TASK_EVIDENCE_BLOCK_GLOBAL, '')
+    .replace(ACCEPTANCE_REVIEW_BLOCK_GLOBAL, '')
     .replace(/\[\[(?:TASK_DONE|PROJECT_DONE)\]\]/gi, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
@@ -620,8 +699,9 @@ export function hasProjectDoneSignal(reply) {
   return /\[\[PROJECT_DONE\]\]/i.test(reply || '');
 }
 
-export function shouldCompleteProject({ isOrchestrator, source, reply, handoffCount, pendingTaskCount, asksUser }) {
+export function shouldCompleteProject({ isOrchestrator, source, reply, handoffCount, pendingTaskCount, asksUser, acceptanceReady = true }) {
   if (!isOrchestrator || asksUser || handoffCount > 0) return false;
+  if (!acceptanceReady) return false;
   if (source === 'turn-limit-review' && (hasProjectDoneSignal(reply) || pendingTaskCount === 0)) return true;
   if (pendingTaskCount > 0) return false;
   return hasProjectDoneSignal(reply) || source === 'team-synthesis';
@@ -653,6 +733,7 @@ export function shouldRequestPMFinalReview({
   hasActivePlan = false,
   useLeanFastPath = false,
   asksUser = false,
+  requiresAcceptanceReview = false,
 } = {}) {
   if (!pm || !agent || agent.id === pm.id) return false;
 
@@ -669,6 +750,7 @@ export function shouldRequestPMFinalReview({
     handoffCount === 0 &&
     !asksUser &&
     !hasActivePlan &&
+    !requiresAcceptanceReview &&
     !/recovery|review/i.test(taskSource);
   return !skipFastFinalReview;
 }
@@ -841,11 +923,11 @@ export class AgentTaskQueue {
   }
 
   next() {
-    while (this.tasks.length && this.turns < this.maxTurns) {
+    while (this.tasks.length && (this.maxTurns === 0 || this.turns < this.maxTurns)) {
       const task = this.tasks.shift();
       const key = taskFingerprint(task);
       const count = this.agentTurns.get(task.agent.id) || 0;
-      if (this.completed.has(key) || count >= this.maxTurnsPerAgent) continue;
+      if (this.completed.has(key) || (this.maxTurnsPerAgent > 0 && count >= this.maxTurnsPerAgent)) continue;
       this.completed.add(key);
       this.agentTurns.set(task.agent.id, count + 1);
       this.turns += 1;
@@ -884,7 +966,7 @@ export class AgentTaskQueue {
   }
 
   get length() { return this.tasks.length; }
-  get reachedLimit() { return this.turns >= this.maxTurns && this.tasks.length > 0; }
+  get reachedLimit() { return this.maxTurns > 0 && this.turns >= this.maxTurns && this.tasks.length > 0; }
   pendingTasks() { return this.tasks.map(task => ({ ...task })); }
   clear() { this.tasks.length = 0; }
 }
@@ -893,11 +975,19 @@ export class AgentTaskQueue {
  * Build system content for an isolated agent session.
  * Much more focused than the full group-chat system prompt.
  */
-export function buildIsolatedSystemPrompt({ agent, groupName, groupAgentNames = [], groupAgents = [], memoryNamespace, projectPath = '', isOrchestrator = false, isDirectChat = false }) {
+export function buildIsolatedSystemPrompt({ agent, groupName, groupAgentNames = [], groupAgents = [], memoryNamespace, projectPath = '', reviewEnvironment = null, isOrchestrator = false, isDirectChat = false }) {
   const base = agent.systemPrompt || 'Du bist ein hilfreicher Assistent.';
   const availableAgentLabels = groupAgents.length
     ? groupAgents.map(groupAgent => `${groupAgent.name} (${groupAgent.role || 'Agent'})`)
     : groupAgentNames;
+  const configuredTestCommand = String(reviewEnvironment?.test?.command || '').trim();
+  const configuredPreviewCommand = String(reviewEnvironment?.preview?.command || '').trim();
+  const reviewRules = configuredTestCommand || configuredPreviewCommand ? `
+• Für diese Gruppe ist eine kontrollierte Prüf- und Vorschauumgebung konfiguriert. Prozesse verwenden den Projektordner als Arbeitsordner, sind aber keine Betriebssystem-Sandbox.
+${configuredTestCommand ? `• Konfigurierter Prüfbefehl: ${configuredTestCommand} ${(reviewEnvironment?.test?.args || []).join(' ')}` : ''}
+${configuredPreviewCommand ? `• Konfigurierter Vorschauprozess: ${configuredPreviewCommand} ${(reviewEnvironment?.preview?.args || []).join(' ')}` : ''}
+${reviewEnvironment?.previewUrl ? `• Vorschau-URL: ${reviewEnvironment.previewUrl}` : ''}
+• Wenn du als Prüfer eine Testaufgabe erhältst, werte die automatisch bereitgestellte Prüfausgabe aus. Behaupte niemals einen visuellen Test, den du nicht tatsächlich durchgeführt hast.` : '';
   const projectRules = projectPath ? `
 
 PROJEKTORDNER:
@@ -910,7 +1000,7 @@ PROJEKTORDNER:
   \`\`\`\`
 • Verwende für den äußeren file:-Block immer VIER Backticks. Dadurch dürfen Markdown-Dateien innen normale DREIFACHE Codeblöcke enthalten, ohne abgeschnitten zu werden.
 • Verwende ausschließlich relative Pfade innerhalb des Zielordners.
-• Beende einen erledigten Einzel-Task mit [[TASK_DONE]].` : `
+• Beende einen erledigten Einzel-Task mit [[TASK_DONE]].${reviewRules}` : `
 
 PROJEKTORDNER:
 • Es ist kein Zielordner konfiguriert. Wenn die Aufgabe Dateien erzeugen soll, frage @user nach der Konfiguration in den Gruppeneinstellungen.`;
@@ -954,9 +1044,11 @@ DEINE ROLLE:
 AUFGABENPLAN:
 • Bei der ersten User-Aufgabe musst du vor deiner normalen Antwort den vollständigen geplanten Ablauf als gültiges JSON in genau diesem Block liefern:
 [[TASK_PLAN]]
-{"tasks":[{"id":"implementierung","title":"Konkrete Aufgabe","agent":"Max","type":"task","parentId":null,"dependsOn":[],"executionMode":"parallel"},{"id":"final-review","title":"Finale PM-Abnahme","agent":"PM","type":"review","parentId":null,"dependsOn":["implementierung"],"executionMode":"sequential"}]}
+{"tasks":[{"id":"fachaufgabe","title":"Konkretes Ergebnis erstellen","agent":"Max","type":"task","parentId":null,"dependsOn":[],"executionMode":"parallel","acceptanceCriteria":[{"id":"ergebnis-vollstaendig","text":"Das geforderte Ergebnis ist vollständig und überprüfbar vorhanden.","required":true,"verification":"reviewer"}]},{"id":"final-review","title":"Finale PM-Abnahme","agent":"PM","type":"review","parentId":null,"dependsOn":["fachaufgabe"],"executionMode":"sequential","acceptanceCriteria":[]}]}
 [[/TASK_PLAN]]
 • Plane alle absehbaren Aufgaben einschließlich Tests und genau einer finalen PM-Abnahme. Halte den Plan bei kleinen Anforderungen entsprechend klein.
+• Jede Fachaufgabe erhält ein bis fünf konkrete acceptanceCriteria. Formuliere sie fachneutral und anhand des tatsächlich erwarteten Ergebnisses; erfinde keine Softwaretests für Dokument-, Recherche-, Design- oder andere Aufgaben.
+• verification ist "reviewer" für eine inhaltliche Prüfung durch den zuständigen Prüfer, "automatic" für einen tatsächlich verfügbaren deterministischen Nachweis oder "user" nur für eine ausdrücklich notwendige subjektive Freigabe des Users.
 • Prüfe jeden Rollenpool mit mindestens zwei Agenten ausdrücklich auf teilbare Arbeit. Zerlege einen Fachbereich nur dann in mehrere konkrete Teilaufgaben, wenn diese unabhängig erledigt werden können; verteile diese fair auf die Agenten derselben Rolle, markiere sie mit executionMode "parallel" und verbinde sie nicht künstlich durch dependsOn. Nicht sinnvoll teilbare oder voneinander abhängige Arbeit bleibt sequenziell.
 • parentId bildet die fachliche Baumhierarchie; dependsOn enthält IDs der Aufgaben, die vorher abgeschlossen sein müssen.
 • Verwende kurze stabile IDs mit Kleinbuchstaben, Zahlen und Bindestrichen. Agentennamen müssen exakt aus der Liste verfügbarer Agenten stammen.
@@ -975,10 +1067,12 @@ REGELN:
 • Halte Koordinations-Nachrichten knapp (max. 6 Sätze).
 • Halte den Umfang proportional zur User-Anforderung. Erfinde bei kleinen Aufgaben keine zusätzlichen README-, Design- oder Dokumentationspflichten, wenn sie weder verlangt noch für die Funktion erforderlich sind.
 • Im Final-Review vergleichst du alle Ergebnisse mit der ursprünglichen User-Anforderung.
+• Prüfe im Final-Review jeden eingereichten Nachweis gegen sein Abnahmekriterium und liefere die Entscheidungen als gültiges JSON: [[ACCEPTANCE_REVIEW]] {"decisions":[{"taskId":"fachaufgabe","criterionId":"ergebnis-vollstaendig","status":"passed","note":"Konkrete Begründung oder Fundstelle"}]} [[/ACCEPTANCE_REVIEW]]. Zulässige Status sind passed, failed und waived.
+• failed erfordert eine konkrete Korrekturübergabe. Ein erforderliches user-Kriterium darfst du nicht selbst freigeben; frage den User mit @user oder warte auf dessen Entscheidung im Aufgabenfenster.
 • Im Final-Review gelten als vollständig gespeichert markierte Dateiartefakte als vorhanden. Fordere dieselbe Datei nicht erneut an, nur weil der sichtbare Chat ihren Inhalt kompakt darstellt.
 • Delegiere eine bereits erledigte Aufgabe nur erneut, wenn du einen neuen, konkreten Defekt benennst; formuliere dann ausschließlich die nötige Korrektur statt einer kompletten Neuerstellung.
 • Ist noch etwas offen, beende NICHT: adressiere den zuständigen Agenten mit einer konkreten @Name-Aufgabe. Nach dessen Ergebnis erhältst du automatisch einen neuen Final-Review.
-• Ist alles erfüllt, gib dem User eine klare Abschlussantwort, adressiere keinen Agenten mehr und beende mit [[PROJECT_DONE]].
+• Ist alles erfüllt und sind alle erforderlichen Abnahmekriterien bestanden oder ausdrücklich ausgenommen, gib dem User eine klare Abschlussantwort, adressiere keinen Agenten mehr und beende mit [[PROJECT_DONE]].
 • Wenn alle Anforderungen erfüllt, alle notwendigen Dateien geschrieben und keine Tasks oder Blocker offen sind, beende mit [[PROJECT_DONE]].
 • Verwende [[PROJECT_DONE]] niemals zusammen mit @Name-Handoffs oder @user.
 ${memoryNamespace ? `• Shared Memory: memory://${memoryNamespace} — wichtige Erkenntnisse werden dort abgelegt.` : ''}${projectRules}`;
@@ -991,6 +1085,7 @@ Du arbeitest als ${agent.role || 'Agent'} in der Gruppe "${groupName}".
 DEINE SESSION-REGELN:
 • Du bekommst eine isolierte Task-Beschreibung — kein langer Gesprächsverlauf.
 • Bearbeite NUR die dir zugewiesene Aufgabe.
+• Richte dein Ergebnis an den im Task Capsule genannten Abnahmekriterien aus und liefere zu jedem bearbeiteten Kriterium einen konkreten [[TASK_EVIDENCE]]-Nachweis. Ein Nachweis behauptet noch keine Abnahme; die Entscheidung trifft der Prüfer oder User.
 • Wenn du Arbeit an einen anderen Agenten übergeben willst, schreibe eine eigene Zeile als "@Name: konkrete Aufgabe".
 • Ein fertig bearbeitetes Ergebnis wird automatisch an den PM zur abschließenden Prüfung zurückgegeben; dafür musst du den PM nicht eigens erwähnen.
 • Sammle alle @Agent-Zeilen ganz unten, jeweils linkbündig und direkt untereinander. Nach diesen Zeilen folgt kein weiterer Text.

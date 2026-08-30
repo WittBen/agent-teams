@@ -8,7 +8,10 @@ const { AgentAPIServer } = require('./api-server');
 const { callCodexCLI, cancelCodexRun, getCodexStatus, startCodexLogin } = require('./codex-main');
 const { callClaudeCLI, cancelClaudeRun, getClaudeStatus } = require('./claude-main');
 const { writeProjectFile, listProjectFiles } = require('./project-files');
+const { createArtifactSandbox } = require('./artifact-sandbox');
+const { ReviewRunner, commandFingerprint, normalizeReviewEnvironment } = require('./review-runner');
 const { ensureMemoryFile, operateMemoryFile, validateMemoryFilePath } = require('./memory-file');
+const { createLocalMemoryOperationQueue } = require('./memory-local');
 const { McpManager, configFingerprint, normalizeServer } = require('./mcp-manager');
 const { ensureOfficialMcpPreset } = require('./mcp-preset');
 const { createCredentialStore } = require('./credential-store');
@@ -43,6 +46,8 @@ const store = new Store();
 migrateAppData(store);
 const credentialStore = createCredentialStore(store, safeStorage);
 const assertTrustedSender = createSenderValidator({ appRoot: path.join(__dirname, '..'), isDev });
+const artifactSandbox = createArtifactSandbox({ snapshotRoot: path.join(app.getPath('userData'), 'artifact-snapshots') });
+const queueLocalMemoryOperation = createLocalMemoryOperationQueue(store);
 
 function handleIpc(channel, handler) {
   ipcMain.handle(channel, (event, ...args) => {
@@ -80,13 +85,24 @@ function protectMcpServers(servers) {
   }));
 }
 
+function normalizeStoredReviewEnvironment(value) {
+  try { return normalizeReviewEnvironment(value || {}); } catch { return normalizeReviewEnvironment({}); }
+}
+
+function protectGroups(groups) {
+  if (!Array.isArray(groups)) return [];
+  return groups.map(group => ({
+    ...group,
+    mcpServers: protectMcpServers(group?.mcpServers),
+    reviewEnvironment: normalizeStoredReviewEnvironment(group?.reviewEnvironment),
+  }));
+}
+
 function migrateStoredMcpSecrets() {
   const servers = store.get('mcpServers');
   if (Array.isArray(servers)) store.set('mcpServers', protectMcpServers(servers));
   const groups = store.get('groups');
-  if (Array.isArray(groups)) {
-    store.set('groups', groups.map(group => ({ ...group, mcpServers: protectMcpServers(group?.mcpServers) })));
-  }
+  if (Array.isArray(groups)) store.set('groups', protectGroups(groups));
 }
 
 function brandedWindowTitle(detail = '') {
@@ -148,14 +164,19 @@ if (!hasSingleInstanceLock) {
   });
 }
 
-handleIpc('codex-call', async (event, params = {}) => callCodexCLI({
-  ...prepareCliAttachmentParams(params),
-  onProgress: (progress) => {
-    if (!event.sender.isDestroyed()) {
-      event.sender.send('codex-progress', { requestId: params.requestId, ...progress });
-    }
-  },
-}));
+handleIpc('codex-call', async (event, params = {}) => {
+  if (credentialStore.getProviderSettings().codexCli === false) {
+    return { error: 'Codex CLI wurde in den Einstellungen getrennt.', status: 401, disconnected: true };
+  }
+  return callCodexCLI({
+    ...prepareCliAttachmentParams(params),
+    onProgress: (progress) => {
+      if (!event.sender.isDestroyed()) {
+        event.sender.send('codex-progress', { requestId: params.requestId, ...progress });
+      }
+    },
+  });
+});
 handleIpc('codex-cancel', async (_, requestId) => cancelCodexRun(requestId));
 handleIpc('codex-status', async () => getCodexStatus());
 handleIpc('codex-login', async () => startCodexLogin());
@@ -302,6 +323,9 @@ handleIpc('mcp-disconnect', async (_, serverId) => mcpManager.disconnect(serverI
 handleIpc('llm-call', async (_, { provider, model, systemContent, merged, cwd, attachments = [] }) => {
   try {
     if (provider === 'codex') {
+      if (credentialStore.getProviderSettings().codexCli === false) {
+        return { error: 'Codex CLI wurde in den Einstellungen getrennt.', status: 401, disconnected: true };
+      }
       return callCodexCLI(prepareCliAttachmentParams({ systemContent, merged, model, cwd, attachments }));
     }
     if (provider === 'anthropic') {
@@ -337,9 +361,16 @@ ensureOfficialMcpPreset(store);
 
 let taskWindow;
 let taskWindowState = null;
+let reviewWindow;
+let reviewWindowState = null;
 let closingMcpConnections = false;
 let apiServer = null;
 let externalApiError = '';
+const reviewRunner = new ReviewRunner({
+  onOutput: output => {
+    if (reviewWindow && !reviewWindow.isDestroyed()) reviewWindow.webContents.send('review-process-output', output);
+  },
+});
 
 function externalApiConfig() {
   const raw = store.get('externalApi') || {};
@@ -364,6 +395,11 @@ async function deleteConversationData(chatId, { keepGroup = false } = {}) {
   const safeChatId = String(chatId || '').trim().slice(0, 200);
   if (!safeChatId) throw new Error('Chat-ID fehlt.');
   const group = (store.get('groups') || []).find(item => item.id === safeChatId);
+  await Promise.all([
+    reviewRunner.stop({ chatId: safeChatId, action: 'test' }),
+    reviewRunner.stop({ chatId: safeChatId, action: 'preview' }),
+  ]);
+  if (reviewWindowState?.chatId === safeChatId && reviewWindow && !reviewWindow.isDestroyed()) reviewWindow.close();
   for (const key of ['messages', 'conversationStates', 'userRequestQueues', 'taskGraphs', 'mcpPermissions']) {
     removeChatKey(key, safeChatId);
   }
@@ -433,7 +469,7 @@ function redactSensitiveConfiguration(value) {
 
 function exportableUserData() {
   const excluded = new Set([
-    'secureCredentials', 'trustedMcpServers', 'trustedFileSystemPaths', 'apiKeys',
+    'secureCredentials', 'trustedMcpServers', 'trustedReviewCommands', 'trustedFileSystemPaths', 'apiKeys',
   ]);
   return {
     format: 'agent-teams-export',
@@ -508,6 +544,107 @@ function openTaskWindow(nextState = {}) {
   return taskWindow;
 }
 
+function getReviewGroup(chatId) {
+  const safeChatId = String(chatId || '').trim().slice(0, 200);
+  const group = (store.get('groups') || []).find(item => item?.id === safeChatId && item?.type !== 'direct');
+  if (!group) throw new Error('Gruppe wurde nicht gefunden.');
+  const projectPath = assertConfiguredProjectPath(group.projectPath);
+  return { group, projectPath, profile: normalizeReviewEnvironment(group.reviewEnvironment || {}) };
+}
+
+async function ensureReviewCommandTrusted(event, chatId, action, projectPath, config) {
+  const fingerprint = commandFingerprint(projectPath, action, config);
+  const key = `${chatId}:${action}`;
+  const trusted = store.get('trustedReviewCommands') || {};
+  if (trusted[key] === fingerprint) return;
+  const owner = BrowserWindow.fromWebContents(event.sender) || reviewWindow || mainWindow;
+  const label = action === 'test' ? 'Prüfbefehl' : 'Vorschauprozess';
+  const options = {
+    type: 'warning',
+    buttons: ['Abbrechen', 'Befehl erlauben'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+    title: `${label} bestätigen`,
+    message: `Darf Agent Teams diesen ${label.toLowerCase()} im Gruppenordner starten?`,
+    detail: `Ordner: ${projectPath}\nBefehl: ${config.command}\nArgumente: ${config.args.join(' ') || '(keine)'}\n\nDie Freigabe verfällt, sobald sich Ordner, Befehl oder Argumente ändern.`,
+  };
+  const result = owner ? await dialog.showMessageBox(owner, options) : await dialog.showMessageBox(options);
+  if (result.response !== 1) throw new Error(`${label} wurde nicht freigegeben.`);
+  store.set('trustedReviewCommands', { ...trusted, [key]: fingerprint });
+}
+
+function sendReviewWindowState() {
+  if (!reviewWindow || reviewWindow.isDestroyed() || reviewWindow.webContents.isLoading()) return;
+  reviewWindow.webContents.send('review-window-state', reviewWindowState);
+}
+
+function loadReviewWindow() {
+  const distFile = path.join(__dirname, '../dist/index.html');
+  const mainUrl = mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents.getURL() : '';
+  if (isDev && /^https?:/i.test(mainUrl)) {
+    const url = new URL(mainUrl);
+    url.searchParams.set('reviewWindow', '1');
+    return reviewWindow.loadURL(url.toString());
+  }
+  return reviewWindow.loadFile(distFile, { query: { reviewWindow: '1' } });
+}
+
+function openReviewWindow(nextState = {}) {
+  const { group, profile } = getReviewGroup(nextState.chatId);
+  reviewWindowState = {
+    chatId: group.id,
+    chatName: group.name,
+    projectName: path.basename(group.projectPath),
+    windowTitle: nextState.windowTitle || `Prüfumgebung – ${group.name}`,
+    profile: {
+      hasTestCommand: Boolean(profile.test),
+      hasPreviewCommand: Boolean(profile.preview),
+      previewUrl: profile.previewUrl,
+    },
+  };
+  const title = brandedWindowTitle(reviewWindowState.windowTitle);
+  if (reviewWindow && !reviewWindow.isDestroyed()) {
+    reviewWindow.setTitle(title);
+    sendReviewWindowState();
+    if (reviewWindow.isMinimized()) reviewWindow.restore();
+    reviewWindow.show();
+    reviewWindow.focus();
+    return reviewWindow;
+  }
+  reviewWindow = new BrowserWindow({
+    width: 1180,
+    height: 780,
+    minWidth: 760,
+    minHeight: 520,
+    title,
+    show: false,
+    autoHideMenuBar: true,
+    backgroundColor: '#111b21',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
+    },
+  });
+  hardenWindow(reviewWindow);
+  reviewWindow.once('ready-to-show', () => {
+    if (!reviewWindow || reviewWindow.isDestroyed()) return;
+    sendReviewWindowState();
+    reviewWindow.show();
+  });
+  reviewWindow.webContents.on('did-finish-load', sendReviewWindowState);
+  reviewWindow.on('closed', () => {
+    reviewWindow = null;
+    reviewWindowState = null;
+  });
+  loadReviewWindow();
+  return reviewWindow;
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -568,6 +705,7 @@ function createWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null;
     if (taskWindow && !taskWindow.isDestroyed()) taskWindow.close();
+    if (reviewWindow && !reviewWindow.isDestroyed()) reviewWindow.close();
   });
 }
 
@@ -614,10 +752,11 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', (event) => {
   stopExternalApiServer();
-  if (closingMcpConnections || mcpManager.connections.size === 0) return;
+  if (closingMcpConnections) return;
+  if (!reviewRunner.hasActiveRuns() && mcpManager.connections.size === 0) return;
   event.preventDefault();
   closingMcpConnections = true;
-  mcpManager.closeAll().finally(() => app.quit());
+  Promise.all([reviewRunner.stopAll(), mcpManager.closeAll()]).finally(() => app.quit());
 });
 
 // Window controls
@@ -652,6 +791,89 @@ onIpc('task-window-action', (_, action = {}) => {
   mainWindow.webContents.send('task-window-action', action);
 });
 
+// Detached project review and preview environment. All file and process
+// operations resolve the saved group configuration in the main process; the
+// renderer cannot substitute another project path or command.
+handleIpc('review-window-open', (_, state = {}) => {
+  openReviewWindow(state);
+  return { ok: true };
+});
+handleIpc('review-window-get-state', () => reviewWindowState);
+onIpc('review-window-close', () => {
+  if (reviewWindow && !reviewWindow.isDestroyed()) reviewWindow.close();
+});
+handleIpc('review-list', (_, { chatId } = {}) => {
+  const { projectPath } = getReviewGroup(chatId);
+  return artifactSandbox.list({ projectPath });
+});
+handleIpc('review-inspect', async (_, { chatId, relativePath } = {}) => {
+  const { projectPath } = getReviewGroup(chatId);
+  return artifactSandbox.inspect({ projectPath, relativePath });
+});
+handleIpc('review-save-text', async (_, { chatId, relativePath, content, expectedMtimeMs } = {}) => {
+  const { projectPath } = getReviewGroup(chatId);
+  return artifactSandbox.saveText({ projectPath, relativePath, content, expectedMtimeMs });
+});
+handleIpc('review-replace-word', async (_, params = {}) => {
+  const { projectPath } = getReviewGroup(params.chatId);
+  return artifactSandbox.replaceWordText({
+    projectPath,
+    relativePath: params.relativePath,
+    findText: params.findText,
+    replaceText: params.replaceText,
+    replaceAll: Boolean(params.replaceAll),
+    expectedMtimeMs: params.expectedMtimeMs,
+  });
+});
+handleIpc('review-snapshots', (_, { chatId, relativePath = '' } = {}) => {
+  const { projectPath } = getReviewGroup(chatId);
+  return artifactSandbox.listSnapshots({ projectPath, relativePath });
+});
+handleIpc('review-restore', async (event, { chatId, snapshotId } = {}) => {
+  const { projectPath } = getReviewGroup(chatId);
+  const owner = BrowserWindow.fromWebContents(event.sender) || reviewWindow || mainWindow;
+  const options = {
+    type: 'warning', buttons: ['Abbrechen', 'Snapshot wiederherstellen'], defaultId: 0, cancelId: 0, noLink: true,
+    title: 'Projektdatei wiederherstellen',
+    message: 'Soll die ausgewählte Dateiversion wirklich wiederhergestellt werden?',
+    detail: 'Der aktuelle Stand wird zuvor automatisch als neuer Snapshot gesichert.',
+  };
+  const decision = owner ? await dialog.showMessageBox(owner, options) : await dialog.showMessageBox(options);
+  if (decision.response !== 1) return { cancelled: true };
+  return artifactSandbox.restoreSnapshot({ projectPath, snapshotId });
+});
+handleIpc('review-open-file', async (_, { chatId, relativePath } = {}) => {
+  const { projectPath } = getReviewGroup(chatId);
+  const resolved = artifactSandbox.resolveArtifactPath(projectPath, relativePath);
+  const unsafe = new Set([
+    '.exe', '.msi', '.com', '.scr', '.bat', '.cmd', '.ps1', '.vbs', '.js', '.jse', '.wsf', '.wsh',
+    '.lnk', '.reg', '.jar', '.app', '.sh', '.docm', '.dotm', '.xlsm', '.xltm', '.xlam', '.pptm', '.potm', '.ppam',
+  ]);
+  if (unsafe.has(path.extname(resolved.targetPath).toLowerCase())) {
+    shell.showItemInFolder(resolved.targetPath);
+    return { ok: true, revealed: true };
+  }
+  const result = await shell.openPath(resolved.targetPath);
+  return result ? { error: result } : { ok: true };
+});
+handleIpc('review-run', async (event, { chatId, action } = {}) => {
+  const safeAction = action === 'preview' ? 'preview' : 'test';
+  const { projectPath, profile } = getReviewGroup(chatId);
+  const config = profile[safeAction];
+  if (!config) throw new Error(safeAction === 'test' ? 'Kein Prüfbefehl konfiguriert.' : 'Kein Vorschauprozess konfiguriert.');
+  await ensureReviewCommandTrusted(event, chatId, safeAction, projectPath, config);
+  if (safeAction === 'preview') return reviewRunner.startPreview({ chatId, cwd: projectPath, config });
+  return reviewRunner.runTest({ chatId, cwd: projectPath, config, timeoutMs: profile.testTimeoutMs });
+});
+handleIpc('review-stop', (_, { chatId, action = 'preview' } = {}) => reviewRunner.stop({ chatId, action }));
+handleIpc('review-status', (_, { chatId } = {}) => ({ runs: reviewRunner.status(chatId) }));
+handleIpc('review-open-preview-url', async (_, { chatId } = {}) => {
+  const { profile } = getReviewGroup(chatId);
+  if (!profile.previewUrl) throw new Error('Keine Vorschau-URL konfiguriert.');
+  await shell.openExternal(profile.previewUrl);
+  return { ok: true };
+});
+
 // Narrow app-state IPC. Renderer code cannot inspect security credentials or
 // arbitrary electron-store values.
 handleIpc('app-state-get', (_, key) => store.get(assertAllowedStateKey(key)));
@@ -661,8 +883,8 @@ handleIpc('app-state-set', (_, key, value) => {
     ? protectMcpServers(value)
     : allowedKey === 'providerConnections'
       ? normalizeProviderConnections(value, { strict: true })
-    : allowedKey === 'groups' && Array.isArray(value)
-      ? value.map(group => ({ ...group, mcpServers: protectMcpServers(group?.mcpServers) }))
+    : allowedKey === 'groups'
+      ? protectGroups(value)
       : value;
   const serialized = JSON.stringify(protectedValue);
   if (serialized && Buffer.byteLength(serialized) > 50 * 1024 * 1024) {
@@ -699,6 +921,7 @@ handleIpc('provider-credentials-update', (_, updates = {}) => {
     }));
   }
   if (updates.claudeCli !== undefined) safeUpdates.claudeCli = Boolean(updates.claudeCli);
+  if (updates.codexCli !== undefined) safeUpdates.codexCli = Boolean(updates.codexCli);
   if (updates.claudeSubscriptionType !== undefined) {
     safeUpdates.claudeSubscriptionType = String(updates.claudeSubscriptionType).slice(0, 80);
   }
@@ -780,10 +1003,13 @@ handleIpc('user-data-delete-all', async (event) => {
   const decision = owner ? await dialog.showMessageBox(owner, options) : await dialog.showMessageBox(options);
   if (decision.response !== 1) return { cancelled: true };
   stopExternalApiServer();
+  await reviewRunner.stopAll();
   await mcpManager.closeAll();
   store.clear();
   const attachmentRoot = chatAttachmentsRoot();
   if (fs.existsSync(attachmentRoot)) fs.rmSync(attachmentRoot, { recursive: true, force: true });
+  const snapshotRoot = path.join(app.getPath('userData'), 'artifact-snapshots');
+  if (fs.existsSync(snapshotRoot)) fs.rmSync(snapshotRoot, { recursive: true, force: true });
   setImmediate(() => {
     app.relaunch();
     app.exit(0);
@@ -795,6 +1021,8 @@ handleIpc('user-data-delete-all', async (event) => {
 // Serialize all operations per file so parallel agents cannot overwrite one
 // another's entries with stale read/modify/write cycles.
 const memoryFileQueues = new Map();
+
+handleIpc('memory-local-operation', (_, params = {}) => queueLocalMemoryOperation(params));
 
 function queueMemoryFileOperation(filePath, operation) {
   const key = validateMemoryFilePath(filePath).toLowerCase();

@@ -14,6 +14,7 @@ import { SUPPORTED_LANGUAGES, useI18n } from './i18n';
 import McpServerList from './McpConfig';
 import { isRoleUsed, normalizeRoleName } from './agent-roles';
 import { normalizeConversationLimits } from './conversation-limits';
+import { normalizeReviewEnvironment, parseReviewArguments, validateReviewPreviewUrl } from './review-environment';
 
 const EMOJIS = ['🤖', '💡', '⚙️', '🧠', '🎯', '📊', '🔬', '🎨', '📝', '🚀', '💻', '🌍'];
 const COLORS = [0, 1, 2, 3, 4, 5, 6, 7];
@@ -234,6 +235,8 @@ function GroupModal({ group, agents, onClose, onSave }) {
   const [memoryFilePath, setMemoryFilePath] = useState(group?.memory?.provider === 'file' ? (group.memory.filePath || '') : '');
   const [memoryFileError, setMemoryFileError] = useState('');
   const [groupMcpServers, setGroupMcpServers] = useState(Array.isArray(group?.mcpServers) ? group.mcpServers : []);
+  const [reviewEnvironment, setReviewEnvironment] = useState(normalizeReviewEnvironment(group?.reviewEnvironment));
+  const [reviewEnvironmentError, setReviewEnvironmentError] = useState('');
   const [qualityMode, setQualityMode] = useState(group?.qualityRouting?.mode || 'inherit');
 
   React.useEffect(() => {
@@ -295,6 +298,11 @@ function GroupModal({ group, agents, onClose, onSave }) {
       setMemoryFileError(t('Bitte zuerst eine JSON-Memory-Datei auswählen.'));
       return;
     }
+    const reviewUrlError = validateReviewPreviewUrl(reviewEnvironment.previewUrl);
+    if (reviewUrlError) {
+      setReviewEnvironmentError(t(reviewUrlError));
+      return;
+    }
     const namespace = memoryNamespace.trim() || name.trim().toLowerCase().replace(/\s+/g, '-');
     onSave({
       name: name.trim(), emoji, agentIds: selectedAgents,
@@ -306,6 +314,7 @@ function GroupModal({ group, agents, onClose, onSave }) {
         ...(memoryProvider === 'file' ? { filePath: memoryFilePath.trim() } : {}),
       },
       mcpServers: groupMcpServers,
+      reviewEnvironment: normalizeReviewEnvironment(reviewEnvironment),
       qualityRouting: { mode: qualityMode },
     });
     onClose();
@@ -385,6 +394,66 @@ function GroupModal({ group, agents, onClose, onSave }) {
               {t('Noch kein Zielordner eingerichtet. Datei-Aufgaben können erst zuverlässig ausgeführt werden, nachdem du einen Ordner ausgewählt hast.')}
             </div>
           )}
+        </div>
+
+        <div className="form-group review-config-block">
+          <label className="form-label">🧪 {t('Prüf- und Vorschauumgebung')}</label>
+          <div className="review-config-copy">
+            {t('Optional: Lege feste Befehle fest, die Prüfer-Agenten mit diesem Gruppenordner als Arbeitsordner ausführen können.')}
+          </div>
+          <div className="review-config-grid">
+            <div className="review-command-card">
+              <strong>{t('Automatischer Prüfbefehl')}</strong>
+              <label className="form-label">{t('Programm')}</label>
+              <input className="form-input" value={reviewEnvironment.test.command}
+                onChange={event => setReviewEnvironment(current => ({
+                  ...current, test: { ...current.test, command: event.target.value },
+                }))}
+                placeholder={navigator.platform.startsWith('Win') ? 'npm.cmd' : 'npm'} />
+              <label className="form-label">{t('Argumente (eines pro Zeile)')}</label>
+              <textarea className="form-textarea review-command-args" rows={3}
+                value={(reviewEnvironment.test.args || []).join('\n')}
+                onChange={event => setReviewEnvironment(current => ({
+                  ...current, test: { ...current.test, args: parseReviewArguments(event.target.value) },
+                }))}
+                placeholder="test" />
+              <label className="form-label">{t('Zeitlimit')}</label>
+              <select className="form-select" value={reviewEnvironment.testTimeoutMs}
+                onChange={event => setReviewEnvironment(current => ({ ...current, testTimeoutMs: Number(event.target.value) }))}>
+                <option value={60000}>60 {t('Sekunden')}</option>
+                <option value={120000}>120 {t('Sekunden')}</option>
+                <option value={300000}>300 {t('Sekunden')}</option>
+              </select>
+            </div>
+            <div className="review-command-card">
+              <strong>{t('Vorschauprozess')}</strong>
+              <label className="form-label">{t('Programm')}</label>
+              <input className="form-input" value={reviewEnvironment.preview.command}
+                onChange={event => setReviewEnvironment(current => ({
+                  ...current, preview: { ...current.preview, command: event.target.value },
+                }))}
+                placeholder={navigator.platform.startsWith('Win') ? 'npm.cmd' : 'npm'} />
+              <label className="form-label">{t('Argumente (eines pro Zeile)')}</label>
+              <textarea className="form-textarea review-command-args" rows={3}
+                value={(reviewEnvironment.preview.args || []).join('\n')}
+                onChange={event => setReviewEnvironment(current => ({
+                  ...current, preview: { ...current.preview, args: parseReviewArguments(event.target.value) },
+                }))}
+                placeholder={'run\ndev'} />
+              <label className="form-label">{t('Vorschau-URL (optional)')}</label>
+              <input className="form-input" value={reviewEnvironment.previewUrl}
+                onChange={event => {
+                  setReviewEnvironmentError('');
+                  setReviewEnvironment(current => ({ ...current, previewUrl: event.target.value }));
+                }}
+                placeholder="http://localhost:5173" />
+              {reviewEnvironmentError && <div className="review-config-error" role="alert">{reviewEnvironmentError}</div>}
+            </div>
+          </div>
+          <div className="review-config-warning">
+            {t('Vor der ersten Ausführung zeigt die App den vollständigen Befehl zur Bestätigung. Änderungen am Befehl entziehen diese Freigabe automatisch.')}
+            {' '}{t('Freigegebene Prozesse laufen mit deinen Benutzerrechten und sind keine Betriebssystem-Sandbox.')}
+          </div>
         </div>
 
         <div className="form-group quality-config-block">
@@ -469,7 +538,7 @@ function GroupModal({ group, agents, onClose, onSave }) {
         <div className="modal-actions">
           <button className="btn btn-secondary" onClick={onClose}>{t('Abbrechen')}</button>
           <button className="btn btn-primary" onClick={handleSave}
-            disabled={!name.trim() || selectedAgents.length === 0 || (memoryMode !== 'disabled' && memoryProvider === 'file' && !memoryFilePath.trim())}>
+            disabled={!name.trim() || selectedAgents.length === 0 || Boolean(reviewEnvironmentError) || (memoryMode !== 'disabled' && memoryProvider === 'file' && !memoryFilePath.trim())}>
             {group ? t('Speichern') : t('Erstellen')}
           </button>
         </div>
@@ -579,10 +648,27 @@ function SettingsPanel({ onClose }) {
       setCodexStatus({ installed: false, connected: false, error: t('Nur in der Electron-App verfügbar.') });
       return;
     }
-    setCodexStatus(current => ({ ...current, loading: true }));
-    const status = await window.electronAPI.codexStatus();
-    setCodexStatus(status);
-  }, [t]);
+    setCodexStatus(current => ({ ...current, loading: true, error: '' }));
+    try {
+      const status = await window.electronAPI.codexStatus();
+      const enabled = apiKeys?.codexCli !== false;
+      setCodexStatus({
+        ...status,
+        loading: false,
+        available: status.connected,
+        enabled,
+        connected: status.connected && enabled,
+      });
+    } catch (error) {
+      setCodexStatus(current => ({
+        ...current,
+        installed: false,
+        connected: false,
+        loading: false,
+        error: error.message || t('Codex-Verbindung konnte nicht geprüft werden.'),
+      }));
+    }
+  }, [apiKeys?.codexCli, t]);
 
   const refreshClaudeStatus = React.useCallback(async () => {
     if (!window.electronAPI?.claudeStatus) return;
@@ -627,14 +713,40 @@ function SettingsPanel({ onClose }) {
     } catch (error) { setCredentialError(error.message); }
   };
 
-  const handleCodexLogin = async () => {
+  const handleConnectCodexCLI = async () => {
     setCodexStatus(current => ({ ...current, loading: true }));
-    const result = await window.electronAPI?.codexLogin();
-    if (!result?.ok) {
-      setCodexStatus(current => ({ ...current, loading: false, error: result?.error || t('Anmeldung konnte nicht gestartet werden.') }));
-      return;
+    try {
+      const status = await window.electronAPI?.codexStatus();
+      if (!status?.installed) {
+        setCodexStatus({ ...status, connected: false, available: false, loading: false, error: status?.error || t('Codex CLI wurde nicht gefunden.') });
+        return;
+      }
+      if (!status.connected) {
+        const result = await window.electronAPI?.codexLogin();
+        if (!result?.ok) {
+          setCodexStatus({ ...status, connected: false, available: false, loading: false, error: result?.error || t('Anmeldung konnte nicht gestartet werden.') });
+          return;
+        }
+        setCodexStatus({ ...status, connected: false, available: false, loading: false, loginStarted: true, status: result.message });
+        return;
+      }
+      await setApiKeys({ codexCli: true });
+      setCodexStatus({ ...status, connected: true, available: true, enabled: true, loading: false });
+    } catch (error) {
+      setCodexStatus(current => ({ ...current, connected: false, loading: false, error: error.message }));
     }
-    setCodexStatus(current => ({ ...current, loading: false, loginStarted: true, status: result.message }));
+  };
+
+  const handleDisconnectCodexCLI = async () => {
+    await setApiKeys({ codexCli: false });
+    setCodexStatus(current => ({
+      ...current,
+      connected: false,
+      available: current?.available ?? current?.connected ?? false,
+      enabled: false,
+      loading: false,
+      error: '',
+    }));
   };
 
   const handleSave = async () => {
@@ -814,7 +926,7 @@ function SettingsPanel({ onClose }) {
                   <input
                     className="form-input"
                     type="number"
-                    min="3"
+                    min="0"
                     max="50"
                     value={localConversationLimits.maxTurns}
                     onChange={event => setLocalConversationLimits(current => normalizeConversationLimits({
@@ -828,8 +940,8 @@ function SettingsPanel({ onClose }) {
                   <input
                     className="form-input"
                     type="number"
-                    min="1"
-                    max={localConversationLimits.maxTurns}
+                    min="0"
+                    max={localConversationLimits.maxTurns === 0 ? 50 : localConversationLimits.maxTurns}
                     value={localConversationLimits.maxTurnsPerAgent}
                     onChange={event => setLocalConversationLimits(current => normalizeConversationLimits({
                       ...current,
@@ -837,6 +949,9 @@ function SettingsPanel({ onClose }) {
                     }))}
                   />
                 </div>
+              </div>
+              <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 7 }}>
+                {t('0 bedeutet unbegrenzt; beide Grenzen werden unabhängig voneinander angewendet.')}
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 12 }}>
                 <button type="button" role="switch"
@@ -1053,8 +1168,8 @@ function SettingsPanel({ onClose }) {
                 <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
                     <span>⌨️</span>
-                    <strong style={{ fontSize: 13 }}>{t('Codex (lokal)')}</strong>
-                    {codexStatus?.connected && <span style={{ marginLeft: 'auto', color: 'var(--accent)', fontSize: 11 }}>✓ {t('Angemeldet')}</span>}
+                    <strong style={{ fontSize: 13 }}>Codex CLI</strong>
+                    {codexStatus?.connected && <span style={{ marginLeft: 'auto', color: 'var(--accent)', fontSize: 11 }}>✓ {t('Verbunden')}</span>}
                   </div>
                   <div style={{ background: 'var(--bg-primary)', borderRadius: 6, padding: '8px 10px', fontSize: 10, color: 'var(--text-secondary)', lineHeight: 1.5, marginBottom: 10 }}>
                     {t('Anmeldung: Öffne ein Terminal, führe')} <code>codex login</code> {t('aus und schließe die ChatGPT-Anmeldung im geöffneten Browser ab. Prüfe danach hier den Status.')}
@@ -1062,23 +1177,44 @@ function SettingsPanel({ onClose }) {
                   <div style={{ fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.45, marginBottom: 8 }}>
                     {t('Nutzt codex exec mit der lokalen codex login-Sitzung. Zugangsdaten bleiben bei der Codex-CLI.')}
                   </div>
-                  {codexStatus?.version && <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 6 }}>{codexStatus.version}</div>}
-                  {(codexStatus?.status || codexStatus?.error) && (
-                    <div style={{ fontSize: 11, color: codexStatus.connected ? 'var(--accent)' : '#e6a23c', marginBottom: 8 }}>
-                      {codexStatus.error || codexStatus.status}
-                    </div>
+                  {codexStatus?.connected ? (
+                    <>
+                      <div style={{ fontSize: 11, color: 'var(--accent)', marginBottom: 8 }}>
+                        {codexStatus.version || t('angemeldet')}
+                      </div>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <button className="btn btn-secondary" style={{ flex: 1, fontSize: 11 }}
+                          onClick={handleDisconnectCodexCLI}>{t('Trennen')}</button>
+                        <button className="btn btn-secondary" style={{ flex: 1, fontSize: 11 }}
+                          onClick={refreshCodexStatus} disabled={codexStatus?.loading}>
+                          {codexStatus?.loading ? `⏳ ${t('Prüfe…')}` : `↻ ${t('Status prüfen')}`}
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <button className="btn btn-primary" style={{ flex: 1, fontSize: 11 }} onClick={handleConnectCodexCLI}
+                          disabled={codexStatus?.loading || codexStatus?.installed === false}>
+                          🔗 {t('Codex CLI verbinden')}
+                        </button>
+                        <button className="btn btn-secondary" style={{ flex: 1, fontSize: 11 }} onClick={refreshCodexStatus} disabled={codexStatus?.loading}>
+                          {codexStatus?.loading ? `⏳ ${t('Prüfe…')}` : `↻ ${t('Status prüfen')}`}
+                        </button>
+                      </div>
+                      {codexStatus && !codexStatus.loading && (
+                        <div style={{ color: codexStatus.installed ? '#e6a23c' : '#e88', fontSize: 11, marginTop: 8 }}>
+                          {codexStatus.error || (codexStatus.installed
+                            ? codexStatus.enabled === false && codexStatus.available
+                              ? t('Codex CLI wurde von der App getrennt.')
+                              : codexStatus.loginStarted && codexStatus.status
+                                ? codexStatus.status
+                                : t('Codex CLI ist installiert, aber nicht angemeldet.')
+                            : t('Codex CLI wurde nicht gefunden.'))}
+                        </div>
+                      )}
+                    </>
                   )}
-                  <div style={{ display: 'flex', gap: 8 }}>
-                    {!codexStatus?.connected && (
-                      <button className="btn btn-primary" style={{ flex: 1, fontSize: 11 }} onClick={handleCodexLogin}
-                        disabled={codexStatus?.loading || codexStatus?.installed === false}>
-                        🔗 {t('Mit Codex anmelden')}
-                      </button>
-                    )}
-                    <button className="btn btn-secondary" style={{ flex: 1, fontSize: 11 }} onClick={refreshCodexStatus} disabled={codexStatus?.loading}>
-                      {codexStatus?.loading ? `⏳ ${t('Prüfe…')}` : `↻ ${t('Status prüfen')}`}
-                    </button>
-                  </div>
                 </div>
               </div>
             </div>

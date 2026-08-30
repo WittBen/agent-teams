@@ -26,12 +26,16 @@ AI providers and MCP servers are external trust domains. Model output is untrust
 | MCP configuration changes after approval | configuration fingerprint and renewed native trust prompt |
 | MCP tool changes after approval | tool signature invalidates stored permission |
 | Path traversal or arbitrary writes | selected-path trust registry, containment checks, protected directories |
+| Renderer substitutes a review command | main-process lookup of saved group command, configuration fingerprint and native approval |
+| Project edit damages a file | pre-edit snapshots with SHA-256 integrity checks, stale-write detection and conservative DOCX replacement |
 | Oversized requests or tool data | request, attachment, argument and result limits |
 | Accidental data retention | cascading group deletion and documented storage locations |
 
 ## Residual risks
 
 - MCP stdio servers execute with the current user's operating-system permissions.
+- Approved review and preview commands also execute with the current user's
+  operating-system permissions; a working directory is not a security sandbox.
 - A provider or MCP service can retain data according to its own policy.
 - A trusted custom HTTPS hostname can still resolve to private infrastructure;
   only add endpoints whose operator and network destination you understand.

@@ -62,15 +62,15 @@ export class MemoryAPI {
     return this.provider.delete(namespace, id);
   }
 
-  /** Create and store a structured handoff. */
-  async handoff({ from, to, taskId, summary, relevantMemory = [], findings = [], openQuestions = [] }) {
+  /** Create and store a structured handoff inside the group's shared namespace. */
+  async handoff(namespace, { from, to, taskId, summary, relevantMemory = [], findings = [], openQuestions = [] }) {
     const entry = createEntry({
-      type: 'handoff', namespace: `_handoff_${to}`,
+      type: 'handoff', namespace,
       content: { from, to, taskId, summary, relevantMemory, findings, openQuestions },
       tags: ['handoff', to.toLowerCase(), from.toLowerCase()],
       author: from,
     });
-    return this.write(`_handoff_${to}`, entry);
+    return this.write(namespace, entry);
   }
 
   /** List all entries in namespace. */
@@ -85,7 +85,25 @@ export class MemoryAPI {
 
   /** Format top-N search results for LLM injection. */
   async getContextForAgent(namespace, query, agentName, limit = 5) {
-    const results = await this.search(namespace, query, limit);
+    const [relevant, allEntries] = await Promise.all([
+      this.search(namespace, query, limit),
+      this.list(namespace),
+    ]);
+    const normalizedAgent = String(agentName || '').trim().toLowerCase();
+    const targetedHandoffs = allEntries
+      .filter(entry => entry?.status !== 'archived'
+        && entry?.type === 'handoff'
+        && String(entry?.content?.to || '').trim().toLowerCase() === normalizedAgent)
+      .slice(-Math.min(3, limit))
+      .reverse();
+    const visibleRelevant = relevant.filter(entry => entry?.type !== 'handoff'
+      || String(entry?.content?.to || '').trim().toLowerCase() === normalizedAgent);
+    const seen = new Set();
+    const results = [...targetedHandoffs, ...visibleRelevant].filter(entry => {
+      if (!entry?.id || seen.has(entry.id)) return false;
+      seen.add(entry.id);
+      return true;
+    }).slice(0, limit);
     if (!results.length) return '';
     const lines = results.map(e => {
       const tags = e.tags?.length ? ` [${e.tags.join(', ')}]` : '';
@@ -117,13 +135,20 @@ export class ElectronStoreProvider {
     }
   }
 
+  _operation(action, namespace, params = {}) {
+    const operation = window.electronAPI?.memoryLocalOperation;
+    return operation ? operation({ action, namespace, ...params }) : null;
+  }
+
   _score(entry, terms) {
     const text = (typeof entry.content === 'string' ? entry.content : JSON.stringify(entry.content)).toLowerCase()
-      + ' ' + (entry.tags || []).join(' ');
+      + ' ' + (Array.isArray(entry.tags) ? entry.tags.join(' ') : '');
     return terms.reduce((s, t) => s + (text.split(t.toLowerCase()).length - 1), 0);
   }
 
   async search(namespace, query, limit = 5) {
+    const atomic = this._operation('search', namespace, { query, limit });
+    if (atomic) return atomic;
     const entries = (await this._load(namespace)).filter(e => e.status !== 'archived');
     const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
     if (!terms.length) return entries.slice(-limit);
@@ -136,10 +161,14 @@ export class ElectronStoreProvider {
   }
 
   async read(namespace, id) {
+    const atomic = this._operation('read', namespace, { id });
+    if (atomic) return atomic;
     return (await this._load(namespace)).find(e => e.id === id) || null;
   }
 
   async write(namespace, entry) {
+    const atomic = this._operation('write', namespace, { entry });
+    if (atomic) return atomic;
     const entries = await this._load(namespace);
     entries.push(entry);
     await this._save(namespace, entries);
@@ -147,6 +176,8 @@ export class ElectronStoreProvider {
   }
 
   async update(namespace, id, updates) {
+    const atomic = this._operation('update', namespace, { id, updates });
+    if (atomic) return atomic;
     const entries = await this._load(namespace);
     const idx = entries.findIndex(e => e.id === id);
     if (idx === -1) return null;
@@ -156,6 +187,8 @@ export class ElectronStoreProvider {
   }
 
   async delete(namespace, id) {
+    const atomic = this._operation('delete', namespace, { id });
+    if (atomic) return atomic;
     const entries = await this._load(namespace);
     const nextEntries = entries.filter(entry => entry.id !== id);
     if (nextEntries.length === entries.length) return { ok: false, deleted: false };
@@ -164,10 +197,14 @@ export class ElectronStoreProvider {
   }
 
   async list(namespace) {
+    const atomic = this._operation('list', namespace);
+    if (atomic) return atomic;
     return this._load(namespace);
   }
 
   async clear(namespace) {
+    const atomic = this._operation('clear', namespace);
+    if (atomic) return atomic;
     await this._save(namespace, []);
   }
 }

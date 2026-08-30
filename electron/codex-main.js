@@ -8,8 +8,30 @@ const CODEX_IDLE_TIMEOUT_MS = 120000;
 const CODEX_HARD_TIMEOUT_MS = 15 * 60 * 1000;
 const activeCodexRuns = new Map();
 
+function resolveCodexCommand({
+  platform = process.platform,
+  env = process.env,
+  homeDir = os.homedir(),
+  existsSync = fs.existsSync,
+} = {}) {
+  if (platform !== 'win32') return 'codex';
+
+  // A packaged app started through Explorer does not always inherit the same
+  // PATH as the user's terminal. Check the standard desktop and local install
+  // locations explicitly before falling back to PATH lookup.
+  const candidates = [
+    env.CODEX_CLI_PATH,
+    env.LOCALAPPDATA && path.win32.join(env.LOCALAPPDATA, 'Programs', 'OpenAI', 'Codex', 'bin', 'codex.exe'),
+    homeDir && path.win32.join(homeDir, '.local', 'bin', 'codex.exe'),
+    env.APPDATA && path.win32.join(env.APPDATA, 'npm', 'codex.exe'),
+  ].filter(Boolean);
+  return candidates.find(candidate => {
+    try { return existsSync(candidate); } catch { return false; }
+  }) || 'codex.exe';
+}
+
 function codexCommand() {
-  return process.platform === 'win32' ? 'codex.exe' : 'codex';
+  return resolveCodexCommand();
 }
 
 function cleanProgressText(value, maxLength = 180) {
@@ -328,6 +350,7 @@ async function callCodexCLI({ systemContent, merged, model, cwd, attachments = [
   codexImageArgs,
   describeCodexEvent,
   getCodexStatus,
+  resolveCodexCommand,
   startCodexLogin,
   runCodex,
 };

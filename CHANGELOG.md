@@ -2,6 +2,52 @@
 
 All notable changes are documented here. The project follows semantic versioning while APIs remain subject to beta changes.
 
+## 1.1.0-beta.7 - 2026-08-30
+
+### Changed
+
+- Prepared the current application state for automated beta distribution.
+
+## 1.1.0-beta.6 - 2026-08-30
+
+### Changed
+
+- Prepared the current application state for automated beta distribution.
+
+## 1.1.0-beta.5 - 2026-08-30
+
+### Release summary
+
+- Prepared the current application state for automated beta distribution.
+
+### Added
+
+- Added a detached, singleton project review window for groups with safe text,
+  image and Word inspection, external opening of additional file formats, and
+  integrity-checked snapshots before supported edits.
+- Added per-group test and preview commands with native first-run approval,
+  bounded output, scrubbed child environments and automatic reviewer-agent test
+  handoff.
+- Added domain-neutral task acceptance criteria, structured agent evidence,
+  PM review decisions, user-only approvals and a persisted completion gate in
+  the detached task tree.
+
+### Security
+
+- Review file access rejects traversal, symlink escapes, sensitive filenames and
+  protected project directories. Stored command approvals are excluded from data
+  exports and invalidated when the folder or command changes.
+- The UI now states explicitly that approved child processes use the group folder
+  as their working directory but are not an operating-system sandbox.
+
+### Fixed
+
+- A task limit of `0` now means unlimited for both group-run tasks and per-agent tasks.
+- Local shared-memory writes are now serialized atomically in the Electron main
+  process, preventing parallel agents from overwriting each other's entries.
+- Agent handoffs are stored in the group's configured memory namespace and are
+  injected only for the addressed agent instead of using global agent-name keys.
+
 ## 1.1.0-beta.4 - 2026-08-28
 
 ### Added

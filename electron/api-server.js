@@ -186,7 +186,7 @@ class AgentAPIServer {
         providers: {
           anthropic: !!(apiKeys.claudeCli || apiKeys.claudeOAuthToken || apiKeys.anthropic),
           openai: !!(apiKeys.openai || process.env.OPENAI_API_KEY),
-          codex: codex.connected,
+          codex: apiKeys.codexCli !== false && codex.connected,
           ...Object.fromEntries(providerConnections.map(provider => [
             provider.id,
             provider.requiresApiKey === false || Boolean(providerSecrets[provider.id]),

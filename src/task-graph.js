@@ -14,8 +14,89 @@ export const TASK_STATUS = {
   interrupted: { label: 'Unterbrochen', color: '#fb923c' },
 };
 
+export const ACCEPTANCE_STATUS = {
+  open: { label: 'Offen', color: '#8696a0' },
+  submitted: { label: 'Nachweis vorhanden', color: '#53bdeb' },
+  passed: { label: 'Bestanden', color: '#00a884' },
+  failed: { label: 'Abgelehnt', color: '#ef4444' },
+  waived: { label: 'Ausnahme bestätigt', color: '#c084fc' },
+};
+
+const ACCEPTED_CRITERION_STATUSES = new Set(['passed', 'waived']);
+const ACCEPTANCE_VERIFICATION = new Set(['reviewer', 'automatic', 'user']);
+
+function normalizeAcceptanceId(value, fallback) {
+  return String(value || fallback || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64);
+}
+
+export function normalizeAcceptanceCriteria(criteria = [], { taskId = 'task', fallbackText = '' } = {}) {
+  const source = Array.isArray(criteria) ? criteria : [];
+  const normalized = [];
+  const seen = new Set();
+  for (const [index, candidate] of source.slice(0, 12).entries()) {
+    const text = String(typeof candidate === 'string' ? candidate : candidate?.text || '')
+      .replace(/\s+/g, ' ').trim().slice(0, 300);
+    if (!text) continue;
+    const id = normalizeAcceptanceId(
+      typeof candidate === 'object' ? candidate?.id : '',
+      `${taskId}-criterion-${index + 1}`,
+    );
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const verification = ACCEPTANCE_VERIFICATION.has(candidate?.verification)
+      ? candidate.verification
+      : 'reviewer';
+    const status = ACCEPTANCE_STATUS[candidate?.status] ? candidate.status : 'open';
+    normalized.push({
+      id,
+      text,
+      required: candidate?.required !== false,
+      verification,
+      status,
+      evidence: Array.isArray(candidate?.evidence) ? candidate.evidence.slice(-8) : [],
+      ...(candidate?.reviewedBy ? { reviewedBy: String(candidate.reviewedBy).slice(0, 80) } : {}),
+      ...(candidate?.reviewedAt ? { reviewedAt: candidate.reviewedAt } : {}),
+    });
+  }
+  if (!normalized.length && fallbackText) {
+    normalized.push({
+      id: normalizeAcceptanceId('', `${taskId}-result`),
+      text: String(fallbackText).replace(/\s+/g, ' ').trim().slice(0, 300),
+      required: true,
+      verification: 'reviewer',
+      status: 'open',
+      evidence: [],
+    });
+  }
+  return normalized;
+}
+
+function mergeAcceptanceCriteria(previous = [], incoming = []) {
+  const existing = new Map((previous || []).map(criterion => [criterion.id, criterion]));
+  return (incoming || []).map(criterion => {
+    const prior = existing.get(criterion.id);
+    return prior ? {
+      ...criterion,
+      status: prior.status || criterion.status,
+      evidence: Array.isArray(prior.evidence) ? prior.evidence : criterion.evidence,
+      ...(prior.reviewedBy ? { reviewedBy: prior.reviewedBy } : {}),
+      ...(prior.reviewedAt ? { reviewedAt: prior.reviewedAt } : {}),
+    } : criterion;
+  });
+}
+
+function requiredCriteriaAccepted(criteria = []) {
+  return criteria.filter(criterion => criterion.required !== false)
+    .every(criterion => ACCEPTED_CRITERION_STATUSES.has(criterion.status));
+}
+
 export function createTaskGraph(chatId, title = 'Aufgabenplan') {
-  return { version: 1, chatId, title, nodes: [], edges: [], updatedAt: Date.now() };
+  return { version: 2, chatId, title, nodes: [], edges: [], updatedAt: Date.now() };
 }
 
 export function taskPlanGraphNodeId(rootNodeId, planTaskId) {
@@ -67,6 +148,13 @@ export function materializeTaskPlan(graph, { rootNodeId, tasks = [] } = {}) {
       planTaskId: task.id,
       planOrder: task.order || 0,
       requestedAgentName: task.requestedAgentName || task.agentName,
+      acceptanceCriteria: mergeAcceptanceCriteria(
+        existing?.acceptanceCriteria,
+        normalizeAcceptanceCriteria(task.acceptanceCriteria, {
+          taskId: task.id,
+          fallbackText: task.type === 'review' ? '' : `Das Ergebnis erfüllt die Aufgabe „${task.title}“.`,
+        }),
+      ),
       createdAt: existing?.createdAt || Date.now() + (task.order || 0),
     };
     if (parentNodeId) node.parentNodeId = parentNodeId;
@@ -271,11 +359,134 @@ export function updateTaskNodeStatus(graph, nodeId, status, extra = {}) {
   };
 }
 
+export function submitTaskEvidence(graph, nodeId, submissions = [], { author = 'Agent', fallbackSummary = '', kind = 'agent' } = {}) {
+  const node = graph?.nodes?.find(candidate => candidate.id === nodeId);
+  if (!node?.acceptanceCriteria?.length) return graph;
+  const submittedByCriterion = new Map();
+  for (const submission of Array.isArray(submissions) ? submissions.slice(0, 20) : []) {
+    const criterionId = normalizeAcceptanceId(submission?.criterionId || submission?.id);
+    const summary = String(submission?.summary || submission?.evidence || '').replace(/\s+/g, ' ').trim().slice(0, 1200);
+    if (!criterionId || !summary) continue;
+    submittedByCriterion.set(criterionId, {
+      summary,
+      kind: String(submission?.kind || kind).slice(0, 40),
+    });
+  }
+  const fallback = String(fallbackSummary || '').replace(/\s+/g, ' ').trim().slice(0, 1200);
+  const createdAt = Date.now();
+  return {
+    ...graph,
+    version: Math.max(2, Number(graph.version) || 1),
+    nodes: graph.nodes.map(candidate => {
+      if (candidate.id !== nodeId) return candidate;
+      const acceptanceCriteria = candidate.acceptanceCriteria.map(criterion => {
+        const submission = submittedByCriterion.get(criterion.id) || (fallback ? { summary: fallback, kind } : null);
+        if (!submission) return criterion;
+        const evidence = [...(criterion.evidence || []), {
+          id: `${criterion.id}-evidence-${createdAt}-${Math.random().toString(36).slice(2, 6)}`,
+          summary: submission.summary,
+          kind: submission.kind,
+          author: String(author || 'Agent').slice(0, 80),
+          createdAt,
+        }].slice(-8);
+        return {
+          ...criterion,
+          status: ACCEPTED_CRITERION_STATUSES.has(criterion.status) ? criterion.status : 'submitted',
+          evidence,
+        };
+      });
+      return { ...candidate, acceptanceCriteria, updatedAt: createdAt };
+    }),
+    updatedAt: createdAt,
+  };
+}
+
+export function applyAcceptanceDecisions(graph, decisions = [], { reviewer = 'PM', userOnly = false } = {}) {
+  if (!graph || !Array.isArray(decisions) || !decisions.length) return graph;
+  const reviewedAt = Date.now();
+  const decisionsByTask = new Map();
+  for (const decision of decisions.slice(0, 100)) {
+    const taskId = String(decision?.taskId || '').trim();
+    const criterionId = normalizeAcceptanceId(decision?.criterionId || decision?.id);
+    const status = ['passed', 'failed', 'waived'].includes(decision?.status) ? decision.status : '';
+    if (!taskId || !criterionId || !status) continue;
+    if (!decisionsByTask.has(taskId)) decisionsByTask.set(taskId, new Map());
+    decisionsByTask.get(taskId).set(criterionId, {
+      status,
+      note: String(decision?.note || '').replace(/\s+/g, ' ').trim().slice(0, 600),
+    });
+  }
+  if (!decisionsByTask.size) return graph;
+  const nodes = graph.nodes.map(node => {
+    const taskDecisions = decisionsByTask.get(node.id) || decisionsByTask.get(node.planTaskId);
+    if (!taskDecisions || !node.acceptanceCriteria?.length) return node;
+    let changed = false;
+    const acceptanceCriteria = node.acceptanceCriteria.map(criterion => {
+      const decision = taskDecisions.get(criterion.id);
+      if (!decision || (userOnly && criterion.verification !== 'user') || (!userOnly && criterion.verification === 'user')) return criterion;
+      changed = true;
+      const evidence = decision.note ? [...(criterion.evidence || []), {
+        id: `${criterion.id}-review-${reviewedAt}`,
+        summary: decision.note,
+        kind: userOnly ? 'user-review' : 'review',
+        author: String(reviewer || 'PM').slice(0, 80),
+        createdAt: reviewedAt,
+      }].slice(-8) : criterion.evidence;
+      return {
+        ...criterion,
+        status: decision.status,
+        evidence,
+        reviewedBy: String(reviewer || 'PM').slice(0, 80),
+        reviewedAt,
+      };
+    });
+    if (!changed) return node;
+    const accepted = requiredCriteriaAccepted(acceptanceCriteria);
+    const failed = acceptanceCriteria.some(criterion => criterion.required !== false && criterion.status === 'failed');
+    const reviewableStatus = ['agent_done', 'blocked', 'completed'].includes(node.status);
+    return {
+      ...node,
+      acceptanceCriteria,
+      ...(accepted && reviewableStatus ? { status: 'completed', pmApprovedAt: reviewedAt, acceptanceBlocked: false } : {}),
+      ...(failed && reviewableStatus ? { status: 'blocked', acceptanceBlocked: true } : {}),
+      updatedAt: reviewedAt,
+    };
+  });
+  return { ...graph, version: Math.max(2, Number(graph.version) || 1), nodes, updatedAt: reviewedAt };
+}
+
+export function summarizeAcceptance(graph, planRootId = null) {
+  const nodes = (graph?.nodes || []).filter(node =>
+    inferTaskNodeType(node) !== 'review' && (!planRootId || node.planRootId === planRootId)
+  );
+  const criteria = nodes.flatMap(node => (node.acceptanceCriteria || []).map(criterion => ({ node, criterion })));
+  const required = criteria.filter(item => item.criterion.required !== false);
+  const unmet = required.filter(item => !ACCEPTED_CRITERION_STATUSES.has(item.criterion.status));
+  return {
+    total: criteria.length,
+    required: required.length,
+    passed: required.length - unmet.length,
+    submitted: required.filter(item => item.criterion.status === 'submitted').length,
+    failed: required.filter(item => item.criterion.status === 'failed').length,
+    userPending: unmet.filter(item => item.criterion.verification === 'user').length,
+    ready: unmet.length === 0,
+    unmet: unmet.map(item => ({
+      taskId: item.node.planTaskId || item.node.id,
+      nodeId: item.node.id,
+      taskTitle: item.node.title,
+      criterionId: item.criterion.id,
+      text: item.criterion.text,
+      status: item.criterion.status,
+      verification: item.criterion.verification,
+    })),
+  };
+}
+
 export function approveAgentDoneTasks(graph) {
   if (!graph) return graph;
   return {
     ...graph,
-    nodes: graph.nodes.map(node => node.status === 'agent_done'
+    nodes: graph.nodes.map(node => node.status === 'agent_done' && requiredCriteriaAccepted(node.acceptanceCriteria || [])
       ? { ...node, status: 'completed', pmApprovedAt: Date.now(), updatedAt: Date.now() }
       : node),
     updatedAt: Date.now(),

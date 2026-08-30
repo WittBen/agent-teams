@@ -21,6 +21,11 @@ const mcpConfigSource = await fs.readFile(path.join(root, 'src/McpConfig.jsx'), 
 const indexCssSource = await fs.readFile(path.join(root, 'src/index.css'), 'utf8');
 const rendererEntrySource = await fs.readFile(path.join(root, 'src/main.jsx'), 'utf8');
 const taskGraphWindowSource = await fs.readFile(path.join(root, 'src/TaskGraphWindow.jsx'), 'utf8');
+const taskGraphPanelSource = await fs.readFile(path.join(root, 'src/TaskGraphPanel.jsx'), 'utf8');
+const reviewWindowSource = await fs.readFile(path.join(root, 'src/ReviewWindow.jsx'), 'utf8');
+const reviewEnvironmentSource = await fs.readFile(path.join(root, 'src/review-environment.js'), 'utf8');
+const artifactSandboxSource = await fs.readFile(path.join(root, 'electron/artifact-sandbox.js'), 'utf8');
+const reviewRunnerSource = await fs.readFile(path.join(root, 'electron/review-runner.js'), 'utf8');
 const indexSource = await fs.readFile(path.join(root, 'index.html'), 'utf8');
 const packageJson = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8'));
 const hiddenStarterSource = await fs.readFile(path.join(root, 'start.vbs'), 'utf8');
@@ -51,6 +56,30 @@ assert.match(codexMainSource, /--sandbox', cwd \? 'workspace-write' : 'read-only
 assert.match(electronMainSource, /ensureOfficialMcpPreset\(store\)/);
 assert.match(electronMainSource, /brandedWindowTitle\(nextState\.windowTitle \|\| 'Aufgabenbaum'\)/);
 assert.match(taskGraphWindowSource, /document\.title = `Agent Teams – \$\{detail\}`/);
+assert.match(taskGraphWindowSource, /acceptance-decision/);
+assert.match(taskGraphPanelSource, /Abnahmekriterien[\s\S]*User-Freigabe[\s\S]*onAcceptanceDecision/);
+assert.match(electronMainSource, /let reviewWindow;/);
+assert.match(electronMainSource, /reviewWindow = new BrowserWindow\([\s\S]*sandbox: true/);
+assert.match(electronMainSource, /review-window-open[\s\S]*review-list[\s\S]*review-run/);
+assert.match(electronMainSource, /ensureReviewCommandTrusted[\s\S]*trustedReviewCommands/);
+assert.match(electronMainSource, /'trustedReviewCommands'[\s\S]*'trustedFileSystemPaths'/);
+assert.match(preloadSource, /openReviewWindow:[\s\S]*reviewInspect:[\s\S]*reviewRun:/);
+assert.match(preloadSource, /memoryLocalOperation:[\s\S]*memory-local-operation/);
+assert.match(rendererEntrySource, /isReviewWindow[\s\S]*<ReviewWindow \/>/);
+assert.match(reviewWindowSource, /review-word-preview/);
+assert.match(reviewWindowSource, /reviewSnapshots/);
+assert.match(reviewWindowSource, /reviewRun/);
+assert.match(reviewEnvironmentSource, /validateReviewPreviewUrl/);
+assert.match(artifactSandboxSource, /assertNoSymlinkTraversal[\s\S]*loadBoundedDocx[\s\S]*createSnapshot[\s\S]*replaceWordText/);
+assert.match(reviewRunnerSource, /safeChildEnvironment[\s\S]*shell: false[\s\S]*commandFingerprint/);
+assert.match(electronMainSource, /before-quit[\s\S]*hasActiveRuns\(\)[\s\S]*Promise\.all\(\[reviewRunner\.stopAll\(\), mcpManager\.closeAll\(\)\]\)/);
+assert.match(modalsSource, /Prüf- und Vorschauumgebung[\s\S]*Automatischer Prüfbefehl[\s\S]*Vorschauprozess/);
+assert.match(chatViewSource, /shouldRunConfiguredReview[\s\S]*reviewRun\(chat\.id, 'test'\)/);
+assert.match(chatViewSource, /normalizeAcceptanceCriteria\(task\.acceptanceCriteria[\s\S]*vollständig und überprüfbar/);
+assert.match(chatViewSource, /acceptanceReady: acceptanceSummary\.ready/);
+assert.match(chatViewSource, /reviewStop\(chat\.id, 'test'\)/);
+assert.match(chatViewSource, /memAPI\.handoff\(memoryNamespace, handoff\)/);
+assert.equal((chatViewSource.match(/openReviewWindow\(/g) || []).length, 1);
 assert.match(chatViewSource, /typing-agent-name[\s\S]*agent\?\.name[\s\S]*typing-agent-role[\s\S]*agent\?\.role[\s\S]*typing-indicator/);
 assert.match(chatViewSource, /buildRelevantConversationHistory\(\{[\s\S]*includeGroupContext: !isDirectChat && task\.source === 'user'/);
 assert.match(chatViewSource, /onCreateEntry=\{handleCreateMemoryEntry\}/);
@@ -97,6 +126,10 @@ assert.match(modalsSource, /Weitere API-Anbieter/);
 assert.match(modalsSource, /data-testid="anthropic-auth-group"/);
 assert.match(modalsSource, /data-testid="openai-auth-group"/);
 assert.match(modalsSource, /onClick=\{refreshClaudeStatus\}/);
+assert.match(modalsSource, /onClick=\{refreshCodexStatus\}/);
+assert.match(modalsSource, /Codex CLI verbinden/);
+assert.match(modalsSource, /setApiKeys\(\{ codexCli: false \}\)/);
+assert.match(electronMainSource, /Codex CLI wurde in den Einstellungen getrennt/);
 assert.match(modalsSource, /<code>claude<\/code>/);
 assert.match(modalsSource, /<code>codex login<\/code>/);
 assert.equal((modalsSource.match(/Claude Code CLI verbinden/g) || []).length, 1);
@@ -138,7 +171,12 @@ assert.deepEqual(conversationLimits.normalizeConversationLimits({
 }), { maxTurns: 50, maxTurnsPerAgent: 50, pmReviewOnLimit: false });
 assert.deepEqual(conversationLimits.normalizeConversationLimits({ maxTurns: 2, maxTurnsPerAgent: 0 }), {
   maxTurns: 3,
-  maxTurnsPerAgent: 1,
+  maxTurnsPerAgent: 0,
+  pmReviewOnLimit: true,
+});
+assert.deepEqual(conversationLimits.normalizeConversationLimits({ maxTurns: 0, maxTurnsPerAgent: 0 }), {
+  maxTurns: 0,
+  maxTurnsPerAgent: 0,
   pmReviewOnLimit: true,
 });
 assert.match(chatViewSource, /maxTurns: conversationLimits\.maxTurns/);
@@ -615,6 +653,48 @@ assert.equal(taskGraph.isTaskNodeReady(plannedGraph, plannedIds.qa), true);
 plannedGraph = taskGraph.updateTaskNodeStatus(plannedGraph, plannedIds.docs, 'agent_done');
 plannedGraph = taskGraph.updateTaskNodeStatus(plannedGraph, plannedIds.qa, 'agent_done');
 assert.equal(taskGraph.isTaskNodeReady(plannedGraph, plannedIds['final-review']), true);
+assert.equal(plannedGraph.nodes.find(node => node.id === plannedIds.implement).acceptanceCriteria.length, 1);
+
+assert.equal(taskGraph.normalizeAcceptanceCriteria([], {
+  taskId: 'fallback-task', fallbackText: 'Das erwartete Ergebnis ist überprüfbar vorhanden.',
+})[0].id, 'fallback-task-result');
+let acceptanceGraph = taskGraph.createTaskGraph('generic-acceptance', 'Generische Abnahme');
+acceptanceGraph = taskGraph.upsertTaskNode(acceptanceGraph, {
+  id: 'acceptance-root', title: 'Ergebnis liefern', agentId: pm.id, agentName: pm.name,
+  source: 'user', nodeType: 'request', status: 'agent_done',
+});
+acceptanceGraph = taskGraph.materializeTaskPlan(acceptanceGraph, {
+  rootNodeId: 'acceptance-root',
+  tasks: [{
+    id: 'deliverable', title: 'Fachliches Ergebnis erstellen', agentId: coder.id, agentName: coder.name,
+    type: 'task', dependsOn: [], executionMode: 'sequential', order: 0,
+    acceptanceCriteria: [
+      { id: 'quality', text: 'Das Ergebnis erfüllt die fachlichen Anforderungen.', verification: 'reviewer', required: true },
+      { id: 'user-release', text: 'Der User gibt das Ergebnis frei.', verification: 'user', required: true },
+    ],
+  }],
+});
+const deliverableNodeId = taskGraph.taskPlanGraphNodeId('acceptance-root', 'deliverable');
+acceptanceGraph = taskGraph.updateTaskNodeStatus(acceptanceGraph, deliverableNodeId, 'agent_done');
+acceptanceGraph = taskGraph.submitTaskEvidence(acceptanceGraph, deliverableNodeId, [{
+  criterionId: 'quality', summary: 'Das vollständige Ergebnis und seine Herleitung liegen vor.', kind: 'result',
+}], { author: 'Max' });
+let acceptanceSummary = taskGraph.summarizeAcceptance(acceptanceGraph, 'acceptance-root');
+assert.equal(acceptanceSummary.ready, false);
+assert.equal(acceptanceSummary.submitted, 1);
+assert.equal(acceptanceSummary.userPending, 1);
+acceptanceGraph = taskGraph.applyAcceptanceDecisions(acceptanceGraph, [
+  { taskId: 'deliverable', criterionId: 'quality', status: 'passed', note: 'Fachlich geprüft.' },
+  { taskId: 'deliverable', criterionId: 'user-release', status: 'passed', note: 'PM darf dies nicht freigeben.' },
+], { reviewer: 'PM' });
+assert.equal(taskGraph.summarizeAcceptance(acceptanceGraph, 'acceptance-root').userPending, 1);
+acceptanceGraph = taskGraph.applyAcceptanceDecisions(acceptanceGraph, [
+  { taskId: deliverableNodeId, criterionId: 'user-release', status: 'passed', note: 'Vom User geprüft.' },
+], { reviewer: 'User', userOnly: true });
+acceptanceSummary = taskGraph.summarizeAcceptance(acceptanceGraph, 'acceptance-root');
+assert.equal(acceptanceSummary.ready, true);
+assert.equal(acceptanceSummary.passed, 2);
+assert.equal(acceptanceGraph.nodes.find(node => node.id === deliverableNodeId).status, 'completed');
 
 let agentHandoffGraph = taskGraph.upsertTaskNode(graph, { id: 'qa-fix', title: 'Spezialprüfung', agentId: tester.id, agentName: tester.name, source: 'Max', parentNodeId: 'frontend', status: 'planned' });
 agentHandoffGraph = taskGraph.addTaskEdge(agentHandoffGraph, { from: 'frontend', to: 'qa-fix', kind: 'delegation' });
@@ -702,6 +782,9 @@ assert.equal(orchestration.shouldRequestPMFinalReview({
   pm, agent: coder, taskSource: 'user', routeMode: 'explicit', explicitMentionCount: 1,
   explicitlyAddressedAgentId: coder.id, handoffCount: 1,
 }), true);
+assert.equal(orchestration.shouldRequestPMFinalReview({
+  pm, agent: coder, taskSource: 'PM', useLeanFastPath: true, requiresAcceptanceReview: true,
+}), true);
 
 const accidentalMemoryReply = '#Informationsarchitektur\n\n1. **Header:** Quicksort verstehen.\n#Accessibility Zustände sind erkennbar.';
 assert.deepEqual(memoryRules.extractMemoryCommands(accidentalMemoryReply), []);
@@ -721,8 +804,10 @@ assert.match(multilineMemory[0].text, /Keine Anmeldung erzwingen/);
 const capsule = orchestration.buildTaskCapsule({
   agentName: 'Max', agentRole: 'Developer', objective: 'Feature prüfen',
   context: ['memory://shared'], requestedOutput: ['Ergebnis'],
+  acceptanceCriteria: [{ id: 'fachlich-richtig', text: 'Das Ergebnis ist fachlich richtig.', required: true, verification: 'reviewer' }],
 });
 assert.match(capsule, /Feature prüfen/);
+assert.match(capsule, /Verbindliche Abnahmekriterien[\s\S]*fachlich-richtig[\s\S]*TASK_EVIDENCE/);
 assert.doesNotMatch(capsule, /UNERLAUBTER_VOLLER_VERLAUF/);
 const sessionA = orchestration.buildAgentSession({ agent: coder, taskCapsule: capsule });
 const sessionB = orchestration.buildAgentSession({ agent: coder, taskCapsule: capsule });
@@ -832,6 +917,14 @@ const limitedTask = providerRetryQueue.next();
 assert.equal(providerRetryQueue.retry(limitedTask), true);
 assert.equal(providerRetryQueue.next().objective, 'Temporär begrenzter Task');
 assert.equal(providerRetryQueue.reachedLimit, false);
+const unlimitedQueue = new orchestration.AgentTaskQueue({ maxTurns: 0, maxTurnsPerAgent: 0 });
+for (let index = 0; index < 60; index += 1) {
+  unlimitedQueue.enqueue({ agent: coder, objective: `Unbegrenzter Task ${index}`, source: 'PM' });
+}
+let unlimitedTaskCount = 0;
+while (unlimitedQueue.next()) unlimitedTaskCount += 1;
+assert.equal(unlimitedTaskCount, 60);
+assert.equal(unlimitedQueue.reachedLimit, false);
 const repeatedFileQueue = new orchestration.AgentTaskQueue({ maxSuccessfulScopeRepeats: 2 });
 const readmeTask = summary => ({
   agent: tester,
@@ -1009,7 +1102,7 @@ assert.match(reviewEvidence, /## Bedienung/);
 const structuredPlanReply = [
   '[[TASK_PLAN]]',
   '{"tasks":[',
-  '{"id":"implement","title":"CMD implementieren","agent":"Max","type":"task","parentId":null,"dependsOn":[],"executionMode":"parallel"},',
+  '{"id":"implement","title":"CMD implementieren","agent":"Max","type":"task","parentId":null,"dependsOn":[],"executionMode":"parallel","acceptanceCriteria":[{"id":"starts","text":"Die CMD-Datei startet den vorgesehenen Ablauf.","required":true,"verification":"automatic"}]},',
   '{"id":"qa","title":"CMD testen","agent":"Lisa","type":"task","parentId":null,"dependsOn":["implement"],"executionMode":"sequential"},',
   '{"id":"final-review","title":"Finale PM-Abnahme","agent":"PM","type":"review","parentId":null,"dependsOn":["qa"],"executionMode":"sequential"}',
   ']}',
@@ -1020,8 +1113,41 @@ const structuredPlanReply = [
 const structuredPlan = orchestration.extractTaskPlan(structuredPlanReply);
 assert.deepEqual(structuredPlan.tasks.map(task => task.id), ['implement', 'qa', 'final-review']);
 assert.deepEqual(structuredPlan.tasks[1].dependsOn, ['implement']);
+assert.deepEqual(structuredPlan.tasks[0].acceptanceCriteria, [{
+  id: 'starts', text: 'Die CMD-Datei startet den vorgesehenen Ablauf.', required: true, verification: 'automatic',
+}]);
 assert.doesNotMatch(orchestration.cleanAgentReply(structuredPlanReply), /TASK_PLAN|"dependsOn"/);
 assert.match(orchestration.cleanAgentReply(structuredPlanReply), /vollständige Weg/);
+const genericPlan = orchestration.extractTaskPlan([
+  '[[TASK_PLAN]]',
+  '{"tasks":[',
+  '{"id":"research","title":"Marktbericht erstellen","agent":"Max","type":"task","acceptanceCriteria":[{"id":"sources","text":"Alle Kernaussagen sind mit nachvollziehbaren Quellen belegt.","verification":"reviewer"}]},',
+  '{"id":"campaign","title":"Kampagnentext erstellen","agent":"Lisa","type":"task","acceptanceCriteria":[{"id":"audience","text":"Der Text spricht die festgelegte Zielgruppe verständlich an.","verification":"user"}]}',
+  ']}',
+  '[[/TASK_PLAN]]',
+].join('\n'));
+assert.deepEqual(genericPlan.tasks.map(task => task.acceptanceCriteria[0].id), ['sources', 'audience']);
+assert.equal(genericPlan.tasks[1].acceptanceCriteria[0].verification, 'user');
+const evidenceReply = [
+  'Ergebnis fertig.',
+  '[[TASK_EVIDENCE]]',
+  '{"evidence":[{"criterionId":"sources","summary":"Drei Primärquellen sind mit Fundstellen aufgeführt.","kind":"sources"}]}',
+  '[[/TASK_EVIDENCE]]',
+].join('\n');
+assert.deepEqual(orchestration.extractTaskEvidence(evidenceReply), [{
+  criterionId: 'sources', summary: 'Drei Primärquellen sind mit Fundstellen aufgeführt.', kind: 'sources',
+}]);
+const acceptanceReviewReply = [
+  'Die Nachweise wurden geprüft.',
+  '[[ACCEPTANCE_REVIEW]]',
+  '{"decisions":[{"taskId":"research","criterionId":"sources","status":"passed","note":"Quellen geprüft."}]}',
+  '[[/ACCEPTANCE_REVIEW]]',
+  '[[PROJECT_DONE]]',
+].join('\n');
+assert.deepEqual(orchestration.extractAcceptanceReview(acceptanceReviewReply), [{
+  taskId: 'research', criterionId: 'sources', status: 'passed', note: 'Quellen geprüft.',
+}]);
+assert.doesNotMatch(orchestration.cleanAgentReply(`${evidenceReply}\n${acceptanceReviewReply}`), /TASK_EVIDENCE|ACCEPTANCE_REVIEW|criterionId/);
 const distributedDeveloperTasks = orchestration.distributeTaskPlanAcrossAgentPools([
   { id: 'dev-1', title: 'Modul A', agent: 'Max', type: 'task', order: 0 },
   { id: 'dev-2', title: 'Modul B', agent: 'Max', type: 'task', order: 1 },
@@ -1058,6 +1184,7 @@ assert.deepEqual(taskGraph.findSafeAutoParallelTaskIds(
 assert.equal(orchestration.shouldCompleteProject({ isOrchestrator: true, source: 'user', reply: artifactReply, handoffCount: 0, pendingTaskCount: 0, asksUser: false }), true);
 assert.equal(orchestration.shouldCompleteProject({ isOrchestrator: true, source: 'team-synthesis', reply: 'Alles erledigt.', handoffCount: 0, pendingTaskCount: 0, asksUser: false }), true);
 assert.equal(orchestration.shouldCompleteProject({ isOrchestrator: true, source: 'team-synthesis', reply: 'Noch offen', handoffCount: 1, pendingTaskCount: 1, asksUser: false }), false);
+assert.equal(orchestration.shouldCompleteProject({ isOrchestrator: true, source: 'team-synthesis', reply: 'Alles erledigt. [[PROJECT_DONE]]', handoffCount: 0, pendingTaskCount: 0, asksUser: false, acceptanceReady: false }), false);
 const projectPrompt = orchestration.buildIsolatedSystemPrompt({
   agent: pm, groupName: 'Dev Team', groupAgentNames: ['PM', 'Max'], memoryNamespace: 'dev-team',
   groupAgents: [pm, coder, coderTwo],
@@ -1070,6 +1197,7 @@ assert.match(projectPrompt, /Ist noch etwas offen/);
 assert.match(projectPrompt, /keine zusätzlichen README-/);
 assert.match(projectPrompt, /AUFGABENPLAN/);
 assert.match(projectPrompt, /\[\[TASK_PLAN\]\]/);
+assert.match(projectPrompt, /acceptanceCriteria[\s\S]*\[\[ACCEPTANCE_REVIEW\]\]/);
 assert.match(projectPrompt, /Max \(Developer\)/);
 assert.match(projectPrompt, /Rollenpool mit mindestens zwei Agenten/);
 assert.match(projectPrompt, /gemeinsamen Arbeitsbereich freigegeben/);
@@ -1104,10 +1232,16 @@ assert.doesNotMatch(directChatPrompt, /Du bist der Orchestrator/);
 assert.doesNotMatch(directChatPrompt, /abschließenden Final-Review/);
 
 const memoryStore = new Map();
+const localMemoryRuntime = require(path.join(root, 'electron/memory-local.js'));
+const queuedLocalMemoryOperation = localMemoryRuntime.createLocalMemoryOperationQueue({
+  get: key => memoryStore.get(key),
+  set: (key, value) => memoryStore.set(key, value),
+});
 globalThis.window = {
   electronAPI: {
     appStateGet: async key => memoryStore.get(key),
     appStateSet: async (key, value) => memoryStore.set(key, value),
+    memoryLocalOperation: params => queuedLocalMemoryOperation(params),
   },
 };
 const memory = await importSource('src/memory-provider.js');
@@ -1120,10 +1254,35 @@ const localMemoryEntry = memory.createEntry({
 await sharedA.write('shared-project', localMemoryEntry);
 assert.equal((await sharedB.list('shared-project')).length, 1);
 assert.equal((await sharedB.search('shared-project', 'PostgreSQL', 5))[0].type, 'decision');
+await Promise.all([
+  sharedA.write('parallel-project', memory.createEntry({
+    type: 'finding', namespace: 'parallel-project', content: 'Parallel A', tags: ['parallel'], author: 'Max',
+  })),
+  sharedB.write('parallel-project', memory.createEntry({
+    type: 'finding', namespace: 'parallel-project', content: 'Parallel B', tags: ['parallel'], author: 'Lisa',
+  })),
+]);
+assert.equal((await sharedA.list('parallel-project')).length, 2);
+await sharedA.handoff('shared-project', {
+  from: 'Max', to: 'Lisa', taskId: 'task-shared', summary: 'Bitte Ergebnis prüfen.', findings: ['A'],
+});
+await sharedA.handoff('shared-project', {
+  from: 'Tom', to: 'Max', taskId: 'task-max', summary: 'Prüfung nur für Max.', findings: ['C'],
+});
+await sharedA.handoff('other-project', {
+  from: 'Tom', to: 'Lisa', taskId: 'task-other', summary: 'Andere Gruppe', findings: ['B'],
+});
+const lisaSharedContext = await sharedB.getContextForAgent('shared-project', 'Prüfung', 'Lisa', 5);
+assert.match(lisaSharedContext, /Bitte Ergebnis prüfen/);
+assert.doesNotMatch(lisaSharedContext, /Prüfung nur für Max/);
+assert.doesNotMatch(lisaSharedContext, /Andere Gruppe/);
+assert.equal(memoryStore.has('memspace:_handoff_Lisa'), false);
 assert.deepEqual(await sharedB.delete('shared-project', localMemoryEntry.id), { ok: true, deleted: true });
-assert.equal((await sharedA.list('shared-project')).length, 0);
+assert.deepEqual((await sharedA.list('shared-project')).map(entry => entry.type), ['handoff', 'handoff']);
 assert.deepEqual(await sharedB.delete('shared-project', localMemoryEntry.id), { ok: false, deleted: false });
 await sharedB.clear('shared-project');
+await sharedB.clear('parallel-project');
+await sharedB.clear('other-project');
 assert.equal((await sharedA.list('shared-project')).length, 0);
 
 const chatAttachments = require(path.join(root, 'electron/chat-attachments.js'));
@@ -1205,13 +1364,19 @@ try {
   assert.equal((await fileMemory.list('second-space')).length, 1);
   assert.equal((await otherFileMemory.list('shared-project')).length, 0);
   assert.equal((await fileMemory.update('shared-project', fileEntry.id, { confidence: 'high' })).confidence, 'high');
+  await fileMemory.handoff('shared-project', {
+    from: 'Max', to: 'Lisa', taskId: 'file-handoff', summary: 'Dateiübergabe prüfen.', findings: ['JSON'],
+  });
+  const fileLisaContext = await fileMemory.getContextForAgent('shared-project', 'ohne Treffer', 'Lisa', 5);
+  assert.match(fileLisaContext, /Dateiübergabe prüfen/);
+  assert.equal((await otherFileMemory.list('shared-project')).length, 0);
 
   const storedMemory = JSON.parse(await fs.readFile(memoryPath, 'utf8'));
   assert.equal(storedMemory.format, 'agent-teams-memory');
   assert.equal(storedMemory.version, 1);
   assert.deepEqual(Object.keys(storedMemory.namespaces).sort(), ['second-space', 'shared-project']);
   assert.deepEqual(await fileMemory.delete('shared-project', fileEntry.id), { ok: true, deleted: true });
-  assert.equal((await fileMemory.list('shared-project')).length, 0);
+  assert.equal((await fileMemory.list('shared-project')).length, 1);
   assert.deepEqual(await fileMemory.delete('shared-project', fileEntry.id), { ok: false, deleted: false });
   await fileMemory.clear('shared-project');
   assert.equal((await fileMemory.list('shared-project')).length, 0);
@@ -1329,6 +1494,14 @@ try {
 }
 
 const codex = require(path.join(root, 'electron/codex-main.js'));
+assert.equal(codex.resolveCodexCommand({ platform: 'linux' }), 'codex');
+assert.equal(codex.resolveCodexCommand({
+  platform: 'win32',
+  env: { LOCALAPPDATA: 'C:\\Users\\Fixture\\AppData\\Local' },
+  homeDir: 'C:\\Users\\Fixture',
+  existsSync: candidate => candidate.endsWith('OpenAI\\Codex\\bin\\codex.exe'),
+}), 'C:\\Users\\Fixture\\AppData\\Local\\Programs\\OpenAI\\Codex\\bin\\codex.exe');
+assert.equal(codex.resolveCodexCommand({ platform: 'win32', env: {}, homeDir: '', existsSync: () => false }), 'codex.exe');
 assert.deepEqual(codex.codexImageArgs([{ kind: 'image', path: 'C:/tmp/image.png' }, { kind: 'file', path: 'C:/tmp/data.bin' }]), ['--image', 'C:/tmp/image.png']);
 assert.match(codex.buildCodexPrompt({ systemContent: 'System', merged: [], attachments: [{ kind: 'file', path: 'C:/tmp/data.bin' }] }), /data\.bin/);
 assert.deepEqual(codex.describeCodexEvent({ type: 'turn.started' }), {
@@ -1370,7 +1543,7 @@ try {
 
 console.log(JSON.stringify({
   ok: true,
-  checks: ['no-artificial-agent-delay', 'safe-auto-parallel-batching', 'lean-fast-mode', 'configurable-run-limits', 'pm-turn-limit-review', 'resumable-run-segments', 'agent-teams-window-branding', 'typing-agent-identity', 'always-focused-chat-composer', 'draft-while-agent-runs', 'persistent-user-request-queue', 'global-agent-role-catalog', 'legacy-agent-role-migration', 'routing', 'direct-chat-conversation-history', 'directed-group-context-window', 'direct-specialist-without-pm-review', 'explicit-memory-commands', 'manual-memory-entry', 'quality-cascade-policy', 'quality-deterministic-gates', 'quality-chat-controls', 'custom-provider-quality-cascade', 'direct-chat-without-pm', 'mixed-provider-routing', 'generic-provider-presets', 'encrypted-provider-credentials', 'provider-protocol-routing', 'claude-cli-oauth-routing', 'anthropic-api-key-routing', 'claude-rate-limit-metadata', 'retryable-provider-queue', 'retry-after-parsing', 'claude-opus-sonnet-fallback', 'claude-cli-status', 'claude-windows-native-path', 'group-output-folder-notice', 'browser-file-attachments', 'persistent-file-attachments', 'provider-native-file-payloads', 'cli-file-access', 'detached-singleton-task-window', 'memory-entry-delete-controls', 'multi-handoffs', 'strict-line-start-mentions', 'left-aligned-mention-layout', 'code-block-mention-isolation', 'direct-user-question-display', 'multi-turn-task-queue', 'direct-handoff-priority', 'deferred-pm-handoff', 'timeout-detection', 'immediate-pm-timeout-recovery', 'stepwise-timeout-review', 'persistent-conversation-checkpoint', 'interrupted-agent-checkpoint', 'resume-without-restarting-pm', 'short-agent-activity', 'pm-final-review-rules', 'pause-resume-user-handoff', 'persistent-task-graph', 'initial-pm-plan-protocol', 'upfront-plan-materialization', 'planned-future-gating', 'sequential-plan-selection-guard', 'agent-role-pool-distribution', 'delegation-tree-hierarchy', 'dependency-cross-links', 'multi-result-review-placement', 'legacy-graph-tree-migration', 'agent-subtask-branching', 'graph-dependencies', 'parallel-selection-validation', 'parallel-batch-execution', 'parallel-file-conflict-guard', 'pm-task-approval', 'project-artifact-protocol', 'nested-markdown-artifact-fences', 'project-review-evidence', 'rephrased-file-task-loop-guard', 'persistent-loop-guard', 'safe-project-writes', 'project-completion-signal', 'task-capsules', 'isolated-sessions', 'shared-local-memory', 'shared-json-file-memory', 'versioned-memory-file', 'legacy-memory-file-migration', 'mcp-global-group-merge', 'mcp-official-excalidraw-preset', 'mcp-direct-chat-global-access', 'mcp-tool-permission-gate', 'mcp-global-tool-catalog', 'mcp-global-tool-policy', 'mcp-unknown-tool-asks', 'full-screen-settings', 'mcp-persistent-chat-grants', 'mcp-once-grant-consumed-on-invocation', 'mcp-timeout-keeps-pending-once-grant', 'mcp-permission-wording-recovery', 'mcp-neutral-json-planner', 'mcp-ui-result-short-circuit', 'mcp-denied-tool-path', 'mcp-app-tool-filtering', 'excalidraw-inline-preview', 'mcp-call-protocol', 'mcp-provider-neutral-tool-loop', 'mcp-stdio-integration', 'codex-progress-events', 'codex-cancel-routing', 'codex-status'],
+  checks: ['no-artificial-agent-delay', 'safe-auto-parallel-batching', 'lean-fast-mode', 'configurable-run-limits', 'pm-turn-limit-review', 'resumable-run-segments', 'agent-teams-window-branding', 'typing-agent-identity', 'always-focused-chat-composer', 'draft-while-agent-runs', 'persistent-user-request-queue', 'global-agent-role-catalog', 'legacy-agent-role-migration', 'routing', 'direct-chat-conversation-history', 'directed-group-context-window', 'direct-specialist-without-pm-review', 'explicit-memory-commands', 'manual-memory-entry', 'quality-cascade-policy', 'quality-deterministic-gates', 'quality-chat-controls', 'custom-provider-quality-cascade', 'direct-chat-without-pm', 'mixed-provider-routing', 'generic-provider-presets', 'encrypted-provider-credentials', 'provider-protocol-routing', 'claude-cli-oauth-routing', 'anthropic-api-key-routing', 'claude-rate-limit-metadata', 'retryable-provider-queue', 'retry-after-parsing', 'claude-opus-sonnet-fallback', 'claude-cli-status', 'claude-windows-native-path', 'group-output-folder-notice', 'browser-file-attachments', 'persistent-file-attachments', 'provider-native-file-payloads', 'cli-file-access', 'detached-singleton-task-window', 'memory-entry-delete-controls', 'multi-handoffs', 'strict-line-start-mentions', 'left-aligned-mention-layout', 'code-block-mention-isolation', 'direct-user-question-display', 'multi-turn-task-queue', 'direct-handoff-priority', 'deferred-pm-handoff', 'timeout-detection', 'immediate-pm-timeout-recovery', 'stepwise-timeout-review', 'persistent-conversation-checkpoint', 'interrupted-agent-checkpoint', 'resume-without-restarting-pm', 'short-agent-activity', 'pm-final-review-rules', 'pause-resume-user-handoff', 'persistent-task-graph', 'generic-acceptance-evidence-gate', 'initial-pm-plan-protocol', 'upfront-plan-materialization', 'planned-future-gating', 'sequential-plan-selection-guard', 'agent-role-pool-distribution', 'delegation-tree-hierarchy', 'dependency-cross-links', 'multi-result-review-placement', 'legacy-graph-tree-migration', 'agent-subtask-branching', 'graph-dependencies', 'parallel-selection-validation', 'parallel-batch-execution', 'parallel-file-conflict-guard', 'pm-task-approval', 'project-artifact-protocol', 'nested-markdown-artifact-fences', 'project-review-evidence', 'rephrased-file-task-loop-guard', 'persistent-loop-guard', 'safe-project-writes', 'project-completion-signal', 'task-capsules', 'isolated-sessions', 'shared-local-memory', 'shared-json-file-memory', 'versioned-memory-file', 'legacy-memory-file-migration', 'mcp-global-group-merge', 'mcp-official-excalidraw-preset', 'mcp-direct-chat-global-access', 'mcp-tool-permission-gate', 'mcp-global-tool-catalog', 'mcp-global-tool-policy', 'mcp-unknown-tool-asks', 'full-screen-settings', 'mcp-persistent-chat-grants', 'mcp-once-grant-consumed-on-invocation', 'mcp-timeout-keeps-pending-once-grant', 'mcp-permission-wording-recovery', 'mcp-neutral-json-planner', 'mcp-ui-result-short-circuit', 'mcp-denied-tool-path', 'mcp-app-tool-filtering', 'excalidraw-inline-preview', 'mcp-call-protocol', 'mcp-provider-neutral-tool-loop', 'mcp-stdio-integration', 'codex-progress-events', 'codex-cancel-routing', 'codex-status'],
   codex: codexStatus,
   claude: claudeStatus,
 }, null, 2));

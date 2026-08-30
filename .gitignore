@@ -19,6 +19,9 @@ dist-ssr
 !.env.example
 *.memory.json
 
+# Local maintainer tools (never commit)
+/local-scripts/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

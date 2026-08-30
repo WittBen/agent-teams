@@ -1,8 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  ACCEPTANCE_STATUS,
   inferTaskNodeType,
   isTaskNodeReady,
   projectTaskTree,
+  summarizeAcceptance,
   TASK_STATUS,
   validateParallelSelection,
 } from './task-graph';
@@ -18,7 +20,7 @@ const NODE_TYPES = {
   review: { label: 'PM-Abnahme', icon: '◆', color: '#00a884' },
 };
 
-function TaskNodeCard({ node, graph, tree, awaitingSchedule, running, selected, onToggle }) {
+function TaskNodeCard({ node, graph, tree, awaitingSchedule, running, selected, onToggle, onAcceptanceDecision }) {
   const { t } = useI18n();
   const status = TASK_STATUS[node.status] || TASK_STATUS.planned;
   const typeName = inferTaskNodeType(node);
@@ -111,11 +113,58 @@ function TaskNodeCard({ node, graph, tree, awaitingSchedule, running, selected, 
           )}
         </div>
       )}
+
+      {!!node.acceptanceCriteria?.length && (
+        <div style={{ marginTop: 8, display: 'grid', gap: 5 }}>
+          <div style={{ color: 'var(--text-secondary)', fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.04em' }}>
+            🛡️ {t('Abnahmekriterien')}
+          </div>
+          {node.acceptanceCriteria.map(criterion => {
+            const criterionStatus = ACCEPTANCE_STATUS[criterion.status] || ACCEPTANCE_STATUS.open;
+            const latestEvidence = (criterion.evidence || []).at(-1);
+            const verificationLabels = {
+              reviewer: t('Prüfer'),
+              automatic: t('Automatisch'),
+              user: t('User-Freigabe'),
+            };
+            return (
+              <div key={criterion.id} style={{ padding: '6px 7px', borderRadius: 7, border: '1px solid rgba(134,150,160,.2)', background: 'rgba(13,27,34,.24)' }}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6, fontSize: 9, lineHeight: 1.4 }}>
+                  <span style={{ color: criterionStatus.color, marginTop: 1 }}>●</span>
+                  <span style={{ flex: 1, color: 'var(--text-primary)' }}>{criterion.text}</span>
+                  <span style={{ color: criterionStatus.color, whiteSpace: 'nowrap' }}>{t(criterionStatus.label)}</span>
+                </div>
+                <div style={{ display: 'flex', gap: 7, marginTop: 4, color: 'var(--text-muted)', fontSize: 8 }}>
+                  <span>{verificationLabels[criterion.verification] || verificationLabels.reviewer}</span>
+                  <span>{criterion.required === false ? t('Optional') : t('Erforderlich')}</span>
+                </div>
+                {latestEvidence && (
+                  <div title={latestEvidence.summary} style={{ marginTop: 4, color: 'var(--text-secondary)', fontSize: 8, lineHeight: 1.35, overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>
+                    📎 {latestEvidence.author}: {latestEvidence.summary}
+                  </div>
+                )}
+                {criterion.verification === 'user' && onAcceptanceDecision && (
+                  <div style={{ display: 'flex', gap: 5, marginTop: 6 }}>
+                    <button type="button" className="btn btn-secondary" style={{ padding: '3px 7px', fontSize: 8 }}
+                      onClick={event => { event.stopPropagation(); onAcceptanceDecision(node.id, criterion.id, 'passed'); }}>
+                      ✓ {t('Bestätigen')}
+                    </button>
+                    <button type="button" className="btn btn-secondary" style={{ padding: '3px 7px', fontSize: 8 }}
+                      onClick={event => { event.stopPropagation(); onAcceptanceDecision(node.id, criterion.id, 'failed'); }}>
+                      ✕ {t('Ablehnen')}
+                    </button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
 
-function TaskTreeNode({ node, graph, tree, awaitingSchedule, running, selected, onToggle }) {
+function TaskTreeNode({ node, graph, tree, awaitingSchedule, running, selected, onToggle, onAcceptanceDecision }) {
   const children = tree.childrenByParent.get(node.id) || [];
   return (
     <div style={{ position: 'relative' }}>
@@ -127,6 +176,7 @@ function TaskTreeNode({ node, graph, tree, awaitingSchedule, running, selected, 
         running={running}
         selected={selected}
         onToggle={onToggle}
+        onAcceptanceDecision={onAcceptanceDecision}
       />
       {children.length > 0 && (
         <div style={{ marginLeft: 17, paddingLeft: 24, borderLeft: '1px solid rgba(134,150,160,.42)', paddingTop: 4 }}>
@@ -144,6 +194,7 @@ function TaskTreeNode({ node, graph, tree, awaitingSchedule, running, selected, 
                 running={running}
                 selected={selected}
                 onToggle={onToggle}
+                onAcceptanceDecision={onAcceptanceDecision}
               />
             </div>
           ))}
@@ -153,7 +204,7 @@ function TaskTreeNode({ node, graph, tree, awaitingSchedule, running, selected, 
   );
 }
 
-export default function TaskGraphPanel({ graph, running, awaitingSchedule, onClose, onRunParallel, onContinueSequential, dragHandleProps = null, closeTitle }) {
+export default function TaskGraphPanel({ graph, running, awaitingSchedule, onClose, onRunParallel, onContinueSequential, onAcceptanceDecision, dragHandleProps = null, closeTitle }) {
   const { t } = useI18n();
   const [selected, setSelected] = useState([]);
   const tree = useMemo(() => projectTaskTree(graph), [graph]);
@@ -162,6 +213,7 @@ export default function TaskGraphPanel({ graph, running, awaitingSchedule, onClo
   const completedCount = nodes.filter(node => ['agent_done', 'completed'].includes(node.status)).length;
   const activeCount = nodes.filter(node => ['running', 'waiting_user'].includes(node.status)).length;
   const openCount = Math.max(0, nodes.length - completedCount - activeCount);
+  const acceptance = useMemo(() => summarizeAcceptance(graph), [graph]);
 
   const toggleNode = (nodeId) => {
     setSelected(current => current.includes(nodeId)
@@ -204,6 +256,7 @@ export default function TaskGraphPanel({ graph, running, awaitingSchedule, onClo
           </div>
         </div>
         <div style={{ display: 'flex', gap: 5, fontSize: 9 }}>
+          {acceptance.required > 0 && <span style={{ color: acceptance.ready ? '#00a884' : '#53bdeb', background: acceptance.ready ? 'rgba(0,168,132,.1)' : 'rgba(83,189,235,.1)', padding: '3px 6px', borderRadius: 10 }}>🛡️ {acceptance.passed}/{acceptance.required}</span>}
           <span style={{ color: '#00a884', background: 'rgba(0,168,132,.1)', padding: '3px 6px', borderRadius: 10 }}>✓ {completedCount}</span>
           <span style={{ color: '#e6a23c', background: 'rgba(230,162,60,.1)', padding: '3px 6px', borderRadius: 10 }}>● {activeCount}</span>
           <span style={{ color: '#8696a0', background: 'rgba(134,150,160,.1)', padding: '3px 6px', borderRadius: 10 }}>○ {openCount}</span>
@@ -240,6 +293,7 @@ export default function TaskGraphPanel({ graph, running, awaitingSchedule, onClo
               running={running}
               selected={selected}
               onToggle={toggleNode}
+              onAcceptanceDecision={onAcceptanceDecision}
             />
           </div>
         ))}
