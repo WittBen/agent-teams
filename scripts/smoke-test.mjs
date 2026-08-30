@@ -337,13 +337,18 @@ assert.equal(presetState.changed, true);
 assert.equal(presetState.presetVersion, mcp.MCP_PRESET_VERSION);
 assert.deepEqual(presetState.servers[0], mcp.OFFICIAL_EXCALIDRAW_MCP_SERVER);
 assert.equal(presetState.servers[0].enabled, false);
+assert.deepEqual(presetState.servers[1], mcp.OFFICIAL_PERPLEXITY_MCP_SERVER);
+assert.equal(presetState.servers[1].enabled, false);
+assert.equal(presetState.servers[1].url, 'https://api.perplexity.ai/mcp');
+assert.deepEqual(presetState.servers[1].headers, { Authorization: '' });
 assert.deepEqual(mcp.applyOfficialMcpPresets([], mcp.MCP_PRESET_VERSION).servers, []);
 const migratedOfficialPreset = mcp.applyOfficialMcpPresets([
   { ...mcp.OFFICIAL_EXCALIDRAW_MCP_SERVER, enabled: true },
 ], 1);
 assert.equal(migratedOfficialPreset.changed, true);
 assert.equal(migratedOfficialPreset.servers[0].enabled, false);
-assert.deepEqual(mcp.applyOfficialMcpPresets([], 1).servers, []);
+assert.deepEqual(migratedOfficialPreset.servers[1], mcp.OFFICIAL_PERPLEXITY_MCP_SERVER);
+assert.deepEqual(mcp.applyOfficialMcpPresets([], 2).servers, [mcp.OFFICIAL_PERPLEXITY_MCP_SERVER]);
 const customExcalidrawServer = {
   id: 'custom-excalidraw', name: 'Eigenes Excalidraw', enabled: true,
   transport: 'http', url: mcp.OFFICIAL_EXCALIDRAW_MCP_SERVER.url,
@@ -353,6 +358,14 @@ assert.equal(mcp.applyOfficialMcpPresets([
   { ...mcp.OFFICIAL_EXCALIDRAW_MCP_SERVER, enabled: true },
 ], mcp.MCP_PRESET_VERSION).servers[0].enabled, true);
 assert.deepEqual(electronMcpPreset.OFFICIAL_EXCALIDRAW_MCP_SERVER, mcp.OFFICIAL_EXCALIDRAW_MCP_SERVER);
+assert.deepEqual(electronMcpPreset.OFFICIAL_PERPLEXITY_MCP_SERVER, mcp.OFFICIAL_PERPLEXITY_MCP_SERVER);
+const customPerplexityServer = {
+  id: 'custom-perplexity', name: 'Eigenes Perplexity', enabled: true,
+  transport: 'http', url: `${mcp.OFFICIAL_PERPLEXITY_MCP_SERVER.url}/`, headers: {},
+};
+const customPerplexityMigration = mcp.applyOfficialMcpPresets([customPerplexityServer], 2);
+assert.equal(customPerplexityMigration.servers.length, 1);
+assert.equal(customPerplexityMigration.servers[0].enabled, true);
 const presetStoreData = new Map();
 const presetStore = {
   get: key => presetStoreData.get(key),
@@ -361,6 +374,8 @@ const presetStore = {
 assert.equal(electronMcpPreset.ensureOfficialMcpPreset(presetStore).changed, true);
 assert.equal(presetStoreData.get('mcpServers')[0].id, 'mcp-official-excalidraw');
 assert.equal(presetStoreData.get('mcpServers')[0].enabled, false);
+assert.equal(presetStoreData.get('mcpServers')[1].id, 'mcp-official-perplexity');
+assert.equal(presetStoreData.get('mcpServers')[1].enabled, false);
 assert.equal(presetStoreData.get('mcpPresetVersion'), electronMcpPreset.MCP_PRESET_VERSION);
 presetStoreData.set('mcpServers', []);
 assert.equal(electronMcpPreset.ensureOfficialMcpPreset(presetStore).changed, false);
@@ -1543,7 +1558,7 @@ try {
 
 console.log(JSON.stringify({
   ok: true,
-  checks: ['no-artificial-agent-delay', 'safe-auto-parallel-batching', 'lean-fast-mode', 'configurable-run-limits', 'pm-turn-limit-review', 'resumable-run-segments', 'agent-teams-window-branding', 'typing-agent-identity', 'always-focused-chat-composer', 'draft-while-agent-runs', 'persistent-user-request-queue', 'global-agent-role-catalog', 'legacy-agent-role-migration', 'routing', 'direct-chat-conversation-history', 'directed-group-context-window', 'direct-specialist-without-pm-review', 'explicit-memory-commands', 'manual-memory-entry', 'quality-cascade-policy', 'quality-deterministic-gates', 'quality-chat-controls', 'custom-provider-quality-cascade', 'direct-chat-without-pm', 'mixed-provider-routing', 'generic-provider-presets', 'encrypted-provider-credentials', 'provider-protocol-routing', 'claude-cli-oauth-routing', 'anthropic-api-key-routing', 'claude-rate-limit-metadata', 'retryable-provider-queue', 'retry-after-parsing', 'claude-opus-sonnet-fallback', 'claude-cli-status', 'claude-windows-native-path', 'group-output-folder-notice', 'browser-file-attachments', 'persistent-file-attachments', 'provider-native-file-payloads', 'cli-file-access', 'detached-singleton-task-window', 'memory-entry-delete-controls', 'multi-handoffs', 'strict-line-start-mentions', 'left-aligned-mention-layout', 'code-block-mention-isolation', 'direct-user-question-display', 'multi-turn-task-queue', 'direct-handoff-priority', 'deferred-pm-handoff', 'timeout-detection', 'immediate-pm-timeout-recovery', 'stepwise-timeout-review', 'persistent-conversation-checkpoint', 'interrupted-agent-checkpoint', 'resume-without-restarting-pm', 'short-agent-activity', 'pm-final-review-rules', 'pause-resume-user-handoff', 'persistent-task-graph', 'generic-acceptance-evidence-gate', 'initial-pm-plan-protocol', 'upfront-plan-materialization', 'planned-future-gating', 'sequential-plan-selection-guard', 'agent-role-pool-distribution', 'delegation-tree-hierarchy', 'dependency-cross-links', 'multi-result-review-placement', 'legacy-graph-tree-migration', 'agent-subtask-branching', 'graph-dependencies', 'parallel-selection-validation', 'parallel-batch-execution', 'parallel-file-conflict-guard', 'pm-task-approval', 'project-artifact-protocol', 'nested-markdown-artifact-fences', 'project-review-evidence', 'rephrased-file-task-loop-guard', 'persistent-loop-guard', 'safe-project-writes', 'project-completion-signal', 'task-capsules', 'isolated-sessions', 'shared-local-memory', 'shared-json-file-memory', 'versioned-memory-file', 'legacy-memory-file-migration', 'mcp-global-group-merge', 'mcp-official-excalidraw-preset', 'mcp-direct-chat-global-access', 'mcp-tool-permission-gate', 'mcp-global-tool-catalog', 'mcp-global-tool-policy', 'mcp-unknown-tool-asks', 'full-screen-settings', 'mcp-persistent-chat-grants', 'mcp-once-grant-consumed-on-invocation', 'mcp-timeout-keeps-pending-once-grant', 'mcp-permission-wording-recovery', 'mcp-neutral-json-planner', 'mcp-ui-result-short-circuit', 'mcp-denied-tool-path', 'mcp-app-tool-filtering', 'excalidraw-inline-preview', 'mcp-call-protocol', 'mcp-provider-neutral-tool-loop', 'mcp-stdio-integration', 'codex-progress-events', 'codex-cancel-routing', 'codex-status'],
+  checks: ['no-artificial-agent-delay', 'safe-auto-parallel-batching', 'lean-fast-mode', 'configurable-run-limits', 'pm-turn-limit-review', 'resumable-run-segments', 'agent-teams-window-branding', 'typing-agent-identity', 'always-focused-chat-composer', 'draft-while-agent-runs', 'persistent-user-request-queue', 'global-agent-role-catalog', 'legacy-agent-role-migration', 'routing', 'direct-chat-conversation-history', 'directed-group-context-window', 'direct-specialist-without-pm-review', 'explicit-memory-commands', 'manual-memory-entry', 'quality-cascade-policy', 'quality-deterministic-gates', 'quality-chat-controls', 'custom-provider-quality-cascade', 'direct-chat-without-pm', 'mixed-provider-routing', 'generic-provider-presets', 'encrypted-provider-credentials', 'provider-protocol-routing', 'claude-cli-oauth-routing', 'anthropic-api-key-routing', 'claude-rate-limit-metadata', 'retryable-provider-queue', 'retry-after-parsing', 'claude-opus-sonnet-fallback', 'claude-cli-status', 'claude-windows-native-path', 'group-output-folder-notice', 'browser-file-attachments', 'persistent-file-attachments', 'provider-native-file-payloads', 'cli-file-access', 'detached-singleton-task-window', 'memory-entry-delete-controls', 'multi-handoffs', 'strict-line-start-mentions', 'left-aligned-mention-layout', 'code-block-mention-isolation', 'direct-user-question-display', 'multi-turn-task-queue', 'direct-handoff-priority', 'deferred-pm-handoff', 'timeout-detection', 'immediate-pm-timeout-recovery', 'stepwise-timeout-review', 'persistent-conversation-checkpoint', 'interrupted-agent-checkpoint', 'resume-without-restarting-pm', 'short-agent-activity', 'pm-final-review-rules', 'pause-resume-user-handoff', 'persistent-task-graph', 'generic-acceptance-evidence-gate', 'initial-pm-plan-protocol', 'upfront-plan-materialization', 'planned-future-gating', 'sequential-plan-selection-guard', 'agent-role-pool-distribution', 'delegation-tree-hierarchy', 'dependency-cross-links', 'multi-result-review-placement', 'legacy-graph-tree-migration', 'agent-subtask-branching', 'graph-dependencies', 'parallel-selection-validation', 'parallel-batch-execution', 'parallel-file-conflict-guard', 'pm-task-approval', 'project-artifact-protocol', 'nested-markdown-artifact-fences', 'project-review-evidence', 'rephrased-file-task-loop-guard', 'persistent-loop-guard', 'safe-project-writes', 'project-completion-signal', 'task-capsules', 'isolated-sessions', 'shared-local-memory', 'shared-json-file-memory', 'versioned-memory-file', 'legacy-memory-file-migration', 'mcp-global-group-merge', 'mcp-official-excalidraw-preset', 'mcp-official-perplexity-preset', 'mcp-direct-chat-global-access', 'mcp-tool-permission-gate', 'mcp-global-tool-catalog', 'mcp-global-tool-policy', 'mcp-unknown-tool-asks', 'full-screen-settings', 'mcp-persistent-chat-grants', 'mcp-once-grant-consumed-on-invocation', 'mcp-timeout-keeps-pending-once-grant', 'mcp-permission-wording-recovery', 'mcp-neutral-json-planner', 'mcp-ui-result-short-circuit', 'mcp-denied-tool-path', 'mcp-app-tool-filtering', 'excalidraw-inline-preview', 'mcp-call-protocol', 'mcp-provider-neutral-tool-loop', 'mcp-stdio-integration', 'codex-progress-events', 'codex-cancel-routing', 'codex-status'],
   codex: codexStatus,
   claude: claudeStatus,
 }, null, 2));

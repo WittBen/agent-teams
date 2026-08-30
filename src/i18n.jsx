@@ -567,6 +567,8 @@ const EN = {
   'aktiviert und token-geschützt': 'enabled and token-protected',
   'deaktiviert': 'disabled',
   'Sensible Werte werden beim Speichern mit dem Betriebssystem-Schlüsselspeicher geschützt. Für portable Konfigurationen kannst du $env:VARIABLENNAME verwenden.': 'Sensitive values are protected by the operating-system credential store when saved. For portable configurations, you can use $env:VARIABLE_NAME.',
+  'Perplexity benötigt einen API-Schlüssel. Trage unten „Authorization=Bearer DEIN_API_KEY“ ein. Der Schlüssel wird beim Speichern geschützt.': 'Perplexity requires an API key. Enter “Authorization=Bearer YOUR_API_KEY” below. The key is protected when saved.',
+  'API-Schlüssel öffnen': 'Open API key page',
   'Lokale Daten': 'Local data',
   'Der Export enthält keine API-Schlüssel oder Zugriffstoken. Externe Projektdateien und separat ausgewählte Memory-Dateien werden nicht verändert.': 'The export contains no API keys or access tokens. External project files and separately selected memory files are not modified.',
   'Daten exportieren': 'Export data',

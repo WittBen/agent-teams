@@ -996,6 +996,8 @@ option { background: var(--bg-secondary); }
 .mcp-editor .form-group { margin-bottom: 10px; }
 .mcp-code-input { font-family: Consolas, 'Courier New', monospace; font-size: 11px; min-height: 64px; }
 .mcp-warning { color: #e6a23c; background: rgba(230,162,60,.08); border-radius: 6px; padding: 7px 8px; font-size: 10px; line-height: 1.4; }
+.mcp-preset-help { margin: 0 0 10px; padding: 7px 8px; border-radius: 6px; background: rgba(0,168,132,.07); }
+.mcp-preset-help a { color: var(--accent); font-weight: 600; }
 .mcp-test-row { display: flex; align-items: center; gap: 8px; margin-top: 9px; }
 .mcp-test-row .btn { padding: 5px 9px; font-size: 11px; flex-shrink: 0; }
 .mcp-test-ok { color: var(--accent); font-size: 11px; }
