@@ -2,6 +2,12 @@
 
 All notable changes are documented here. The project follows semantic versioning while APIs remain subject to beta changes.
 
+## 1.1.0-beta.8 - 2026-08-30
+
+### Changed
+
+- perplexity mcp added
+
 ## 1.1.0-beta.7 - 2026-08-30
 
 ### Changed

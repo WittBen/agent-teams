@@ -2,7 +2,7 @@
 
 Agent Teams is a local-first Electron and React desktop application for configurable AI agents, direct chats and coordinated multi-agent groups. Groups can share structured memory, use project folders, connect to MCP servers and maintain a task graph.
 
-> **Status:** `1.1.0-beta.7`. This project is in public beta. Keep backups of important project data and review every MCP server before granting access.
+> **Status:** `1.1.0-beta.8`. This project is in public beta. Keep backups of important project data and review every MCP server before granting access.
 
 ## Download
 
@@ -63,7 +63,7 @@ The release checklist, including Windows code signing, is documented in
 [ARCHITECTURE.md](ARCHITECTURE.md) and [THREAT_MODEL.md](THREAT_MODEL.md).
 
 Pushing a version tag that exactly matches `package.json`, for example
-`v1.1.0-beta.7`, runs the release workflow. GitHub Actions verifies the project,
+`v1.1.0-beta.8`, runs the release workflow. GitHub Actions verifies the project,
 builds the Windows installer, generates `SHA256SUMS.txt` and publishes a beta
 tag as the latest public release while retaining the beta label in its version
 and release notes.
@@ -97,6 +97,8 @@ API_TOKEN=$env:MCP_API_TOKEN
 ```
 
 The application asks separately whether to trust a server and whether a particular tool may run.
+
+The global MCP settings include disabled official presets for Excalidraw and Perplexity. To use Perplexity, edit its preset and enter `Authorization=Bearer YOUR_API_KEY` under HTTP headers, save the settings, enable the server, and load its tools. The literal key is moved to the operating-system credential store when saved. The preset connects to Perplexity's hosted MCP endpoint; search and research requests are therefore sent to Perplexity.
 
 ## Generic acceptance workflow
 

@@ -15,6 +15,7 @@ function updateServer(servers, id, updates) {
 
 function ServerEditor({ server, onChange }) {
   const { t } = useI18n();
+  const isOfficialPerplexity = server.id === 'mcp-official-perplexity';
   const [argsText, setArgsText] = useState((server.args || []).join('\n'));
   const [envText, setEnvText] = useState(formatKeyValueLines(server.env));
   const [headersText, setHeadersText] = useState(formatKeyValueLines(server.headers));
@@ -40,6 +41,12 @@ function ServerEditor({ server, onChange }) {
             <label className="form-label">MCP URL</label>
             <input className="form-input" value={server.url} onChange={event => onChange({ url: event.target.value })} placeholder="https://example.com/mcp" />
           </div>
+          {isOfficialPerplexity && (
+            <div className="mcp-help mcp-preset-help">
+              {t('Perplexity benötigt einen API-Schlüssel. Trage unten „Authorization=Bearer DEIN_API_KEY“ ein. Der Schlüssel wird beim Speichern geschützt.')} {' '}
+              <a href="https://console.perplexity.ai" target="_blank" rel="noreferrer">{t('API-Schlüssel öffnen')}</a>
+            </div>
+          )}
           <div className="form-group">
             <label className="form-label">{t('HTTP-Header (KEY=VALUE, eine Zeile je Eintrag)')}</label>
             <textarea className="form-textarea mcp-code-input" rows={3} value={headersText}
