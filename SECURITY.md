@@ -17,6 +17,10 @@ The maintainers should acknowledge a report within seven days and avoid publishi
 - User-defined provider endpoints must be treated as external services. Verify
   their URL, operator and privacy terms before assigning them to an agent.
 - Project folders explicitly selected by the user are writable by authorized agent workflows.
+- Project review commands require an explicit native approval and are rerouted
+  through saved group configuration, but are not OS-sandboxed. They run with the
+  current user's permissions and can potentially access data outside the working
+  directory.
 - The optional localhost API grants broad app access to anyone holding its bearer token.
 
 See [THREAT_MODEL.md](THREAT_MODEL.md) for the detailed trust model.

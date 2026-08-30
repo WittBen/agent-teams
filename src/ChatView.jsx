@@ -11,6 +11,7 @@ import {
 } from './quality-cascade';
 import {
   addTaskEdge,
+  applyAcceptanceDecisions,
   approveAgentDoneTasks,
   createTaskGraph,
   findSafeAutoParallelTaskIds,
@@ -18,8 +19,11 @@ import {
   inferTaskNodeType,
   isTaskNodeReady,
   materializeTaskPlan,
+  normalizeAcceptanceCriteria,
   orderTasksForParallelSelection,
   runTaskBatch,
+  submitTaskEvidence,
+  summarizeAcceptance,
   updateTaskNodeStatus,
   upsertTaskNode,
   validateParallelSelection,
@@ -49,9 +53,11 @@ import {
   cleanAgentReply,
   createHandoff,
   distributeTaskPlanAcrossAgentPools,
+  extractAcceptanceReview,
   extractHandoffsFromReply,
   extractProjectFiles,
   extractTaskPlan,
+  extractTaskEvidence,
   extractUserQuestions,
   getGroupPMAgent,
   hasDirectedMention,
@@ -97,6 +103,19 @@ function rewritePlanHandoffAssignments(reply, planTasks) {
     usedPlanTaskIds.add(selected.id);
     return `@${selected.agentName || selected.agent}: ${match[2].trim()}`;
   }).join('\n');
+}
+
+function formatAcceptanceContext(nodes = []) {
+  const lines = [];
+  for (const node of nodes) {
+    for (const criterion of node.acceptanceCriteria || []) {
+      const evidence = (criterion.evidence || []).at(-1);
+      lines.push(
+        `  - Kriterium ${criterion.id}: ${criterion.text} | erforderlich: ${criterion.required !== false ? 'ja' : 'nein'} | Prüfung: ${criterion.verification || 'reviewer'} | Status: ${criterion.status || 'open'}${evidence ? ` | Letzter Nachweis von ${evidence.author || 'Agent'}: ${evidence.summary}` : ''}`,
+      );
+    }
+  }
+  return lines.length ? `\nAbnahmestand:\n${lines.join('\n')}` : '';
 }
 
 // ── @-mention autocomplete ────────────────────────────────────────────────────
@@ -786,6 +805,20 @@ export default function ChatView({ chat, onEditGroup }) {
     }).catch(() => null);
   }, [chat.id, chat.name, chat.type, conversationStates, running, t]);
 
+  const openReviewWindow = useCallback(() => {
+    if (chat.type !== 'group' || !projectPath || !window.electronAPI?.openReviewWindow) return;
+    window.electronAPI.openReviewWindow({
+      chatId: chat.id,
+      windowTitle: `${t('Prüfumgebung')} – ${chat.name}`,
+    }).catch(error => {
+      addMessage(chat.id, {
+        id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
+        text: `🧪|${error.message || t('Prüfumgebung konnte nicht geöffnet werden.')}`,
+        ts: Date.now(), isError: true,
+      });
+    });
+  }, [addMessage, chat.id, chat.name, chat.type, projectPath, t]);
+
   // Mention autocomplete state
   const [mentionOpen, setMentionOpen] = useState(false);
   const [mentionFilter, setMentionFilter] = useState('');
@@ -1001,21 +1034,40 @@ export default function ChatView({ chat, onEditGroup }) {
     if (!task?.agent) return task;
     const graphNodeId = task.graphNodeId || task.handoff?.id || `graph-task-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
     task.graphNodeId = graphNodeId;
+    const currentGraph = taskGraphRef.current || createTaskGraph(chat.id, chat.name);
+    const existingNode = currentGraph.nodes.find(node => node.id === graphNodeId);
+    const parentNode = parentNodeId ? currentGraph.nodes.find(node => node.id === parentNodeId) : null;
+    const nodeType = inferTaskNodeType({ source: task.source || 'user', parentNodeId });
+    const planRootId = task.planRootId || existingNode?.planRootId || parentNode?.planRootId ||
+      (parentNode?.nodeType === 'request' ? parentNode.id : null);
+    const title = summarizeTaskActivity({ objective: task.objective, source: task.source, handoff: task.handoff })
+      .replace(/^(?:Arbeitet an|Bearbeitet die Übergabe):\s*/i, '');
+    const acceptanceCriteria = existingNode?.acceptanceCriteria?.length
+      ? existingNode.acceptanceCriteria
+      : normalizeAcceptanceCriteria(task.acceptanceCriteria, {
+        taskId: task.planTaskId || graphNodeId,
+        fallbackText: nodeType === 'task' && task.source !== 'user'
+          ? `Das Ergebnis erfüllt die Aufgabe „${title}“ vollständig und überprüfbar.`
+          : '',
+      });
+    if (planRootId) task.planRootId = planRootId;
     const graphNode = {
       id: graphNodeId,
-      title: summarizeTaskActivity({ objective: task.objective, source: task.source, handoff: task.handoff })
-        .replace(/^(?:Arbeitet an|Bearbeitet die Übergabe):\s*/i, ''),
+      title,
       objective: task.handoff?.summary || task.objective,
       agentId: task.agent.id,
       agentName: task.agent.name,
       status,
       source: task.source || 'user',
-      nodeType: inferTaskNodeType({ source: task.source || 'user', parentNodeId }),
+      nodeType,
+      acceptanceCriteria,
     };
+    if (planRootId) graphNode.planRootId = planRootId;
+    if (task.planTaskId) graphNode.planTaskId = task.planTaskId;
     // Do not overwrite a persisted primary parent when an existing task is
     // restored without fresh hierarchy information.
     if (parentNodeId) graphNode.parentNodeId = parentNodeId;
-    let nextGraph = upsertTaskNode(taskGraphRef.current || createTaskGraph(chat.id, chat.name), graphNode);
+    let nextGraph = upsertTaskNode(currentGraph, graphNode);
     if (parentNodeId) nextGraph = addTaskEdge(nextGraph, { from: parentNodeId, to: graphNodeId, kind: 'delegation' });
     commitTaskGraph(nextGraph);
     return task;
@@ -1387,6 +1439,9 @@ export default function ChatView({ chat, onEditGroup }) {
     } else {
       for (const agent of pendingAgents) {
         const initialTask = registerGraphTask({ agent, objective: initialObjective, source: 'user' }, { status: 'queued' });
+        if (chat.type === 'group' && agent.id === pm?.id && !activePlanRootNodeId) {
+          activePlanRootNodeId = initialTask.graphNodeId;
+        }
         taskQueue.enqueue(initialTask);
       }
     }
@@ -1465,6 +1520,45 @@ export default function ChatView({ chat, onEditGroup }) {
       if (runIdRef.current !== myRunId) return;
 
       try {
+        let taskReviewContext = '';
+        const shouldRunConfiguredReview = chat.type === 'group'
+          && Boolean(projectPath)
+          && Boolean(chat.reviewEnvironment?.test?.command)
+          && /(?:test|prüf|validier|kontrollier|abnahme|quality|qa|lektori)/i.test(objective)
+          && /(?:test|qa|quality|prüf|review|lektor|analyst)/i.test(`${agent.role || ''} ${agent.name || ''}`)
+          && Boolean(window.electronAPI?.reviewRun);
+        if (shouldRunConfiguredReview) {
+          setAgentProgress(previous => ({ ...previous, [agent.id]: {
+            ...(previous[agent.id] || {}),
+            detail: t('Führt den konfigurierten Prüfbefehl aus.'),
+            phase: 'review', updatedAt: Date.now(),
+          }}));
+          addMessage(chat.id, {
+            id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
+            text: `🧪|${t('{agent} startet den konfigurierten Prüfbefehl.', { agent: agent.name })}`,
+            ts: Date.now(), isError: false,
+          });
+          try {
+            const reviewResult = await window.electronAPI.reviewRun(chat.id, 'test');
+            if (runIdRef.current !== myRunId) return;
+            taskReviewContext = `\n\n[AUTOMATISCHER PRÜFLAUF]\nBefehl: ${reviewResult.command || ''}\nStatus: ${reviewResult.ok ? 'ERFOLGREICH' : 'FEHLGESCHLAGEN'}\nExit-Code: ${reviewResult.code ?? 'unbekannt'}\nAusgabe:\n${String(reviewResult.output || '(keine Ausgabe)').slice(-30000)}\n`;
+            addMessage(chat.id, {
+              id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
+              text: `🧪|${reviewResult.ok
+                ? t('{agent}: Prüfbefehl erfolgreich abgeschlossen.', { agent: agent.name })
+                : t('{agent}: Prüfbefehl fehlgeschlagen. Die Ausgabe wurde an den Agenten übergeben.', { agent: agent.name })}`,
+              ts: Date.now(), isError: !reviewResult.ok,
+            });
+          } catch (reviewError) {
+            if (runIdRef.current !== myRunId) return;
+            taskReviewContext = `\n\n[AUTOMATISCHER PRÜFLAUF NICHT AUSGEFÜHRT]\n${reviewError.message}\n`;
+            addMessage(chat.id, {
+              id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
+              text: `🧪|${t('{agent}: Prüfbefehl konnte nicht gestartet werden — {error}', { agent: agent.name, error: reviewError.message })}`,
+              ts: Date.now(), isError: true,
+            });
+          }
+        }
         const memoryContext = memAPI ? await memAPI.getContextForAgent(
           memoryNamespace, objective || agent.name, agent.name, 5
         ) : '';
@@ -1475,6 +1569,7 @@ export default function ChatView({ chat, onEditGroup }) {
           groupAgents: chatAgents,
           memoryNamespace,
           projectPath,
+          reviewEnvironment: chat.reviewEnvironment,
           isOrchestrator,
           isDirectChat,
         });
@@ -1488,9 +1583,10 @@ export default function ChatView({ chat, onEditGroup }) {
           : [];
         const currentPlanContext = currentPlanNodes.length
           ? `Aktueller PM-Plan:\n${currentPlanNodes.map(node =>
-            `- ${node.planTaskId}: ${node.title} | Agent: ${node.agentName} | Status: ${node.status}`
-          ).join('\n')}`
+            `- ${node.planTaskId || node.id}: ${node.title} | Agent: ${node.agentName} | Status: ${node.status}`
+          ).join('\n')}${formatAcceptanceContext(currentPlanNodes)}`
           : '';
+        const currentGraphTaskNode = taskGraphRef.current?.nodes?.find(node => node.id === task.graphNodeId);
         const taskCapsule = buildTaskCapsule({
           agentName: agent.name,
           agentRole: agent.role || 'Agent',
@@ -1538,6 +1634,7 @@ export default function ChatView({ chat, onEditGroup }) {
             !isDirectChat ? currentPlanContext : '',
           ].filter(Boolean),
           handoff: activeHandoff,
+          acceptanceCriteria: currentGraphTaskNode?.acceptanceCriteria || [],
           requestedOutput: isDirectChat
             ? ['Direkte Antwort an den User', 'Offene Rückfrage, falls wirklich nötig']
             : ['Konkretes Ergebnis', 'Offene Fragen oder nächster Handoff, falls nötig'],
@@ -1604,7 +1701,7 @@ export default function ChatView({ chat, onEditGroup }) {
             history: nextHistory,
             userMessage: null,
             groupContext: isOrchestrator ? chatAgents.map(a => a.name).join(', ') : null,
-            kbContext: kbContext + memoryContext + projectContext + extraContext,
+            kbContext: kbContext + memoryContext + projectContext + taskReviewContext + extraContext,
             isolatedSession,
             projectPath,
             requestId: agentRequestId,
@@ -1746,6 +1843,8 @@ export default function ChatView({ chat, onEditGroup }) {
         }
 
         let rawReply = normalizeAgentMentionLayout(reply, agent, chatAgents);
+        const submittedTaskEvidence = extractTaskEvidence(rawReply);
+        const acceptanceDecisions = isOrchestrator ? extractAcceptanceReview(rawReply) : [];
         const parsedTaskPlan = isOrchestrator && !(useLeanFastPath && task.source === 'user')
           ? extractTaskPlan(rawReply)
           : null;
@@ -1807,6 +1906,22 @@ export default function ChatView({ chat, onEditGroup }) {
           projectFiles,
           savedProjectFiles,
         });
+        const evidenceNode = taskGraphRef.current?.nodes?.find(node => node.id === task.graphNodeId);
+        if (evidenceNode?.acceptanceCriteria?.length) {
+          const evidenceKind = savedProjectFiles.length
+            ? 'artifact'
+            : taskReviewContext.includes('Status: ERFOLGREICH')
+              ? 'automatic-test'
+              : 'result';
+          commitTaskGraph(graph => submitTaskEvidence(graph, task.graphNodeId, submittedTaskEvidence, {
+            author: agent.name,
+            fallbackSummary: reviewEvidence,
+            kind: evidenceKind,
+          }));
+        }
+        if (acceptanceDecisions.length) {
+          commitTaskGraph(graph => applyAcceptanceDecisions(graph, acceptanceDecisions, { reviewer: agent.name }));
+        }
         if (projectPath && window.electronAPI?.projectWrite) {
           const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
           const safeAgentName = agent.name.replace(/[^a-zA-Z0-9_-]/g, '-');
@@ -1917,7 +2032,7 @@ export default function ChatView({ chat, onEditGroup }) {
         for (const handoff of handoffs) {
           const target = chatAgents.find(candidate => candidate.name.toLowerCase() === handoff.to.toLowerCase());
           if (!target || target.id === agent.id) continue;
-          if (memAPI) await memAPI.handoff(handoff);
+          if (memAPI) await memAPI.handoff(memoryNamespace, handoff);
           if (shouldDeferHandoffToPM({ fromAgent: agent, targetAgent: target, pm })) {
             needsSynthesis = true;
             continue;
@@ -2066,6 +2181,7 @@ export default function ChatView({ chat, onEditGroup }) {
             hasActivePlan: !!activePlanRootNodeId,
             useLeanFastPath,
             asksUser,
+            requiresAcceptanceReview: Boolean(evidenceNode?.acceptanceCriteria?.some(criterion => criterion.required !== false)),
           })) needsSynthesis = true;
         }
 
@@ -2097,6 +2213,19 @@ export default function ChatView({ chat, onEditGroup }) {
             !FINISHED_PLAN_STATUSES.has(node.status)
           ).length
           : 0;
+        const acceptanceSummary = activePlanRootNodeId
+          ? summarizeAcceptance(taskGraphRef.current, activePlanRootNodeId)
+          : { ready: true, unmet: [], required: 0, passed: 0 };
+        const requestedProjectCompletion = /\[\[PROJECT_DONE\]\]/i.test(rawReply);
+        if (requestedProjectCompletion && !acceptanceSummary.ready) {
+          resumableFailure = true;
+          setGraphTaskStatus(task, 'blocked', { blockedReason: 'acceptance-pending' });
+          addMessage(chat.id, {
+            id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
+            text: `🛡️|${t('Abschluss blockiert: {count} erforderliche Abnahmekriterien sind noch nicht bestanden. Der PM muss Nachweise prüfen, Korrekturen beauftragen oder eine erforderliche User-Freigabe einholen.', { count: acceptanceSummary.unmet.length })}`,
+            ts: Date.now(), isError: false,
+          });
+        }
         if (shouldCompleteProject({
           isOrchestrator,
           source: task.source,
@@ -2104,6 +2233,7 @@ export default function ChatView({ chat, onEditGroup }) {
           handoffCount: handoffs.length,
           pendingTaskCount: taskQueue.length + openPlanTaskCount,
           asksUser,
+          acceptanceReady: acceptanceSummary.ready,
         })) {
           projectCompleted = true;
           needsSynthesis = false;
@@ -2120,6 +2250,9 @@ export default function ChatView({ chat, onEditGroup }) {
               `- ${t('Abschluss durch: {agent}', { agent: agent.name })}`,
               `- ${t('Zeitpunkt: {time}', { time: new Date().toISOString() })}`,
               `- ${t('Bearbeitete Agenten-Tasks: {count}', { count: successfulTasks })}`,
+              ...(acceptanceSummary.required > 0
+                ? [`- ${t('Bestandene Abnahmekriterien: {passed}/{required}', { passed: acceptanceSummary.passed, required: acceptanceSummary.required })}`]
+                : []),
               '',
               `## ${t('Abschlussbericht')}`,
               '',
@@ -2396,6 +2529,7 @@ export default function ChatView({ chat, onEditGroup }) {
           objective: synthesisHandoff.summary,
           handoff: synthesisHandoff,
           source: 'team-synthesis',
+          planRootId: activePlanRootNodeId,
           ...(plannedFinalReviewNode ? {
             graphNodeId: plannedFinalReviewNode.id,
             planRootId: activePlanRootNodeId,
@@ -2635,7 +2769,7 @@ export default function ChatView({ chat, onEditGroup }) {
       discardConversationCheckpoint();
     }
     setRunning(false);
-  }, [apiKeys, providerConnections, chatAgents, conversationStates, kbPath, projectPath, memoryEnabled, memoryConfig?.namespace, memoryAPI, mcpServers, chat.mcpServers, chat.qualityRouting, qualityRouting, conversationLimits, recordQualityEvent, refreshMemoryCount, chat.id, chat.name, chat.type, addMessage, requestMcpPermission, handleMcpPermissionConsumed, handleMcpToolResult, persistConversationCheckpoint, discardConversationCheckpoint, commitTaskGraph, registerGraphTask, setGraphTaskStatus, t]);
+  }, [apiKeys, providerConnections, chatAgents, conversationStates, kbPath, projectPath, memoryEnabled, memoryConfig?.namespace, memoryAPI, mcpServers, chat.mcpServers, chat.qualityRouting, chat.reviewEnvironment, qualityRouting, conversationLimits, recordQualityEvent, refreshMemoryCount, chat.id, chat.name, chat.type, addMessage, requestMcpPermission, handleMcpPermissionConsumed, handleMcpToolResult, persistConversationCheckpoint, discardConversationCheckpoint, commitTaskGraph, registerGraphTask, setGraphTaskStatus, t]);
 
   const handleCancelRun = useCallback(async () => {
     if (!running) return;
@@ -2668,6 +2802,9 @@ export default function ChatView({ chat, onEditGroup }) {
     setStoppedForUser(false);
     setRunning(false);
 
+    if (window.electronAPI?.reviewStop) {
+      await window.electronAPI.reviewStop(chat.id, 'test').catch(() => null);
+    }
     if (window.electronAPI?.codexCancel) {
       await Promise.all(activeRuns
         .filter(run => run.provider === 'codex')
@@ -2945,8 +3082,29 @@ export default function ChatView({ chat, onEditGroup }) {
       if (action?.chatId !== chat.id) return;
       if (action.type === 'run-parallel') handleScheduleChoice(action.taskIds || []);
       if (action.type === 'continue-sequential') handleScheduleChoice([]);
+      if (action.type === 'acceptance-decision') {
+        const node = taskGraphRef.current?.nodes?.find(candidate => candidate.id === action.taskId);
+        const criterion = node?.acceptanceCriteria?.find(candidate => candidate.id === action.criterionId);
+        if (!criterion || criterion.verification !== 'user' || !['passed', 'failed'].includes(action.status)) return;
+        commitTaskGraph(graph => applyAcceptanceDecisions(graph, [{
+          taskId: node.id,
+          criterionId: criterion.id,
+          status: action.status,
+          note: action.status === 'passed' ? t('Vom User im Aufgabenfenster bestätigt.') : t('Vom User im Aufgabenfenster abgelehnt.'),
+        }], { reviewer: 'User', userOnly: true }));
+        addMessage(chat.id, {
+          id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
+          text: `🛡️|${t(
+            action.status === 'passed'
+              ? 'User-Abnahme bestätigt: {criterion}'
+              : 'User-Abnahme abgelehnt: {criterion}',
+            { criterion: criterion.text },
+          )}`,
+          ts: Date.now(), isError: action.status === 'failed',
+        });
+      }
     });
-  }, [chat.id, handleScheduleChoice]);
+  }, [addMessage, chat.id, commitTaskGraph, handleScheduleChoice, t]);
 
   return (
     <>
@@ -2982,6 +3140,9 @@ export default function ChatView({ chat, onEditGroup }) {
         )}
         {chat.type === 'group' && (
           <button className="icon-btn" title={t('Aufgabenplan')} onClick={() => openTaskGraphWindow()} style={{ fontSize: 14 }}>🗺️</button>
+        )}
+        {chat.type === 'group' && projectPath && (
+          <button className="icon-btn" title={t('Prüf- und Vorschauumgebung')} onClick={openReviewWindow} style={{ fontSize: 14 }}>🧪</button>
         )}
         {chat.type === 'group' && memoryEnabled && (
           <MemoryBadge count={memoryCount} onOpen={handleOpenMemory} />

@@ -299,6 +299,7 @@ async function callLLMDirect({ apiKeys, providerConnections = [], providerSecret
   const recentHistory = history.slice(-20);
 
   if (provider === 'codex') {
+    if (apiKeys?.codexCli === false) throw new Error('Codex CLI wurde in den Einstellungen getrennt.');
     const merged = recentHistory.map(m => ({
       role: m.agentId === 'user' ? 'user' : 'assistant',
       content: (m.agentId !== 'user' && m.agentId !== agent.id) ? `[${m.senderName}]: ${m.text}` : m.text,

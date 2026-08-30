@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openUserDataFolder: () => ipcRenderer.invoke('user-data-open-folder'),
   pickMemoryFile: (params) => ipcRenderer.invoke('pick-memory-file', params),
   memoryFileOperation: (params) => ipcRenderer.invoke('memory-file-operation', params),
+  memoryLocalOperation: (params) => ipcRenderer.invoke('memory-local-operation', params),
   // CLI credential detection
   llmCall: (params) => ipcRenderer.invoke('llm-call', params),
   codexCall: (params) => ipcRenderer.invoke('codex-call', params),
@@ -71,5 +72,30 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const wrapped = (_, action) => listener(action);
     ipcRenderer.on('task-window-action', wrapped);
     return () => ipcRenderer.removeListener('task-window-action', wrapped);
+  },
+  // Detached project review and preview environment
+  openReviewWindow: (state) => ipcRenderer.invoke('review-window-open', state),
+  getReviewWindowState: () => ipcRenderer.invoke('review-window-get-state'),
+  closeReviewWindow: () => ipcRenderer.send('review-window-close'),
+  reviewList: (chatId) => ipcRenderer.invoke('review-list', { chatId }),
+  reviewInspect: (chatId, relativePath) => ipcRenderer.invoke('review-inspect', { chatId, relativePath }),
+  reviewSaveText: (params) => ipcRenderer.invoke('review-save-text', params),
+  reviewReplaceWord: (params) => ipcRenderer.invoke('review-replace-word', params),
+  reviewSnapshots: (chatId, relativePath = '') => ipcRenderer.invoke('review-snapshots', { chatId, relativePath }),
+  reviewRestore: (chatId, snapshotId) => ipcRenderer.invoke('review-restore', { chatId, snapshotId }),
+  reviewOpenFile: (chatId, relativePath) => ipcRenderer.invoke('review-open-file', { chatId, relativePath }),
+  reviewRun: (chatId, action) => ipcRenderer.invoke('review-run', { chatId, action }),
+  reviewStop: (chatId, action = 'preview') => ipcRenderer.invoke('review-stop', { chatId, action }),
+  reviewStatus: (chatId) => ipcRenderer.invoke('review-status', { chatId }),
+  reviewOpenPreviewUrl: (chatId) => ipcRenderer.invoke('review-open-preview-url', { chatId }),
+  onReviewWindowState: (listener) => {
+    const wrapped = (_, state) => listener(state);
+    ipcRenderer.on('review-window-state', wrapped);
+    return () => ipcRenderer.removeListener('review-window-state', wrapped);
+  },
+  onReviewProcessOutput: (listener) => {
+    const wrapped = (_, output) => listener(output);
+    ipcRenderer.on('review-process-output', wrapped);
+    return () => ipcRenderer.removeListener('review-process-output', wrapped);
   },
 });

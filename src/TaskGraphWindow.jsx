@@ -39,11 +39,12 @@ export default function TaskGraphWindow() {
     };
   }, []);
 
-  const sendAction = (type, taskIds = []) => {
+  const sendAction = (type, taskIds = [], details = {}) => {
     window.electronAPI?.sendTaskWindowAction?.({
       type,
       chatId: state.chatId,
       taskIds,
+      ...details,
     });
   };
 
@@ -56,6 +57,9 @@ export default function TaskGraphWindow() {
         onClose={() => window.electronAPI?.closeTaskWindow?.()}
         onRunParallel={ids => sendAction('run-parallel', ids)}
         onContinueSequential={() => sendAction('continue-sequential')}
+        onAcceptanceDecision={(taskId, criterionId, status) => sendAction('acceptance-decision', [], {
+          taskId, criterionId, status,
+        })}
         closeTitle={t('Aufgabenfenster schließen')}
       />
     </main>

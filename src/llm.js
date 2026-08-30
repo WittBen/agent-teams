@@ -33,6 +33,9 @@ function classifyError(err, provider) {
   const status = err?.status || err?.statusCode || 0;
   const providerLabel = provider === 'anthropic' ? 'Anthropic' : provider === 'openai' ? 'OpenAI' : String(provider || 'Provider');
 
+  if (provider === 'codex' && msg.includes('getrennt')) {
+    return '🔌 Codex CLI ist von der App getrennt. Bitte in Einstellungen → API-Zugang erneut verbinden.';
+  }
   if (status === 401 || msg.includes('401') || msg.includes('incorrect api key') || msg.includes('invalid_api_key') || msg.includes('authentication') || msg.includes('unauthenticated')) {
     return provider === 'codex'
       ? '🔑 Codex ist nicht angemeldet. Bitte in Einstellungen → API-Zugang die Codex-Anmeldung starten.'
@@ -158,6 +161,9 @@ export async function callLLM({ apiKeys, providerConnections = [], agent, histor
   const attachments = collectChatAttachments(recentHistory);
 
   if (provider === 'codex') {
+    if (apiKeys?.codexCli === false) {
+      throw new Error('🔌 Codex CLI ist von der App getrennt. Bitte in Einstellungen → API-Zugang erneut verbinden.');
+    }
     const merged = recentHistory.map(msg => ({
       role: msg.agentId === 'user' ? 'user' : 'assistant',
       content: (msg.agentId !== 'user' && msg.agentId !== agent.id)

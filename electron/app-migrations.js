@@ -1,6 +1,6 @@
 const { normalizeProviderConnections } = require('./provider-config');
 
-const CURRENT_DATA_SCHEMA_VERSION = 3;
+const CURRENT_DATA_SCHEMA_VERSION = 4;
 
 const ARRAY_KEYS = ['agents', 'groups', 'mcpServers', 'agentRoles', 'providerConnections'];
 const OBJECT_KEYS = [
@@ -48,6 +48,23 @@ function migrateAppData(store) {
 
   if (previousVersion < 3 && store.get('providerConnections') === undefined) {
     store.set('providerConnections', []);
+  }
+
+  if (previousVersion < 4) {
+    const groups = store.get('groups');
+    if (Array.isArray(groups)) {
+      store.set('groups', groups.map(group => ({
+        ...group,
+        reviewEnvironment: group?.reviewEnvironment && typeof group.reviewEnvironment === 'object'
+          ? group.reviewEnvironment
+          : {
+            test: { command: '', args: [] },
+            preview: { command: '', args: [] },
+            previewUrl: '',
+            testTimeoutMs: 120000,
+          },
+      })));
+    }
   }
 
   store.set('dataSchemaVersion', CURRENT_DATA_SCHEMA_VERSION);

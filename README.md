@@ -2,7 +2,7 @@
 
 Agent Teams is a local-first Electron and React desktop application for configurable AI agents, direct chats and coordinated multi-agent groups. Groups can share structured memory, use project folders, connect to MCP servers and maintain a task graph.
 
-> **Status:** `1.1.0-beta.4`. This project is in public beta. Keep backups of important project data and review every MCP server before granting access.
+> **Status:** `1.1.0-beta.7`. This project is in public beta. Keep backups of important project data and review every MCP server before granting access.
 
 ## Download
 
@@ -63,7 +63,7 @@ The release checklist, including Windows code signing, is documented in
 [ARCHITECTURE.md](ARCHITECTURE.md) and [THREAT_MODEL.md](THREAT_MODEL.md).
 
 Pushing a version tag that exactly matches `package.json`, for example
-`v1.1.0-beta.4`, runs the release workflow. GitHub Actions verifies the project,
+`v1.1.0-beta.7`, runs the release workflow. GitHub Actions verifies the project,
 builds the Windows installer, generates `SHA256SUMS.txt` and publishes a beta
 tag as the latest public release while retaining the beta label in its version
 and release notes.
@@ -98,11 +98,45 @@ API_TOKEN=$env:MCP_API_TOKEN
 
 The application asks separately whether to trust a server and whether a particular tool may run.
 
+## Generic acceptance workflow
+
+Every planned group task can carry required or optional acceptance criteria.
+Criteria are domain-neutral and may be checked by a reviewer, by an available
+deterministic check, or through explicit user approval. Agents attach concise
+evidence to the criteria they worked on; the PM records passed, failed or waived
+decisions during final review. User-approval criteria remain under user control
+in the detached task window. A group run cannot report project completion while
+required criteria are still open, merely submitted or rejected. Plans without
+acceptance criteria from older app versions continue to use the legacy flow.
+
+## Project review and preview
+
+Groups with an output folder can open a separate review window from the group
+chat. It lists reviewable project files, previews text, images and Word content,
+opens PDFs and other formats through their installed desktop application, and
+keeps a local snapshot before every supported text or DOCX change. DOCX editing
+uses conservative exact-text replacement; replacements spanning differently
+formatted Word runs are refused to protect the document structure.
+
+Each group may configure one test command and one long-running preview command.
+Reviewer agents can automatically run the test command when their assigned task
+is a review or validation task. The first run requires a native confirmation;
+changing the folder, command or arguments revokes that approval. Commands use
+the group folder as their working directory and receive a scrubbed environment,
+but they still run with the signed-in operating-system user's permissions. This
+is a controlled runner, not an operating-system security sandbox.
+
 ## Local data
 
 Electron stores app state below the operating system's application-data directory. Attachments are copied into an application-managed `chat-attachments` directory. A group can alternatively use a JSON memory file selected by the user.
 
 Existing installations using the historical `whatsapp-agents` data directory continue using that directory to avoid losing chats during the rename.
+
+All agents in one group use the group's configured shared-memory namespace.
+Different groups remain isolated by default; choose the same namespace to share
+app-local memory, or the same JSON file and namespace for file-backed memory.
+Parallel writes are serialized so independently running agents cannot overwrite
+one another's entries.
 
 ## Optional REST API
 

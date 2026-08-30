@@ -5,6 +5,7 @@ import { normalizeAgentRoleState } from './agent-roles';
 import { DEFAULT_CONVERSATION_LIMITS, normalizeConversationLimits } from './conversation-limits';
 import { applyOfficialMcpPresets } from './mcp';
 import { normalizeProviderConnections } from './provider-catalog';
+import { normalizeReviewEnvironment } from './review-environment';
 import {
   clearUserRequests,
   enqueueUserRequest as appendUserRequest,
@@ -165,6 +166,7 @@ function ensureSystemPM(agentList, groupList) {
         ...(usesJsonFile ? { filePath: g.memory.filePath.trim() } : {}),
       },
       mcpServers: Array.isArray(g.mcpServers) ? g.mcpServers : [],
+      reviewEnvironment: normalizeReviewEnvironment(g.reviewEnvironment),
       agentIds: (g.agentIds || []).includes(SYSTEM_PM_AGENT.id)
         ? g.agentIds
         : [SYSTEM_PM_AGENT.id, ...(g.agentIds || [])],

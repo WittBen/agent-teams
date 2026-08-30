@@ -27,11 +27,43 @@ and the PM performs the final completion review. Group memory and resumable run
 state preserve context across interruptions. The task graph mirrors planned,
 blocked, active, and completed work.
 
+All agents in a group resolve the same configured memory provider and namespace.
+Local-memory mutations are single atomic main-process operations and are queued
+per namespace; JSON-file mutations are queued per file. Groups share memory only
+when they intentionally select the same namespace and, for file-backed memory,
+the same JSON file. Structured handoffs live in that group namespace and are
+prioritized only for their addressed agent.
+
 User messages submitted during an active agent run are persisted in a separate
 per-chat FIFO queue. They remain visible immediately and are processed in order
 after the current run step finishes. PM plans are distributed across agents in
 the same role pool; independent tasks may run in parallel only after dependency,
 agent-capacity, and file-conflict checks succeed.
+
+Planned specialist tasks use a domain-neutral acceptance contract. Each
+criterion records whether it is required, how it must be verified, submitted
+evidence, and its review state. Specialist evidence is data, not approval. The
+PM may pass, reject or explicitly waive reviewer/automatic criteria; criteria
+that require user approval can only be decided through the user-facing task
+window. The completion gate evaluates persisted graph state and refuses
+`PROJECT_DONE` until every required criterion in the active plan is passed or
+waived. Graphs created by older versions without criteria remain compatible.
+
+## Project review flow
+
+A group may configure a fixed test command, preview command and optional preview
+URL. The renderer can request an action only by group ID and action name. The
+main process resolves the trusted project path and stored command, validates the
+configuration again, and requires a native fingerprint-based approval before
+the first execution. Process output is bounded and streamed to the singleton
+detached review window. Provider secrets are removed from the child environment.
+
+File inspection has a separate containment boundary: paths are resolved below
+the selected group folder, traversal, symlinks, sensitive filenames and build or
+dependency folders are blocked, and file sizes are limited. Text and conservative
+DOCX replacements create integrity-checked snapshots in application data before
+writing. Word previews inspect text and structure only; visual layout remains the
+responsibility of Word or another compatible Office application.
 
 ## External boundaries
 
