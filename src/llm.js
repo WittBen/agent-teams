@@ -70,6 +70,28 @@ function withTimeout(promise, ms = 30000) {
   ]);
 }
 
+export function normalizeConversationLanguage(language) {
+  return language === 'en' ? 'en' : 'de';
+}
+
+export function buildResponseLanguageInstruction(language) {
+  return normalizeConversationLanguage(language) === 'en'
+    ? `
+
+RESPONSE LANGUAGE (MANDATORY):
+• Write every user-visible sentence in English.
+• This includes PM plans, task titles, acceptance criteria, @Agent delegations, @user questions, handoffs, reviews, summaries, tool-result explanations, and final answers.
+• This rule takes priority over language preferences in role descriptions or earlier conversation history.
+• Preserve protocol markers such as [[TASK_PLAN]], [[TASK_DONE]], [[TASK_EVIDENCE]], [[ACCEPTANCE_REVIEW]], [[PROJECT_DONE]], [[MCP_CALL]], @Name, and @user exactly.`
+    : `
+
+ANTWORTSPRACHE (VERBINDLICH):
+• Schreibe jeden für den User sichtbaren Satz auf Deutsch.
+• Dies gilt auch für PM-Pläne, Aufgabentitel, Abnahmekriterien, @Agent-Delegationen, @user-Rückfragen, Übergaben, Reviews, Zusammenfassungen, Werkzeugerklärungen und Abschlussantworten.
+• Diese Regel hat Vorrang vor Sprachvorgaben in Rollenbeschreibungen oder dem bisherigen Gesprächsverlauf.
+• Protokollmarker wie [[TASK_PLAN]], [[TASK_DONE]], [[TASK_EVIDENCE]], [[ACCEPTANCE_REVIEW]], [[PROJECT_DONE]], [[MCP_CALL]], @Name und @user bleiben exakt erhalten.`;
+}
+
 export function collectChatAttachments(history = []) {
   const seen = new Set();
   const newestFirst = [];
@@ -144,7 +166,7 @@ export function prepareBrowserAttachmentMessages(messages, attachments, provider
 
 // ── Main LLM caller ───────────────────────────────────────────────────────────
 
-export async function callLLM({ apiKeys, providerConnections = [], agent, history, userMessage, groupContext, kbContext, isolatedSession = null, projectPath = '', requestId = '' }) {
+export async function callLLM({ apiKeys, providerConnections = [], agent, history, userMessage, groupContext, kbContext, isolatedSession = null, projectPath = '', requestId = '', language = 'de' }) {
   const provider = agent.provider || 'openai';
   const model = agent.model || (provider === 'anthropic' ? 'claude-haiku-4-5' : provider === 'codex' ? 'codex-default' : 'gpt-4o-mini');
 
@@ -153,9 +175,9 @@ export async function callLLM({ apiKeys, providerConnections = [], agent, histor
     ? isolatedSession.systemPrompt
     : (agent.systemPrompt || 'You are a helpful assistant.');
   const groupRules = (groupContext && !isolatedSession)
-    ? `\n\nDu bist in einem Gruppen-Chat mit: ${groupContext}.\n\nWICHTIGE REGELN:\n• Antworte NUR wenn du direkt @erwähnt wurdest.\n• Erwähne andere Agenten mit @Name um Aufgaben zu delegieren. Die Erwähnung muss ganz links am Anfang einer eigenen Zeile stehen.\n• Erwähnungen im Fließtext oder mit Einrückung lösen keine Aktion aus.\n• Schreibe "@user" ganz links am Anfang einer eigenen Zeile, wenn du eine Entscheidung des Users brauchst.\n• NIEMALS @${agent.name} (dich selbst) erwähnen.\n• Halte Antworten knapp (2-4 Sätze). Sprich Deutsch.`
+    ? `\n\nDu bist in einem Gruppen-Chat mit: ${groupContext}.\n\nWICHTIGE REGELN:\n• Antworte NUR wenn du direkt @erwähnt wurdest.\n• Erwähne andere Agenten mit @Name um Aufgaben zu delegieren. Die Erwähnung muss ganz links am Anfang einer eigenen Zeile stehen.\n• Erwähnungen im Fließtext oder mit Einrückung lösen keine Aktion aus.\n• Schreibe "@user" ganz links am Anfang einer eigenen Zeile, wenn du eine Entscheidung des Users brauchst.\n• NIEMALS @${agent.name} (dich selbst) erwähnen.\n• Halte Antworten knapp (2-4 Sätze).`
     : '';
-  const systemContent = basePrompt + groupRules + (kbContext || '');
+  const systemContent = basePrompt + groupRules + (kbContext || '') + buildResponseLanguageInstruction(language);
 
   const recentHistory = history.slice(-20);
   const attachments = collectChatAttachments(recentHistory);
@@ -258,7 +280,12 @@ export async function callLLM({ apiKeys, providerConnections = [], agent, histor
     }
     // Anthropic requires messages to end with user role — add synthetic prompt if needed
     if (merged[merged.length - 1].role === 'assistant') {
-      merged.push({ role: 'user', content: '(Bitte antworte auf die vorige Nachricht)' });
+      merged.push({
+        role: 'user',
+        content: normalizeConversationLanguage(language) === 'en'
+          ? '(Please answer the previous message)'
+          : '(Bitte antworte auf die vorige Nachricht)',
+      });
     }
 
     try {

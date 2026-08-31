@@ -311,6 +311,7 @@ class AgentAPIServer {
           const text = await callLLMDirect({
             apiKeys, providerConnections, providerSecrets, agent, history,
             userMessage: null, groupContext, projectPath: group?.projectPath || '',
+            language: this.store.get('language') || 'de',
           });
           const agentMsg = { id: Date.now() + Math.random(), agentId: agent.id, senderName: agent.name, text, ts: Date.now() };
           this.addMessage(chatId, agentMsg);

@@ -10,6 +10,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
 
 const electronMainSource = await fs.readFile(path.join(root, 'electron/main.js'), 'utf8');
+const apiServerSource = await fs.readFile(path.join(root, 'electron/api-server.js'), 'utf8');
 const codexMainSource = await fs.readFile(path.join(root, 'electron/codex-main.js'), 'utf8');
 const preloadSource = await fs.readFile(path.join(root, 'electron/preload.js'), 'utf8');
 const appSource = await fs.readFile(path.join(root, 'src/App.jsx'), 'utf8');
@@ -30,6 +31,8 @@ const indexSource = await fs.readFile(path.join(root, 'index.html'), 'utf8');
 const packageJson = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8'));
 const hiddenStarterSource = await fs.readFile(path.join(root, 'start.vbs'), 'utf8');
 assert.match(electronMainSource, /let taskWindow;/);
+assert.match(apiServerSource, /language: this\.store\.get\('language'\) \|\| 'de'/);
+assert.match(chatViewSource, /requestId: agentRequestId,\s+language,/);
 assert.match(electronMainSource, /if \(taskWindow && !taskWindow\.isDestroyed\(\)\)[\s\S]*taskWindow\.focus\(\)/);
 assert.match(electronMainSource, /taskWindow = new BrowserWindow\(/);
 assert.match(electronMainSource, /taskWindow\.loadFile\(distFile, \{ query: \{ taskWindow: '1' \} \}\)/);
@@ -151,6 +154,12 @@ const agentRoles = await importSource('src/agent-roles.js');
 const conversationLimits = await importSource('src/conversation-limits.js');
 const userRequestQueue = await importSource('src/user-request-queue.js');
 const providerCatalog = await importSource('src/provider-catalog.js');
+assert.equal(llm.normalizeConversationLanguage('en'), 'en');
+assert.equal(llm.normalizeConversationLanguage('de'), 'de');
+assert.equal(llm.normalizeConversationLanguage('fr'), 'de');
+assert.match(llm.buildResponseLanguageInstruction('en'), /Write every user-visible sentence in English/);
+assert.match(llm.buildResponseLanguageInstruction('en'), /PM plans[\s\S]*@Agent delegations[\s\S]*final answers/);
+assert.match(llm.buildResponseLanguageInstruction('de'), /jeden für den User sichtbaren Satz auf Deutsch/);
 const electronMcpPreset = require(path.join(root, 'electron/mcp-preset.js'));
 const pm = { id: 'pm', name: 'PM', role: 'Projektleiter', isSystemAgent: true };
 const coder = { id: 'coder', name: 'Max', role: 'Developer' };
@@ -291,12 +300,17 @@ globalThis.window = {
       assert.equal(params.model, 'claude-opus-4-5');
       assert.equal(params.requestId, 'claude-test-request');
       assert.equal(params.attachments?.[0]?.name, 'README.md');
+      assert.match(params.systemContent, /RESPONSE LANGUAGE \(MANDATORY\)/);
+      assert.match(params.systemContent, /Write every user-visible sentence in English/);
+      assert.doesNotMatch(params.systemContent, /Sprich Deutsch/);
       return { text: 'Claude-CLI-Antwort' };
     },
     llmCall: async params => {
       directAnthropicCallCount += 1;
       assert.equal(params.provider, 'anthropic');
       assert.equal(Object.prototype.hasOwnProperty.call(params, 'auth'), false);
+      assert.match(params.systemContent, /ANTWORTSPRACHE \(VERBINDLICH\)/);
+      assert.doesNotMatch(params.systemContent, /Sprich Deutsch/);
       return { text: 'Anthropic-API-Antwort' };
     },
   },
@@ -307,6 +321,7 @@ assert.equal(await llm.callLLM({
   agent: claudeAgent,
   history: [{ agentId: 'user', senderName: 'User', text: 'Teste den CLI-Weg.', attachments: [browserAttachments[0]] }],
   requestId: 'claude-test-request',
+  language: 'en',
 }), 'Claude-CLI-Antwort');
 assert.equal(claudeCallCount, 1);
 assert.equal(directAnthropicCallCount, 0);
@@ -1439,6 +1454,10 @@ assert.equal(typeof claudeStatus.installed, 'boolean');
 assert.equal(typeof claudeStatus.connected, 'boolean');
 
 const llmMain = require(path.join(root, 'electron/llm-main.js'));
+assert.equal(llmMain.normalizeConversationLanguage('en'), 'en');
+assert.equal(llmMain.normalizeConversationLanguage('invalid'), 'de');
+assert.match(llmMain.buildResponseLanguageInstruction('en'), /every user-visible sentence in English/);
+assert.match(llmMain.buildResponseLanguageInstruction('de'), /sichtbaren Satz auf Deutsch/);
 assert.equal(llmMain.parseRetryAfterMs({ 'retry-after': '2' }, 0), 2000);
 assert.equal(llmMain.parseRetryAfterMs({ 'retry-after': 'Thu, 01 Jan 1970 00:00:03 GMT' }, 1000), 2000);
 const providerRuntime = require(path.join(root, 'electron/provider-config.js'));
