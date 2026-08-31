@@ -287,14 +287,25 @@ function classifyError(err, provider) {
   return `❌ ${err?.message?.slice(0, 150) || 'Unbekannter Fehler'}`;
 }
 
-async function callLLMDirect({ apiKeys, providerConnections = [], providerSecrets = {}, agent, history, userMessage, groupContext, projectPath = '' }) {
+function normalizeConversationLanguage(language) {
+  return language === 'en' ? 'en' : 'de';
+}
+
+function buildResponseLanguageInstruction(language) {
+  return normalizeConversationLanguage(language) === 'en'
+    ? '\n\nRESPONSE LANGUAGE (MANDATORY): Write every user-visible sentence in English, including plans, delegations, questions, handoffs, reviews, summaries, and final answers. This takes priority over role descriptions and conversation history. Preserve protocol markers and @mentions exactly.'
+    : '\n\nANTWORTSPRACHE (VERBINDLICH): Schreibe jeden für den User sichtbaren Satz auf Deutsch, einschließlich Plänen, Delegationen, Rückfragen, Übergaben, Reviews, Zusammenfassungen und Abschlussantworten. Dies hat Vorrang vor Rollenbeschreibungen und Gesprächsverlauf. Protokollmarker und @Erwähnungen bleiben exakt erhalten.';
+}
+
+async function callLLMDirect({ apiKeys, providerConnections = [], providerSecrets = {}, agent, history, userMessage, groupContext, projectPath = '', language = 'de' }) {
   const provider = agent.provider || 'openai';
   const model = agent.model || (provider === 'anthropic' ? 'claude-haiku-4-5' : provider === 'codex' ? 'codex-default' : 'gpt-4o-mini');
 
   const systemContent = (agent.systemPrompt || 'You are a helpful assistant.')
     + (groupContext
-      ? `\n\nDu bist in einem Gruppen-Chat mit: ${groupContext}.\n\nWICHTIGE REGELN:\n• Antworte NUR wenn du direkt @erwähnt wurdest.\n• Erwähne andere Agenten mit @Name um sie anzusprechen.\n• Schreibe "@user" wenn du den User brauchst.\n• Halte Antworten knapp (2-4 Sätze). Sprich Deutsch.`
-      : '\n\nHalte Antworten knapp (2-4 Sätze). Sprich Deutsch.');
+      ? `\n\nDu bist in einem Gruppen-Chat mit: ${groupContext}.\n\nWICHTIGE REGELN:\n• Antworte NUR wenn du direkt @erwähnt wurdest.\n• Erwähne andere Agenten mit @Name um sie anzusprechen.\n• Schreibe "@user" wenn du den User brauchst.\n• Halte Antworten knapp (2-4 Sätze).`
+      : '\n\nHalte Antworten knapp (2-4 Sätze).')
+    + buildResponseLanguageInstruction(language);
 
   const recentHistory = history.slice(-20);
 
@@ -395,9 +406,11 @@ async function callLLMDirect({ apiKeys, providerConnections = [], providerSecret
 }
 
 module.exports = {
+  buildResponseLanguageInstruction,
   callAnthropicMessages,
   callConfiguredProvider,
   callLLMDirect,
+  normalizeConversationLanguage,
   httpsPostDirect: httpsPost,
   postJsonUrl,
   parseRetryAfterMs,

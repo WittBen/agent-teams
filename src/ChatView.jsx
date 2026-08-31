@@ -1705,6 +1705,7 @@ export default function ChatView({ chat, onEditGroup }) {
             isolatedSession,
             projectPath,
             requestId: agentRequestId,
+            language,
           }),
           callRecovery: ({ history: nextHistory }) => callLLM({
             apiKeys, providerConnections,
@@ -1718,6 +1719,7 @@ export default function ChatView({ chat, onEditGroup }) {
             },
             projectPath,
             requestId: agentRequestId,
+            language,
           }),
           onActivity: ({ serverName, toolName }) => {
             usedMcp = true;
@@ -2769,7 +2771,7 @@ export default function ChatView({ chat, onEditGroup }) {
       discardConversationCheckpoint();
     }
     setRunning(false);
-  }, [apiKeys, providerConnections, chatAgents, conversationStates, kbPath, projectPath, memoryEnabled, memoryConfig?.namespace, memoryAPI, mcpServers, chat.mcpServers, chat.qualityRouting, chat.reviewEnvironment, qualityRouting, conversationLimits, recordQualityEvent, refreshMemoryCount, chat.id, chat.name, chat.type, addMessage, requestMcpPermission, handleMcpPermissionConsumed, handleMcpToolResult, persistConversationCheckpoint, discardConversationCheckpoint, commitTaskGraph, registerGraphTask, setGraphTaskStatus, t]);
+  }, [apiKeys, providerConnections, chatAgents, conversationStates, kbPath, projectPath, memoryEnabled, memoryConfig?.namespace, memoryAPI, mcpServers, chat.mcpServers, chat.qualityRouting, chat.reviewEnvironment, qualityRouting, conversationLimits, recordQualityEvent, refreshMemoryCount, chat.id, chat.name, chat.type, addMessage, requestMcpPermission, handleMcpPermissionConsumed, handleMcpToolResult, persistConversationCheckpoint, discardConversationCheckpoint, commitTaskGraph, registerGraphTask, setGraphTaskStatus, language, t]);
 
   const handleCancelRun = useCallback(async () => {
     if (!running) return;

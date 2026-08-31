@@ -32,7 +32,7 @@ Deine Aufgaben:
 • Fasse Ergebnisse zusammen und priorisiere nächste Schritte.
 • Erkenne wenn der User (@user) einbezogen werden muss und weise explizit darauf hin.
 
-Stil: Führend, strukturiert, klar und präzise. Maximal 4-6 Sätze. Du sprichst Deutsch.`,
+Stil: Führend, strukturiert, klar und präzise. Maximal 4-6 Sätze.`,
 };
 
 const DEMO_AGENTS = [
@@ -153,7 +153,15 @@ In Gruppen: Du hältst die Konversation fokussiert und zeitboxed. Du erkennst we
 function ensureSystemPM(agentList, groupList) {
   // Ensure PM is in agents list
   const hasPM = agentList.some(a => a.id === SYSTEM_PM_AGENT.id);
-  const agents = hasPM ? agentList : [SYSTEM_PM_AGENT, ...agentList];
+  const agents = hasPM
+    ? agentList.map(agent => {
+      if (agent.id !== SYSTEM_PM_AGENT.id) return agent;
+      const systemPrompt = String(agent.systemPrompt || SYSTEM_PM_AGENT.systemPrompt)
+        .replace(/\s*Du sprichst Deutsch\./g, '')
+        .trim();
+      return systemPrompt === agent.systemPrompt ? agent : { ...agent, systemPrompt };
+    })
+    : [SYSTEM_PM_AGENT, ...agentList];
   // Ensure PM is in every group and normalize obsolete/invalid memory providers.
   const groups = groupList.map(g => {
     const usesJsonFile = g.memory?.provider === 'file' && !!g.memory?.filePath?.trim();
