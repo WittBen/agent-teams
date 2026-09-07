@@ -15,6 +15,7 @@ import McpServerList from './McpConfig';
 import { isRoleUsed, normalizeRoleName } from './agent-roles';
 import { normalizeConversationLimits } from './conversation-limits';
 import { normalizeReviewEnvironment, parseReviewArguments, validateReviewPreviewUrl } from './review-environment';
+import { buildGroupCapabilityIndex, normalizeCrossGroupTargetIds } from './delegation';
 
 const EMOJIS = ['🤖', '💡', '⚙️', '🧠', '🎯', '📊', '🔬', '🎨', '📝', '🚀', '💻', '🌍'];
 const COLORS = [0, 1, 2, 3, 4, 5, 6, 7];
@@ -29,6 +30,7 @@ function AgentModal({ agent, onClose, onSave }) {
     || agentRoles.find(item => normalizeRoleName(item.name).toLowerCase() === normalizeRoleName(agent?.role).toLowerCase())
     || agentRoles[0];
   const [roleId, setRoleId] = useState(initialRole?.id || '');
+  const [capabilities, setCapabilities] = useState((agent?.capabilities || []).join('\n'));
   const [provider, setProvider] = useState(agent?.provider || 'openai');
   const [model, setModel] = useState(agent?.model || 'gpt-4o-mini');
   const [systemPrompt, setSystemPrompt] = useState(agent?.systemPrompt || '');
@@ -63,7 +65,8 @@ function AgentModal({ agent, onClose, onSave }) {
     const selectedRole = agentRoles.find(item => item.id === roleId);
     if (!name.trim() || !selectedRole) return;
     onSave({
-      name: name.trim(), emoji, color, roleId: selectedRole.id, role: selectedRole.name, provider, model, systemPrompt: systemPrompt.trim(),
+      name: name.trim(), emoji, color, roleId: selectedRole.id, role: selectedRole.name,
+      capabilities, provider, model, systemPrompt: systemPrompt.trim(),
       qualityRouting: {
         mode: qualityMode,
         escalationProvider: qualityProvider === 'inherit' ? '' : qualityProvider,
@@ -128,6 +131,14 @@ function AgentModal({ agent, onClose, onSave }) {
           </select>
           <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 5 }}>
             {t('Rollen werden global in den Einstellungen verwaltet.')}
+          </div>
+        </div>
+
+        <div className="form-group">
+          <label className="form-label">{t('Fähigkeiten')}</label>
+          <textarea className="form-textarea" rows={3} value={capabilities} onChange={event => setCapabilities(event.target.value)} placeholder={t('Eine frei definierbare Fähigkeit pro Zeile')} />
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 5 }}>
+            {t('Diese Angaben werden ausschließlich für die generische Aufgabendelegation verwendet.')}
           </div>
         </div>
 
@@ -221,9 +232,10 @@ function AgentModal({ agent, onClose, onSave }) {
   );
 }
 
-function GroupModal({ group, agents, onClose, onSave }) {
+function GroupModal({ group, groups = [], agents, onClose, onSave }) {
   const { language, t } = useI18n();
   const { mcpServers: globalMcpServers, providerConnections } = useStore();
+  const [activeTab, setActiveTab] = useState('general');
   const [name, setName] = useState(group?.name || '');
   const [emoji, setEmoji] = useState(group?.emoji || '💬');
   const [selectedAgents, setSelectedAgents] = useState(group?.agentIds || []);
@@ -238,6 +250,16 @@ function GroupModal({ group, agents, onClose, onSave }) {
   const [reviewEnvironment, setReviewEnvironment] = useState(normalizeReviewEnvironment(group?.reviewEnvironment));
   const [reviewEnvironmentError, setReviewEnvironmentError] = useState('');
   const [qualityMode, setQualityMode] = useState(group?.qualityRouting?.mode || 'inherit');
+  const [crossGroupCollaborationEnabled, setCrossGroupCollaborationEnabled] = useState(group?.crossGroupCollaborationEnabled === true);
+  const [crossGroupTargetGroupIds, setCrossGroupTargetGroupIds] = useState(normalizeCrossGroupTargetIds(
+    group?.crossGroupTargetGroupIds,
+    group?.crossGroupTargetGroupId,
+  ));
+  const capabilityIndexPreview = React.useMemo(() => buildGroupCapabilityIndex({
+    id: group?.id || 'group-preview',
+    agentIds: selectedAgents,
+  }, agents), [agents, group?.id, selectedAgents]);
+  const memoryConfigurationInvalid = memoryMode !== 'disabled' && memoryProvider === 'file' && !memoryFilePath.trim();
 
   React.useEffect(() => {
     const handler = (e) => { if (e.key === 'Escape') onClose(); };
@@ -246,6 +268,26 @@ function GroupModal({ group, agents, onClose, onSave }) {
   }, [onClose]);
 
   const GROUP_EMOJIS = ['💬', '🧠', '🚀', '🎯', '⚡', '🌐', '🔧', '📊', '🎨', '🔬'];
+  const groupTabs = [
+    { id: 'general', icon: '●', label: t('Allgemein') },
+    { id: 'collaboration', icon: '↗', label: t('Zusammenarbeit') },
+    { id: 'workspace', icon: '▣', label: t('Arbeitsbereich') },
+    { id: 'tools', icon: '◆', label: t('KI & Tools') },
+  ];
+
+  const selectAdjacentTab = (event, tabId) => {
+    const currentIndex = groupTabs.findIndex(tab => tab.id === tabId);
+    let nextIndex = currentIndex;
+    if (event.key === 'ArrowRight') nextIndex = (currentIndex + 1) % groupTabs.length;
+    else if (event.key === 'ArrowLeft') nextIndex = (currentIndex - 1 + groupTabs.length) % groupTabs.length;
+    else if (event.key === 'Home') nextIndex = 0;
+    else if (event.key === 'End') nextIndex = groupTabs.length - 1;
+    else return;
+    event.preventDefault();
+    const nextTab = groupTabs[nextIndex];
+    setActiveTab(nextTab.id);
+    requestAnimationFrame(() => document.getElementById(`group-tab-${nextTab.id}`)?.focus());
+  };
 
   const toggleAgent = (id) => {
     setSelectedAgents(prev => prev.includes(id) ? prev.filter(a => a !== id) : [...prev, id]);
@@ -293,19 +335,26 @@ function GroupModal({ group, agents, onClose, onSave }) {
   };
 
   const handleSave = () => {
-    if (!name.trim() || selectedAgents.length === 0) return;
-    if (memoryMode !== 'disabled' && memoryProvider === 'file' && !memoryFilePath.trim()) {
+    if (!name.trim() || selectedAgents.length === 0) {
+      setActiveTab('general');
+      return;
+    }
+    if (memoryConfigurationInvalid) {
       setMemoryFileError(t('Bitte zuerst eine JSON-Memory-Datei auswählen.'));
+      setActiveTab('tools');
       return;
     }
     const reviewUrlError = validateReviewPreviewUrl(reviewEnvironment.previewUrl);
     if (reviewUrlError) {
       setReviewEnvironmentError(t(reviewUrlError));
+      setActiveTab('workspace');
       return;
     }
     const namespace = memoryNamespace.trim() || name.trim().toLowerCase().replace(/\s+/g, '-');
     onSave({
       name: name.trim(), emoji, agentIds: selectedAgents,
+      crossGroupCollaborationEnabled,
+      crossGroupTargetGroupIds: crossGroupCollaborationEnabled ? crossGroupTargetGroupIds : [],
       projectPath: projectPath.trim(),
       memory: {
         enabled: memoryMode !== 'disabled',
@@ -322,9 +371,35 @@ function GroupModal({ group, agents, onClose, onSave }) {
 
   return (
     <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
-      <div className="modal">
+      <div className="modal group-modal">
         <div className="modal-body">
         <div className="modal-title">{group ? t('Gruppe bearbeiten') : t('Neue Gruppe erstellen')}</div>
+
+        <div className="group-modal-tabs" role="tablist" aria-label={t('Gruppenoptionen')}>
+          {groupTabs.map(tab => {
+            const hasError = (tab.id === 'workspace' && Boolean(reviewEnvironmentError)) ||
+              (tab.id === 'tools' && (Boolean(memoryFileError) || memoryConfigurationInvalid));
+            return <button
+              key={tab.id}
+              id={`group-tab-${tab.id}`}
+              type="button"
+              role="tab"
+              className={`${activeTab === tab.id ? 'active' : ''} ${hasError ? 'has-error' : ''}`}
+              aria-selected={activeTab === tab.id}
+              aria-controls={`group-tab-panel-${tab.id}`}
+              aria-invalid={hasError || undefined}
+              tabIndex={activeTab === tab.id ? 0 : -1}
+              onClick={() => setActiveTab(tab.id)}
+              onKeyDown={event => selectAdjacentTab(event, tab.id)}
+            >
+              <span aria-hidden="true">{tab.icon}</span>
+              {tab.label}
+              {hasError && <i aria-hidden="true" title={t('Fehler in diesem Bereich')}>!</i>}
+            </button>;
+          })}
+        </div>
+
+        {activeTab === 'general' && <div id="group-tab-panel-general" className="group-modal-tab-panel" role="tabpanel" aria-labelledby="group-tab-general">
 
         <div className="form-group">
           <label className="form-label">{t('Gruppenname')}</label>
@@ -370,6 +445,57 @@ function GroupModal({ group, agents, onClose, onSave }) {
           {agents.length === 0 && <div style={{ color: 'var(--text-muted)', fontSize: 13, marginTop: 8 }}>{t('Keine Agenten vorhanden.')}</div>}
         </div>
 
+        <div className="form-group group-capability-index-preview">
+          <div className="group-capability-index-heading">
+            <label className="form-label">⌕ {t('Semantischer Kompetenzindex')}</label>
+            <small>{t('Wird beim Speichern aus Fähigkeiten, Rollen und Profilbeschreibungen der Mitglieder aktualisiert.')}</small>
+          </div>
+          <div className="group-capability-index-summary">
+            <span>{t('{count} explizite Fähigkeiten', { count: capabilityIndexPreview.explicitCapabilities.length })}</span>
+            <span>{t('{count} abgeleitete Suchbegriffe', { count: capabilityIndexPreview.derivedCapabilities.length })}</span>
+          </div>
+          <div className="group-capability-member-list">
+            {capabilityIndexPreview.members.map(member => {
+              const labels = member.explicitCapabilities.length > 0
+                ? member.explicitCapabilities
+                : [member.agentRole, ...member.derivedTerms].filter(Boolean).slice(0, 4);
+              return <div key={member.agentId}>
+                <strong>{member.agentName}</strong>
+                <span>{labels.join(' · ') || t('Keine verwertbaren Profildaten')}</span>
+                <small>{member.explicitCapabilities.length > 0 ? t('explizit') : t('aus Profil abgeleitet')}</small>
+              </div>;
+            })}
+          </div>
+        </div>
+        </div>}
+
+        {activeTab === 'collaboration' && <div id="group-tab-panel-collaboration" className="group-modal-tab-panel" role="tabpanel" aria-labelledby="group-tab-collaboration">
+        <div className="form-group quality-config-block">
+          <label className="form-label">↗ {t('Gruppenübergreifende Zusammenarbeit')}</label>
+          <label className="settings-toggle-row">
+            <span>
+              <strong>{t('Ausgehende Informationsanfragen und Aufgabendelegationen erlauben')}</strong>
+              <small>{t('Ausgewählte Zielgruppen dürfen Anfragen empfangen und über denselben Weg antworten.')}</small>
+            </span>
+            <input type="checkbox" checked={crossGroupCollaborationEnabled} onChange={event => setCrossGroupCollaborationEnabled(event.target.checked)} />
+          </label>
+          {crossGroupCollaborationEnabled && <div className="cross-group-target-setting">
+            <strong>{t('Erreichbare Zielgruppen (optional)')}</strong>
+            <small>{t('Nur ausgewählte Gruppen werden dem PM angeboten. Ohne Auswahl kann die Gruppe Anfragen annehmen, aber keine senden.')}</small>
+            <div className="cross-group-target-list">
+              {groups.filter(candidate => candidate.id !== group?.id).map(candidate => <label key={candidate.id}>
+                <input type="checkbox" checked={crossGroupTargetGroupIds.includes(candidate.id)} onChange={event => setCrossGroupTargetGroupIds(current => event.target.checked
+                  ? normalizeCrossGroupTargetIds([...current, candidate.id])
+                  : current.filter(id => id !== candidate.id))} />
+                <span>{candidate.emoji || '💬'} {candidate.name}</span>
+              </label>)}
+              {groups.filter(candidate => candidate.id !== group?.id).length === 0 && <span>{t('Keine andere Gruppe vorhanden.')}</span>}
+            </div>
+          </div>}
+        </div>
+        </div>}
+
+        {activeTab === 'workspace' && <div id="group-tab-panel-workspace" className="group-modal-tab-panel" role="tabpanel" aria-labelledby="group-tab-workspace">
         <div className="form-group">
           <label className="form-label">{t('📁 Zielordner für Ausgaben')}</label>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -455,7 +581,9 @@ function GroupModal({ group, agents, onClose, onSave }) {
             {' '}{t('Freigegebene Prozesse laufen mit deinen Benutzerrechten und sind keine Betriebssystem-Sandbox.')}
           </div>
         </div>
+        </div>}
 
+        {activeTab === 'tools' && <div id="group-tab-panel-tools" className="group-modal-tab-panel" role="tabpanel" aria-labelledby="group-tab-tools">
         <div className="form-group quality-config-block">
           <label className="form-label">🧠 {t('Quality Cascading')}</label>
           <select className="form-select" value={qualityMode} onChange={event => setQualityMode(event.target.value)}>
@@ -533,12 +661,13 @@ function GroupModal({ group, agents, onClose, onSave }) {
             compact
           />
         </div>
+        </div>}
         </div>
 
         <div className="modal-actions">
           <button className="btn btn-secondary" onClick={onClose}>{t('Abbrechen')}</button>
           <button className="btn btn-primary" onClick={handleSave}
-            disabled={!name.trim() || selectedAgents.length === 0 || Boolean(reviewEnvironmentError) || (memoryMode !== 'disabled' && memoryProvider === 'file' && !memoryFilePath.trim())}>
+            disabled={!name.trim() || selectedAgents.length === 0 || Boolean(reviewEnvironmentError) || memoryConfigurationInvalid}>
             {group ? t('Speichern') : t('Erstellen')}
           </button>
         </div>

@@ -7,6 +7,8 @@
  * Produces and consumes structured Handoffs.
  */
 
+import { normalizeDelegationPolicy } from './delegation';
+
 // ── Task Capsule ──────────────────────────────────────────────────────────────
 
 /**
@@ -65,6 +67,12 @@ export function buildAgentSession({ agent, taskCapsule, memoryContext = '', last
 
 const DIRECT_CHAT_CONTEXT_LIMIT = 20;
 const GROUP_CHAT_CONTEXT_LIMIT = 12;
+const CONTEXT_STOP_WORDS = new Set([
+  'aber', 'alle', 'auch', 'dann', 'dass', 'eine', 'einem', 'einen', 'einer', 'eines', 'für', 'hier', 'oder',
+  'sich', 'sind', 'über', 'und', 'wenn', 'werden', 'wird', 'with', 'from', 'into', 'that', 'the', 'this',
+  'von', 'wie', 'was', 'welche', 'welcher', 'welches', 'soll', 'sollte', 'bitte', 'verwendet', 'verwenden',
+  'used', 'using',
+]);
 
 function isConversationMessage(message) {
   return !!(
@@ -73,6 +81,35 @@ function isConversationMessage(message) {
     !message.memoryOnly &&
     (String(message.text || '').trim() || message.attachments?.length)
   );
+}
+
+function contextTerms(value = '') {
+  return [...new Set(String(value || '')
+    .toLocaleLowerCase()
+    .match(/[\p{L}\p{N}]{3,}/gu) || [])]
+    .filter(term => !CONTEXT_STOP_WORDS.has(term))
+    .slice(0, 80);
+}
+
+function messageRelevanceScore(message, terms) {
+  const haystack = `${message?.senderName || ''} ${message?.text || ''}`.toLocaleLowerCase();
+  return terms.reduce((score, term) => score + (haystack.includes(term) ? 1 : 0), 0);
+}
+
+function limitConversationCharacters(messages, maxCharacters) {
+  let remaining = Math.max(1, Number(maxCharacters) || 1);
+  const selected = [];
+  for (let index = messages.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const message = messages[index];
+    const text = String(message.text || '');
+    if (!text && !message.attachments?.length) continue;
+    const visibleText = text.length > remaining
+      ? `${text.slice(0, Math.max(0, remaining - 1)).trimEnd()}…`
+      : text;
+    selected.push({ ...message, text: visibleText });
+    remaining -= Math.max(1, visibleText.length);
+  }
+  return selected.reverse();
 }
 
 /**
@@ -88,15 +125,57 @@ export function buildRelevantConversationHistory({
   includeGroupContext = false,
   directLimit = DIRECT_CHAT_CONTEXT_LIMIT,
   groupLimit = GROUP_CHAT_CONTEXT_LIMIT,
+  query = '',
+  requireQueryMatch = false,
+  maxCharacters,
 } = {}) {
   const visible = history.filter(isConversationMessage);
   if (chatType !== 'group') {
-    return visible
+    return limitConversationCharacters(visible
       .filter(message => message.agentId === 'user' || message.agentId === agent?.id)
-      .slice(-Math.max(1, directLimit));
+      .slice(-Math.max(1, directLimit)), maxCharacters || 40000);
   }
   if (!includeGroupContext) return [];
-  return visible.slice(-Math.max(1, groupLimit));
+  let candidates = visible;
+  if (requireQueryMatch) {
+    const terms = contextTerms(query);
+    candidates = terms.length > 0
+      ? visible
+        .map((message, index) => ({ message, index, score: messageRelevanceScore(message, terms) }))
+        .filter(item => item.score > 0)
+        .sort((left, right) => right.score - left.score || right.index - left.index)
+        .slice(0, Math.max(1, groupLimit))
+        .sort((left, right) => left.index - right.index)
+        .map(item => item.message)
+      : [];
+  } else {
+    candidates = visible.slice(-Math.max(1, groupLimit));
+  }
+  return limitConversationCharacters(candidates, maxCharacters || 24000);
+}
+
+/** Build a bounded project inventory containing only filenames relevant to one task. */
+export function buildRelevantProjectInventoryContext({
+  files = [],
+  objective = '',
+  maxFiles = 20,
+  includeFallback = false,
+} = {}) {
+  const terms = contextTerms(objective);
+  const normalized = (Array.isArray(files) ? files : [])
+    .map((file, index) => ({ name: String(file?.name || file?.filename || '').replace(/\\/g, '/'), index }))
+    .filter(file => file.name)
+    .map(file => ({
+      ...file,
+      score: terms.reduce((score, term) => score + (file.name.toLocaleLowerCase().includes(term) ? 1 : 0), 0),
+    }));
+  let selected = normalized
+    .filter(file => file.score > 0)
+    .sort((left, right) => right.score - left.score || left.index - right.index)
+    .slice(0, Math.max(1, maxFiles));
+  if (selected.length === 0 && includeFallback) selected = normalized.slice(0, Math.max(1, maxFiles));
+  if (selected.length === 0) return '';
+  return `\n\n[Für diese Aufgabe relevante Projektdateien]:\n${selected.map(file => `- ${file.name}`).join('\n')}`;
 }
 
 // ── Orchestrator ──────────────────────────────────────────────────────────────
@@ -184,6 +263,26 @@ export function hasDirectedMention(value, name) {
   if (!value || !name) return false;
   const searchableValue = maskFencedCode(value);
   return new RegExp(`^@${escapeRegExp(name)}\\b`, 'im').test(searchableValue);
+}
+
+/** User-authored mentions may be inline because the composer offers them there. */
+export function hasUserDirectedMention(value, name) {
+  if (!value || !name) return false;
+  const searchableValue = maskFencedCode(value);
+  return new RegExp(`(?:^|\\s)@${escapeRegExp(name)}\\b`, 'i').test(searchableValue);
+}
+
+export function shouldRunAsWorkflowSideConversation({ chatType, triggerText, chatAgents = [], continuation } = {}) {
+  if (chatType !== 'group' || !triggerText || !continuation) return false;
+  if (hasUserDirectedMention(triggerText, 'everyone')) return false;
+  return chatAgents.some(agent => !isPMAgent(agent) && hasUserDirectedMention(triggerText, agent.name));
+}
+
+export function shouldMaterializeTaskPlan({ isOrchestrator, planningOnly, taskSource, hasApprovedPlan, userOwnedPlan } = {}) {
+  if (!isOrchestrator || hasApprovedPlan) return false;
+  // During planning the PM maintains the complete draft, including a draft the
+  // user edited manually. Outside planning, user ownership remains a hard stop.
+  return Boolean(planningOnly || (taskSource === 'user' && !userOwnedPlan));
 }
 
 function findAgentMentions(reply, fromAgent, chatAgents) {
@@ -395,13 +494,6 @@ export function extractTaskPlan(reply) {
       const dependsOn = [...new Set((Array.isArray(candidate?.dependsOn) ? candidate.dependsOn : [])
         .map(normalizePlanId)
         .filter(Boolean))];
-      const executionMode = candidate?.executionMode === 'parallel'
-        ? 'parallel'
-        : candidate?.executionMode === 'sequential'
-          ? 'sequential'
-          : type === 'task' && !parentId && dependsOn.length === 0
-            ? 'parallel'
-            : 'sequential';
       const acceptanceCriteria = (Array.isArray(candidate?.acceptanceCriteria) ? candidate.acceptanceCriteria : [])
         .slice(0, 12)
         .map((criterion, criterionIndex) => {
@@ -426,8 +518,8 @@ export function extractTaskPlan(reply) {
         type,
         parentId,
         dependsOn,
-        executionMode,
         acceptanceCriteria,
+        delegation: normalizeDelegationPolicy(candidate?.delegation),
         order: index,
       });
     }
@@ -628,7 +720,7 @@ export function cleanAgentReply(reply) {
   return stripTaskPlan(parts.join(''))
     .replace(TASK_EVIDENCE_BLOCK_GLOBAL, '')
     .replace(ACCEPTANCE_REVIEW_BLOCK_GLOBAL, '')
-    .replace(/\[\[(?:TASK_DONE|PROJECT_DONE)\]\]/gi, '')
+    .replace(/\[\[(?:TASK_DONE|PROJECT_DONE|RECOVERY_RESOLVED)\]\]/gi, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
@@ -658,7 +750,6 @@ export function extractUserQuestions(reply) {
     .replace(/\[\[(?:TASK_DONE|PROJECT_DONE)\]\]/gi, '')
     .trimEnd();
   const questions = [];
-  let sawUserDirective = false;
   const addQuestion = (value) => {
     const cleaned = value
       .replace(/^\s*[-*•]+\s*/, '')
@@ -671,26 +762,14 @@ export function extractUserQuestions(reply) {
     }
   };
 
-  const lines = text.split(/\r?\n/);
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
+  // Only content on the explicit directive line is actionable. A bare marker
+  // must not capture nearby status reports or accidentally pause the queue.
+  for (const line of text.split(/\r?\n/)) {
     const userMatch = line.match(/^@user\b/i);
     if (userMatch) {
-      sawUserDirective = true;
       const directedText = line.slice(userMatch.index + userMatch[0].length);
       for (const part of directedText.split(/(?<=\?)\s+/)) addQuestion(part);
-      if (!directedText.trim()) {
-        for (let next = index + 1; next < lines.length && next <= index + 4; next += 1) {
-          if (!lines[next].trim() || /@\w+/i.test(lines[next])) break;
-          addQuestion(lines[next]);
-        }
-      }
     }
-  }
-
-  if (!questions.length && sawUserDirective) {
-    const fallbackQuestions = text.match(/(?:^|[.!]\s+|\n)([^\n?]{3,500}\?)/g) || [];
-    for (const question of fallbackQuestions.slice(-3)) addQuestion(question);
   }
   return questions.slice(0, 5);
 }
@@ -763,38 +842,59 @@ export function isAgentTimeoutError(error) {
   );
 }
 
-export function buildTimeoutRecoveryTask({ pm, originalAgent, objective, errorMessage = '', previousRecovery = null }) {
+export function buildTimeoutRecoveryTask({ pm, originalAgent, objective, errorMessage = '', previousRecovery = null, originalGraphNodeId = '', planRootId = '', trigger = 'timeout' }) {
   if (!pm || !originalAgent) return null;
   const attempt = (previousRecovery?.attempt || 0) + 1;
+  const requestedTrigger = ['timeout', 'quality', 'error'].includes(trigger) ? trigger : 'error';
+  const recoveryTrigger = previousRecovery?.trigger || requestedTrigger;
+  const recoveryLabel = recoveryTrigger === 'quality'
+    ? 'Qualitäts-Recovery'
+    : recoveryTrigger === 'error' ? 'Problem-Recovery' : 'Timeout-Recovery';
   const recovery = {
     originalAgentId: originalAgent.id,
     originalAgentName: originalAgent.name,
+    originalGraphNodeId: previousRecovery?.originalGraphNodeId || originalGraphNodeId,
+    pmAgentId: pm.id,
     originalObjective: previousRecovery?.originalObjective || objective,
     attempt,
     mode: 'plan',
+    trigger: recoveryTrigger,
+    originalStatus: recoveryTrigger === 'timeout' ? 'timed_out' : 'blocked',
   };
   const handoff = createHandoff({
     from: 'Timeout-Wächter',
     to: pm.name,
     taskId: `timeout-recovery-${Date.now().toString(36)}-${attempt}`,
-    summary: `Timeout-Recovery Versuch ${attempt}: Untersuche die abgebrochene Aufgabe von ${originalAgent.name}. Verkleinere sie in klar abgegrenzte Schritte und übergib jetzt ausschließlich den ersten ausführbaren Schritt wieder an ${originalAgent.name}.`,
+    summary: `${recoveryLabel} Versuch ${attempt}: Untersuche die abgebrochene Aufgabe von ${originalAgent.name}. Verkleinere sie in klar abgegrenzte Schritte und übergib jetzt ausschließlich den ersten ausführbaren Schritt wieder an ${originalAgent.name}.`,
     findings: [
       `Ursprünglicher Agent: ${originalAgent.name}`,
       `Abgebrochene Aufgabe: ${recovery.originalObjective}`,
-      `Timeout: ${errorMessage || '120 Sekunden ohne verwertbaren Fortschritt'}`,
+      `${recoveryTrigger === 'quality' ? 'Qualitätsproblem' : recoveryTrigger === 'error' ? 'Ausführungsproblem' : 'Timeout'}: ${errorMessage || '120 Sekunden ohne verwertbaren Fortschritt'}`,
       'Nach jedem kleineren Schritt erhältst du das Ergebnis erneut und entscheidest über den nächsten Schritt.',
+      'Wenn keine sichere Lösung innerhalb des freigegebenen Plans möglich ist, frage den User mit @user nach einer Entscheidung.',
     ],
   });
-  return { agent: pm, objective: handoff.summary, handoff, source: 'timeout-recovery', recovery };
+  return {
+    agent: pm,
+    objective: handoff.summary,
+    handoff,
+    source: 'timeout-recovery',
+    runtimeRecovery: true,
+    planRootId: planRootId || previousRecovery?.planRootId || '',
+    recovery: { ...recovery, planRootId: planRootId || previousRecovery?.planRootId || '' },
+  };
 }
 
 export function buildTimeoutRecoveryReviewTask({ pm, recovery, stepObjective, result }) {
   if (!pm || !recovery) return null;
+  const recoveryLabel = recovery.trigger === 'quality'
+    ? 'Qualitäts-Recovery'
+    : recovery.trigger === 'error' ? 'Problem-Recovery' : 'Timeout-Recovery';
   const handoff = createHandoff({
     from: recovery.originalAgentName,
     to: pm.name,
     taskId: `timeout-review-${Date.now().toString(36)}-${recovery.attempt}`,
-    summary: `Timeout-Recovery Runde ${recovery.attempt} prüfen: Bewerte den erledigten Teilschritt von ${recovery.originalAgentName}. Falls die ursprüngliche Aufgabe noch nicht vollständig gelöst ist, übergib genau den nächsten kleinen Schritt wieder an denselben Agenten. Andernfalls beende die Recovery ohne Handoff, damit die normale Konversation weiterläuft.`,
+    summary: `${recoveryLabel} Runde ${recovery.attempt} prüfen: Bewerte den erledigten Teilschritt von ${recovery.originalAgentName}. Falls die ursprüngliche Aufgabe noch nicht vollständig gelöst ist, übergib genau den nächsten kleinen Schritt wieder an denselben Agenten. Wenn sie vollständig gelöst ist, bestätige das ausdrücklich mit [[RECOVERY_RESOLVED]]. Wenn keine sichere Lösung innerhalb des freigegebenen Plans möglich ist, frage den User mit @user nach einer Entscheidung.`,
     findings: [
       `Ursprüngliche Aufgabe: ${recovery.originalObjective}`,
       `Bearbeiteter Teilschritt: ${stepObjective}`,
@@ -806,6 +906,8 @@ export function buildTimeoutRecoveryReviewTask({ pm, recovery, stepObjective, re
     objective: handoff.summary,
     handoff,
     source: 'timeout-recovery',
+    runtimeRecovery: true,
+    planRootId: recovery.planRootId || '',
     recovery: { ...recovery, mode: 'review' },
   };
 }
@@ -845,9 +947,10 @@ export function buildTurnLimitReviewTask({
 }
 
 /**
- * FIFO queue for short-lived agent tasks. The same agent may run again for a
- * different task, while identical handoff loops and runaway conversations are
- * bounded deterministically.
+ * Queue for short-lived agent tasks. FIFO is the default, while schedulers may
+ * select the first currently runnable task without removing blocked entries.
+ * The same agent may run again for a different task, while identical handoff
+ * loops and runaway conversations are bounded deterministically.
  */
 export class AgentTaskQueue {
   constructor({ maxTurns = 12, maxTurnsPerAgent = 4, maxSuccessfulScopeRepeats = 2, guardState = null } = {}) {
@@ -922,12 +1025,21 @@ export class AgentTaskQueue {
     return { successfulScopes: Object.fromEntries(this.successfulScopes) };
   }
 
-  next() {
+  nextMatching(predicate = () => true) {
     while (this.tasks.length && (this.maxTurns === 0 || this.turns < this.maxTurns)) {
-      const task = this.tasks.shift();
+      this.tasks = this.tasks.filter((candidate) => {
+        const key = taskFingerprint(candidate);
+        const count = this.agentTurns.get(candidate.agent.id) || 0;
+        return !this.completed.has(key) && (this.maxTurnsPerAgent === 0 || count < this.maxTurnsPerAgent);
+      });
+      if (!this.tasks.length) return null;
+      const taskIndex = this.tasks.findIndex((candidate) => {
+        return predicate(candidate);
+      });
+      if (taskIndex < 0) return null;
+      const [task] = this.tasks.splice(taskIndex, 1);
       const key = taskFingerprint(task);
       const count = this.agentTurns.get(task.agent.id) || 0;
-      if (this.completed.has(key) || (this.maxTurnsPerAgent > 0 && count >= this.maxTurnsPerAgent)) continue;
       this.completed.add(key);
       this.agentTurns.set(task.agent.id, count + 1);
       this.turns += 1;
@@ -935,6 +1047,8 @@ export class AgentTaskQueue {
     }
     return null;
   }
+
+  next() { return this.nextMatching(); }
 
   /**
    * Put a temporarily blocked task back without consuming another turn. This
@@ -975,13 +1089,21 @@ export class AgentTaskQueue {
  * Build system content for an isolated agent session.
  * Much more focused than the full group-chat system prompt.
  */
-export function buildIsolatedSystemPrompt({ agent, groupName, groupAgentNames = [], groupAgents = [], memoryNamespace, projectPath = '', reviewEnvironment = null, isOrchestrator = false, isDirectChat = false }) {
+export function buildIsolatedSystemPrompt({ agent, groupName, groupAgentNames = [], groupAgents = [], availableGroups = [], memoryNamespace, projectPath = '', reviewEnvironment = null, isOrchestrator = false, isDirectChat = false, planningMode = false, userOwnedWorkflow = false, recoveryMode = false }) {
   const base = agent.systemPrompt || 'Du bist ein hilfreicher Assistent.';
   const availableAgentLabels = groupAgents.length
     ? groupAgents.map(groupAgent => `${groupAgent.name} (${groupAgent.role || 'Agent'})`)
     : groupAgentNames;
+  const exampleSpecialistName = groupAgents.find(groupAgent => groupAgent.name !== agent.name)?.name || agent.name;
   const configuredTestCommand = String(reviewEnvironment?.test?.command || '').trim();
   const configuredPreviewCommand = String(reviewEnvironment?.preview?.command || '').trim();
+  const crossGroupRules = availableGroups.length ? `
+
+GRUPPENÜBERGREIFENDE ZUSAMMENARBEIT:
+• Verfügbare andere Gruppen: ${availableGroups.map(group => `${group.name} (ID: ${group.id})${group.capabilities?.length ? ` [${group.capabilities.join(', ')}]` : ''}`).join('; ')}.
+• Wenn für deine aktuelle Aufgabe eine Information aus einer anderen Gruppe zwingend benötigt wird, schreibe ganz links eine eigene Zeile im Format „@Gruppenname: konkrete Informationsfrage“.
+• Eine solche Anfrage pausiert nur deine aktuelle Aufgabe und verändert weder Aufgaben noch Abhängigkeiten des freigegebenen Plans.
+• Frage nur eine fachlich passende Gruppe und vermeide Ketten oder Wiederholungen.` : '';
   const reviewRules = configuredTestCommand || configuredPreviewCommand ? `
 • Für diese Gruppe ist eine kontrollierte Prüf- und Vorschauumgebung konfiguriert. Prozesse verwenden den Projektordner als Arbeitsordner, sind aber keine Betriebssystem-Sandbox.
 ${configuredTestCommand ? `• Konfigurierter Prüfbefehl: ${configuredTestCommand} ${(reviewEnvironment?.test?.args || []).join(' ')}` : ''}
@@ -1027,6 +1149,64 @@ REGELN FÜR DEN EINZELCHAT:
 ${directProjectRules}`;
   }
 
+  if (isOrchestrator && planningMode) {
+    return `${base}
+
+Du bist der PM im Planungsmodus der Gruppe "${groupName}".
+Verfügbare Agenten: ${availableAgentLabels.join(', ')}.
+
+PLANUNGSMODUS:
+• Besprich Ziel, Anforderungen, Prioritäten, Abhängigkeiten und offene Fragen ausschließlich mit dem User.
+• Führe noch keine Fachaufgabe aus, delegiere nichts und erzeuge keine Datei-Artefakte.
+• Verwende keine @Agent-Zeilen. Jede Rückfrage, die eine Antwort des Users benötigt, muss ganz links am Anfang einer eigenen Zeile mit "@user" beginnen und auf derselben Zeile die konkrete Frage enthalten, zum Beispiel: "@user: Welche Variante soll verwendet werden?". Ein alleinstehendes "@user" ist ungültig.
+• Stelle nur notwendige Rückfragen. Sobald du @user verwendest, wartet die Planung auf die Antwort des Users.
+• Pflege bei jeder Antwort den aktuell vollständigen Workflow als gültigen [[TASK_PLAN]]-Block. Er ersetzt den vorherigen Entwurf.
+• Du darfst den Entwurf in der Planungsphase ändern und nicht mehr benötigte oder fehlerhafte Aufgaben entfernen, indem du sie im vollständigen neuen TASK_PLAN weglässt.
+${userOwnedWorkflow ? '• Der aktuelle Entwurf enthält Entscheidungen des Users. Bewahre sie, sofern der User keine Änderung verlangt und sie nicht nachweislich widersprüchlich oder fehlerhaft sind.' : ''}
+• Plane alle absehbaren Fachaufgaben. Eine Prüfaufgabe ist optional und wird wie jede andere Aufgabe über Abhängigkeiten angebunden.
+• Verwende parentId für die Hierarchie und dependsOn nur für echte fachliche Abhängigkeiten.
+• Ausschließlich dependsOn bestimmt die Reihenfolge: Aufgaben ohne gegenseitige Abhängigkeit können parallel ausgeführt werden.
+• Jede Fachaufgabe bekommt konkrete, prüfbare acceptanceCriteria.
+• delegation beschreibt die vom User zu bestätigende Delegationsregel: mode ist "never", "ask" oder "automatic"; requiredCapabilities sind freie fachliche Fähigkeiten; allowedTargetGroupIds bleibt ohne sichere Zielvorgabe leer.
+• Verwende "ask" oder "automatic" nur, wenn die lokale Gruppe die benötigten Fähigkeiten nicht abdeckt und eine passende freigeschaltete Zielgruppe angegeben ist. Eine Zielgruppe kann die Fähigkeiten durch einen einzelnen Experten oder gemeinsam als Team abdecken. Andernfalls verwende "never".
+• Verwende exakt diese Struktur:
+[[TASK_PLAN]]
+{"tasks":[{"id":"fachaufgabe","title":"Konkretes Ergebnis erstellen","agent":"${exampleSpecialistName}","type":"task","parentId":null,"dependsOn":[],"acceptanceCriteria":[{"id":"ergebnis-vollstaendig","text":"Das erwartete Ergebnis ist vollständig und prüfbar.","required":true,"verification":"reviewer"}],"delegation":{"mode":"never","requiredCapabilities":[],"allowedTargetGroupIds":[]}},{"id":"final-review","title":"Finale Prüfung","agent":"${agent.name}","type":"review","parentId":null,"dependsOn":["fachaufgabe"],"acceptanceCriteria":[],"delegation":{"mode":"never","requiredCapabilities":[],"allowedTargetGroupIds":[]}}]}
+[[/TASK_PLAN]]
+• Der User beendet den Planungsmodus ausschließlich über den UI-Button. Behaupte niemals, die Umsetzung bereits gestartet zu haben.
+• Nach der Freigabe darf der Plan weder von dir noch von einem anderen Agenten verändert werden.
+ ${memoryNamespace ? `• Shared Memory: memory://${memoryNamespace}.` : ''}${crossGroupRules}`;
+  }
+
+  if (isOrchestrator && recoveryMode) {
+    return `${base}
+
+Du bist der PM für eine automatisch ausgelöste Timeout-Recovery in der Gruppe "${groupName}".
+
+TIMEOUT-RECOVERY:
+• Der freigegebene User-Plan bleibt unverändert. Du darfst keine planmäßige Aufgabe, Abhängigkeit, Agentenzuordnung oder Abnahme verändern.
+• Untersuche ausschließlich die festgefahrene Originalaufgabe aus der Task Capsule.
+• Teile ihre technische Ausführung in kleine Laufzeitschritte. Diese Schritte sind Recovery-Unteraufgaben und keine neue Planversion.
+• Übergib höchstens EINEN kleinen, konkret prüfbaren nächsten Schritt an den in der Task Capsule genannten ursprünglichen Agenten.
+• Nach jedem Teilschritt wirst du erneut zur Prüfung aufgerufen. Ist die Originalaufgabe vollständig erfüllt, delegiere nichts mehr und prüfe ihre vorhandenen Abnahmekriterien per [[ACCEPTANCE_REVIEW]].
+• Fehlt eine Entscheidung des Users, stelle sie als konkrete Frage auf derselben Zeile, zum Beispiel: "@user: Welche Variante soll verwendet werden?". Ein alleinstehendes "@user" ist ungültig. Verwende keinen [[TASK_PLAN]]-Block und kein [[PROJECT_DONE]].
+ ${memoryNamespace ? `• Shared Memory: memory://${memoryNamespace}.` : ''}${crossGroupRules}${projectRules}`;
+  }
+
+  if (isOrchestrator && userOwnedWorkflow) {
+    return `${base}
+
+Du bist der PM innerhalb eines vom User freigegebenen Workflows der Gruppe "${groupName}".
+
+VERBINDLICHER USER-PLAN:
+• Bearbeite ausschließlich die dir zugewiesene Aufgabe. Erzeuge keinen [[TASK_PLAN]]-Block.
+• Verändere, erweitere oder ersetze niemals Aufgaben, Agentenzuordnungen oder Abhängigkeiten.
+• Delegiere keine neue Arbeit per @Agent. Wenn ein Problem nicht innerhalb der Aufgabe lösbar ist, beschreibe es konkret und frage den User auf einer eigenen Zeile im Format "@user: konkrete Frage?" nach seiner Entscheidung. Ein alleinstehendes "@user" ist ungültig.
+• Eine dir zugewiesene Prüfaufgabe darf Abnahmeentscheidungen für vorhandene Kriterien liefern, aber keine Korrekturaufgabe anlegen.
+• Der freigegebene Plan bleibt auch bei Fehlern unverändert. Nur der User kann im Workflowfenster eine neue Planversion erstellen.
+ ${memoryNamespace ? `• Shared Memory: memory://${memoryNamespace}.` : ''}${crossGroupRules}${projectRules}`;
+  }
+
   if (isOrchestrator) {
     return `${base}
 
@@ -1038,28 +1218,29 @@ DEINE ROLLE:
 • Entscheide welche Agenten benötigt werden (nicht alle, nur relevante).
 • Verteile jede Aufgabe in einer eigenen Zeile als "@Name: konkrete Aufgabe".
 • Koordiniere den Workflow: wer macht was, in welcher Reihenfolge.
-• Führe nach den Spezialisten immer den abschließenden Final-Review durch und antworte dem User als letzter Agent.
-• Schreibe "@user" nur wenn ohne diese Entscheidung keine sinnvolle Arbeit mehr möglich ist.
+• Führe den im Plan enthaltenen Abschluss-Review durch, sofern einer vorgesehen ist, und antworte dem User als letzter Agent.
+• Schreibe eine Zeile im Format "@user: konkrete Frage?" nur, wenn ohne diese Entscheidung keine sinnvolle Arbeit mehr möglich ist. Ein alleinstehendes "@user" ist ungültig.
 
 AUFGABENPLAN:
 • Bei der ersten User-Aufgabe musst du vor deiner normalen Antwort den vollständigen geplanten Ablauf als gültiges JSON in genau diesem Block liefern:
 [[TASK_PLAN]]
-{"tasks":[{"id":"fachaufgabe","title":"Konkretes Ergebnis erstellen","agent":"Max","type":"task","parentId":null,"dependsOn":[],"executionMode":"parallel","acceptanceCriteria":[{"id":"ergebnis-vollstaendig","text":"Das geforderte Ergebnis ist vollständig und überprüfbar vorhanden.","required":true,"verification":"reviewer"}]},{"id":"final-review","title":"Finale PM-Abnahme","agent":"PM","type":"review","parentId":null,"dependsOn":["fachaufgabe"],"executionMode":"sequential","acceptanceCriteria":[]}]}
+{"tasks":[{"id":"fachaufgabe","title":"Konkretes Ergebnis erstellen","agent":"Max","type":"task","parentId":null,"dependsOn":[],"acceptanceCriteria":[{"id":"ergebnis-vollstaendig","text":"Das geforderte Ergebnis ist vollständig und überprüfbar vorhanden.","required":true,"verification":"reviewer"}],"delegation":{"mode":"never","requiredCapabilities":[],"allowedTargetGroupIds":[]}},{"id":"final-review","title":"Finale Prüfung","agent":"PM","type":"review","parentId":null,"dependsOn":["fachaufgabe"],"acceptanceCriteria":[],"delegation":{"mode":"never","requiredCapabilities":[],"allowedTargetGroupIds":[]}}]}
 [[/TASK_PLAN]]
-• Plane alle absehbaren Aufgaben einschließlich Tests und genau einer finalen PM-Abnahme. Halte den Plan bei kleinen Anforderungen entsprechend klein.
+• Plane alle absehbaren Aufgaben einschließlich notwendiger Tests. Eine finale Prüfaufgabe ist optional; wenn du sie vorsiehst, verbinde sie explizit über dependsOn.
 • Jede Fachaufgabe erhält ein bis fünf konkrete acceptanceCriteria. Formuliere sie fachneutral und anhand des tatsächlich erwarteten Ergebnisses; erfinde keine Softwaretests für Dokument-, Recherche-, Design- oder andere Aufgaben.
+• Jede Aufgabe erhält eine delegation-Regel. Verwende standardmäßig mode "never". Nur wenn die lokale Gruppe die frei benannten requiredCapabilities weder durch einen Experten noch gemeinsam abdeckt, darfst du "ask" oder "automatic" vorschlagen; die endgültige Regel gehört zum User-Plan.
 • verification ist "reviewer" für eine inhaltliche Prüfung durch den zuständigen Prüfer, "automatic" für einen tatsächlich verfügbaren deterministischen Nachweis oder "user" nur für eine ausdrücklich notwendige subjektive Freigabe des Users.
-• Prüfe jeden Rollenpool mit mindestens zwei Agenten ausdrücklich auf teilbare Arbeit. Zerlege einen Fachbereich nur dann in mehrere konkrete Teilaufgaben, wenn diese unabhängig erledigt werden können; verteile diese fair auf die Agenten derselben Rolle, markiere sie mit executionMode "parallel" und verbinde sie nicht künstlich durch dependsOn. Nicht sinnvoll teilbare oder voneinander abhängige Arbeit bleibt sequenziell.
+• Prüfe jeden Rollenpool mit mindestens zwei Agenten ausdrücklich auf teilbare Arbeit. Zerlege einen Fachbereich nur dann in mehrere konkrete Teilaufgaben, wenn diese unabhängig erledigt werden können; verteile diese fair auf die Agenten derselben Rolle und verbinde sie nicht künstlich durch dependsOn.
 • parentId bildet die fachliche Baumhierarchie; dependsOn enthält IDs der Aufgaben, die vorher abgeschlossen sein müssen.
 • Verwende kurze stabile IDs mit Kleinbuchstaben, Zahlen und Bindestrichen. Agentennamen müssen exakt aus der Liste verfügbarer Agenten stammen.
-• Adressiere nach dem Planblock nur die Aufgaben per @Name, die jetzt startbereit sind. Zukünftige Aufgaben stehen bereits deaktiviert im Plan und werden in späteren Reviews aktiviert.
-• Wenn während eines Reviews wirklich neue Arbeit entsteht, darfst du einen weiteren TASK_PLAN-Block ausschließlich mit den neu hinzukommenden Aufgaben ausgeben. Bereits vorhandene Planaufgaben werden nicht neu angelegt.
+• Adressiere nach dem Planblock nur die Aufgaben per @Name, die jetzt startbereit sind. Zukünftige Aufgaben bleiben durch ihre Abhängigkeiten gesperrt.
+• Nach der User-Freigabe darfst du den Workflow nicht erweitern oder umschreiben. Melde Probleme innerhalb der bestehenden Aufgabe an den PM oder User; nur der User kann eine neue Planversion freigeben.
 
 REGELN:
 • Jeder Agent den du @erwähnst bekommt eine isolierte Session — er sieht NUR seine Aufgabe, nicht den kompletten Chatverlauf.
 • Eine @user-Rückfrage pausiert die gesamte Queue. Nutze sie nur, wenn du wirklich eine Antwort brauchst; nach der Antwort erhältst du eine neue Session und die Queue läuft weiter.
 • Nur Erwähnungen ganz links am Zeilenanfang lösen eine Aktion aus. Erwähnungen im Fließtext oder eingerückte Erwähnungen sind reiner Text.
-• Auch @user muss ganz links am Anfang einer eigenen Zeile stehen.
+• Auch @user muss ganz links am Anfang einer eigenen Zeile stehen und auf derselben Zeile die konkrete Frage enthalten.
 • Sammle ALLE @Agent-Übergaben ganz unten in der Ausgabe.
 • Jede Übergabe beginnt ohne Leerzeichen, Aufzählungszeichen oder Einrückung linkbündig in einer eigenen Zeile: "@Name: Aufgabe".
 • Nach der letzten @Agent-Zeile darf kein weiterer Text folgen.
@@ -1068,14 +1249,14 @@ REGELN:
 • Halte den Umfang proportional zur User-Anforderung. Erfinde bei kleinen Aufgaben keine zusätzlichen README-, Design- oder Dokumentationspflichten, wenn sie weder verlangt noch für die Funktion erforderlich sind.
 • Im Final-Review vergleichst du alle Ergebnisse mit der ursprünglichen User-Anforderung.
 • Prüfe im Final-Review jeden eingereichten Nachweis gegen sein Abnahmekriterium und liefere die Entscheidungen als gültiges JSON: [[ACCEPTANCE_REVIEW]] {"decisions":[{"taskId":"fachaufgabe","criterionId":"ergebnis-vollstaendig","status":"passed","note":"Konkrete Begründung oder Fundstelle"}]} [[/ACCEPTANCE_REVIEW]]. Zulässige Status sind passed, failed und waived.
-• failed erfordert eine konkrete Korrekturübergabe. Ein erforderliches user-Kriterium darfst du nicht selbst freigeben; frage den User mit @user oder warte auf dessen Entscheidung im Aufgabenfenster.
+• failed erfordert eine konkrete Korrekturübergabe. Ein erforderliches user-Kriterium darfst du nicht selbst freigeben; frage den User im Format "@user: konkrete Frage?" oder warte auf dessen Entscheidung im Workflowfenster.
 • Im Final-Review gelten als vollständig gespeichert markierte Dateiartefakte als vorhanden. Fordere dieselbe Datei nicht erneut an, nur weil der sichtbare Chat ihren Inhalt kompakt darstellt.
 • Delegiere eine bereits erledigte Aufgabe nur erneut, wenn du einen neuen, konkreten Defekt benennst; formuliere dann ausschließlich die nötige Korrektur statt einer kompletten Neuerstellung.
 • Ist noch etwas offen, beende NICHT: adressiere den zuständigen Agenten mit einer konkreten @Name-Aufgabe. Nach dessen Ergebnis erhältst du automatisch einen neuen Final-Review.
 • Ist alles erfüllt und sind alle erforderlichen Abnahmekriterien bestanden oder ausdrücklich ausgenommen, gib dem User eine klare Abschlussantwort, adressiere keinen Agenten mehr und beende mit [[PROJECT_DONE]].
 • Wenn alle Anforderungen erfüllt, alle notwendigen Dateien geschrieben und keine Tasks oder Blocker offen sind, beende mit [[PROJECT_DONE]].
 • Verwende [[PROJECT_DONE]] niemals zusammen mit @Name-Handoffs oder @user.
-${memoryNamespace ? `• Shared Memory: memory://${memoryNamespace} — wichtige Erkenntnisse werden dort abgelegt.` : ''}${projectRules}`;
+ ${memoryNamespace ? `• Shared Memory: memory://${memoryNamespace} — wichtige Erkenntnisse werden dort abgelegt.` : ''}${crossGroupRules}${projectRules}`;
   }
 
   return `${base}
@@ -1086,13 +1267,13 @@ DEINE SESSION-REGELN:
 • Du bekommst eine isolierte Task-Beschreibung — kein langer Gesprächsverlauf.
 • Bearbeite NUR die dir zugewiesene Aufgabe.
 • Richte dein Ergebnis an den im Task Capsule genannten Abnahmekriterien aus und liefere zu jedem bearbeiteten Kriterium einen konkreten [[TASK_EVIDENCE]]-Nachweis. Ein Nachweis behauptet noch keine Abnahme; die Entscheidung trifft der Prüfer oder User.
-• Wenn du Arbeit an einen anderen Agenten übergeben willst, schreibe eine eigene Zeile als "@Name: konkrete Aufgabe".
+• ${userOwnedWorkflow ? 'Wenn ein Problem nicht innerhalb deiner Aufgabe lösbar ist, frage den PM oder User. Schlage keine neue Aufgabe vor und verändere den Plan nicht.' : 'Wenn du Arbeit an einen anderen Agenten übergeben willst, schreibe eine eigene Zeile als "@Name: konkrete Aufgabe".'}
 • Ein fertig bearbeitetes Ergebnis wird automatisch an den PM zur abschließenden Prüfung zurückgegeben; dafür musst du den PM nicht eigens erwähnen.
 • Sammle alle @Agent-Zeilen ganz unten, jeweils linkbündig und direkt untereinander. Nach diesen Zeilen folgt kein weiterer Text.
-• Wenn du eine Entscheidung des Users brauchst, schreibe "@user".
+• Wenn du eine Entscheidung des Users brauchst, schreibe eine konkrete Frage im Format "@user: konkrete Frage?". Ein alleinstehendes "@user" ist ungültig.
 • Nur Erwähnungen ganz links am Zeilenanfang lösen eine Aktion aus. Erwähnungen im Fließtext oder eingerückte Erwähnungen sind reiner Text.
-• Auch @user muss ganz links am Anfang einer eigenen Zeile stehen.
+• Auch @user muss ganz links am Anfang einer eigenen Zeile stehen und auf derselben Zeile die konkrete Frage enthalten.
 • Sobald du @user schreibst, pausiert die Queue; nach der Antwort bekommst du eine neue isolierte Session mit diesem User-Handoff.
 • Antworte präzise und strukturiert (max. 5 Sätze, Markdown erlaubt).
-${memoryNamespace ? `• Wichtige Erkenntnisse kannst du mit #Kategorie markieren — sie werden ins Shared Memory geschrieben.` : ''}${projectRules}`;
+ ${memoryNamespace ? `• Wichtige Erkenntnisse kannst du mit #Kategorie markieren — sie werden ins Shared Memory geschrieben.` : ''}${crossGroupRules}${projectRules}`;
 }

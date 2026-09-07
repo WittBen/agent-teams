@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>Snake – Workflow-Stresstest</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main class="game-shell" aria-labelledby="game-title">
+      <header class="game-header">
+        <div>
+          <p class="eyebrow">Workflow-Stresstest</p>
+          <h1 id="game-title">Snake</h1>
+        </div>
+        <div class="score-card" aria-live="polite">
+          <span>Punkte</span>
+          <strong id="score">0</strong>
+        </div>
+      </header>
+
+      <section class="board-wrap" aria-label="Spielfeld">
+        <canvas id="game-board" width="480" height="480">
+          Dein Browser unterstützt das Canvas-Element nicht.
+        </canvas>
+        <div id="game-overlay" class="overlay">
+          <strong id="overlay-title">Bereit?</strong>
+          <span id="overlay-message">Starte das Spiel und steuere mit den Pfeiltasten.</span>
+        </div>
+      </section>
+
+      <footer class="controls">
+        <button id="start-button" type="button">Spiel starten</button>
+        <p><kbd>↑</kbd><kbd>↓</kbd><kbd>←</kbd><kbd>→</kbd> zum Steuern</p>
+      </footer>
+    </main>
+
+    <script src="game.js"></script>
+  </body>
+</html>

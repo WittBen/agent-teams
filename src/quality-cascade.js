@@ -198,6 +198,79 @@ export function buildEscalationHistory(history, {
   ];
 }
 
+/**
+ * Execute the provider-neutral two-stage quality policy around any isolated
+ * model call. Callers keep ownership of task-specific validation and UI state.
+ */
+export async function runQualityCascade({
+  agent,
+  policy = {},
+  history = [],
+  objective = '',
+  complexity = { level: 'low' },
+  systemContext = '',
+  call,
+  evaluate,
+} = {}) {
+  if (!agent || typeof call !== 'function') throw new Error('Quality Cascading benötigt einen Agenten und einen Modellaufruf.');
+  const evaluateCandidate = typeof evaluate === 'function'
+    ? evaluate
+    : reply => evaluateResponseQuality({ reply, objective, complexity });
+  const directStrong = Boolean(policy.directStrong && policy.escalationAgent);
+  let selectedAgent = directStrong ? policy.escalationAgent : agent;
+  let estimatedInputTokens = estimateTokens(systemContext) + estimateTokens(history.map(message => message?.text || '').join('\n'));
+  let reply = await call({ agent: selectedAgent, history, phase: directStrong ? 'direct-strong' : 'baseline' });
+  let evaluation = evaluateCandidate(reply);
+  let estimatedOutputTokens = estimateTokens(reply);
+  let outcome = directStrong ? 'direct-strong' : 'baseline-accepted';
+  let didEscalate = false;
+  let escalationFailed = false;
+  let escalationError = null;
+
+  if (
+    !directStrong &&
+    policy.enabled &&
+    policy.escalationAgent &&
+    policy.maxEscalations > 0 &&
+    !evaluation.accepted
+  ) {
+    didEscalate = true;
+    const baselineReply = reply;
+    const escalationHistory = buildEscalationHistory(history, {
+      previousReply: baselineReply,
+      reasons: evaluation.reasons,
+      acceptanceCriteria: policy.acceptanceCriteria,
+    });
+    estimatedInputTokens += estimateTokens(systemContext) + estimateTokens(escalationHistory.map(message => message?.text || '').join('\n'));
+    try {
+      selectedAgent = policy.escalationAgent;
+      reply = await call({ agent: selectedAgent, history: escalationHistory, phase: 'escalated' });
+      evaluation = evaluateCandidate(reply);
+      estimatedOutputTokens += estimateTokens(reply);
+      outcome = 'escalated';
+    } catch (error) {
+      escalationFailed = true;
+      escalationError = error;
+      selectedAgent = agent;
+      reply = baselineReply;
+      evaluation = evaluateCandidate(reply);
+    }
+  }
+
+  return {
+    reply,
+    evaluation,
+    selectedAgent,
+    outcome,
+    didEscalate,
+    escalationFailed,
+    escalationError,
+    unresolved: Boolean(policy.enabled && (escalationFailed || !evaluation.accepted)),
+    estimatedInputTokens,
+    estimatedOutputTokens,
+  };
+}
+
 export function updateQualityStats(current = {}, event = {}) {
   const next = { ...DEFAULT_QUALITY_STATS, ...current };
   next.runs += 1;

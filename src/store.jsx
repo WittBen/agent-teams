@@ -12,6 +12,19 @@ import {
   normalizeUserRequestQueues,
   removeUserRequest as dropUserRequest,
 } from './user-request-queue';
+import {
+  cancelRequestsForGroup,
+  cancelRequestsOutsideSourceRoutes,
+  normalizeCrossGroupRequests,
+  removeCrossGroupRequestsMap,
+  retryCrossGroupRequestMap,
+  updateCrossGroupRequestMap,
+} from './cross-group';
+import {
+  buildGroupCapabilityIndex,
+  normalizeCapabilities,
+  normalizeCrossGroupTargetIds,
+} from './delegation';
 
 const StoreContext = createContext(null);
 
@@ -153,7 +166,7 @@ In Gruppen: Du hältst die Konversation fokussiert und zeitboxed. Du erkennst we
 function ensureSystemPM(agentList, groupList) {
   // Ensure PM is in agents list
   const hasPM = agentList.some(a => a.id === SYSTEM_PM_AGENT.id);
-  const agents = hasPM
+  const agents = (hasPM
     ? agentList.map(agent => {
       if (agent.id !== SYSTEM_PM_AGENT.id) return agent;
       const systemPrompt = String(agent.systemPrompt || SYSTEM_PM_AGENT.systemPrompt)
@@ -161,12 +174,14 @@ function ensureSystemPM(agentList, groupList) {
         .trim();
       return systemPrompt === agent.systemPrompt ? agent : { ...agent, systemPrompt };
     })
-    : [SYSTEM_PM_AGENT, ...agentList];
+    : [SYSTEM_PM_AGENT, ...agentList])
+    .map(agent => ({ ...agent, capabilities: normalizeCapabilities(agent.capabilities) }));
   // Ensure PM is in every group and normalize obsolete/invalid memory providers.
   const groups = groupList.map(g => {
     const usesJsonFile = g.memory?.provider === 'file' && !!g.memory?.filePath?.trim();
+    const { crossGroupTargetGroupId, ...groupFields } = g;
     return {
-      ...g,
+      ...groupFields,
       memory: {
         enabled: g.memory?.enabled ?? true,
         provider: usesJsonFile ? 'file' : 'local',
@@ -175,12 +190,20 @@ function ensureSystemPM(agentList, groupList) {
       },
       mcpServers: Array.isArray(g.mcpServers) ? g.mcpServers : [],
       reviewEnvironment: normalizeReviewEnvironment(g.reviewEnvironment),
+      crossGroupCollaborationEnabled: g.crossGroupCollaborationEnabled === true,
+      crossGroupTargetGroupIds: normalizeCrossGroupTargetIds(g.crossGroupTargetGroupIds, crossGroupTargetGroupId),
       agentIds: (g.agentIds || []).includes(SYSTEM_PM_AGENT.id)
         ? g.agentIds
         : [SYSTEM_PM_AGENT.id, ...(g.agentIds || [])],
     };
   });
-  return { agents, groups };
+  return {
+    agents,
+    groups: groups.map(group => ({
+      ...group,
+      capabilityIndex: buildGroupCapabilityIndex(group, agents),
+    })),
+  };
 }
 
 const DEMO_GROUPS = [
@@ -209,6 +232,7 @@ export function StoreProvider({ children }) {
   const [conversationStates, setConversationStates] = useState({});
   const [userRequestQueues, setUserRequestQueues] = useState({});
   const [taskGraphs, setTaskGraphs] = useState({});
+  const [crossGroupRequests, setCrossGroupRequests] = useState({});
   const [groupMemory, setGroupMemoryState] = useState({}); // { chatId: MemoryEntry[] }
   // Provider secrets remain in Electron's main process. The renderer receives
   // configuration status only, never reusable API keys.
@@ -261,6 +285,12 @@ export function StoreProvider({ children }) {
           await window.electronAPI.appStateGet('userRequestQueues') || {},
         ));
         setTaskGraphs(await window.electronAPI.appStateGet('taskGraphs') || {});
+        const storedCrossGroupRequests = normalizeCrossGroupRequests(
+          await window.electronAPI.appStateGet('crossGroupRequests') || {},
+          { recoverRunning: true },
+        );
+        setCrossGroupRequests(storedCrossGroupRequests);
+        await window.electronAPI.appStateSet('crossGroupRequests', storedCrossGroupRequests);
         setGroupMemoryState(await window.electronAPI.appStateGet('groupMemory') || {});
         setApiKeysState({ openai: '', anthropic: '', ...(credentialStatus || {}) });
         const normalizedProviders = normalizeProviderConnections(storedProviderConnections);
@@ -308,6 +338,12 @@ export function StoreProvider({ children }) {
           JSON.parse(localStorage.getItem('userRequestQueues') || '{}'),
         ));
         setTaskGraphs(JSON.parse(localStorage.getItem('taskGraphs') || '{}'));
+        const storedCrossGroupRequests = normalizeCrossGroupRequests(
+          JSON.parse(localStorage.getItem('crossGroupRequests') || '{}'),
+          { recoverRunning: true },
+        );
+        setCrossGroupRequests(storedCrossGroupRequests);
+        localStorage.setItem('crossGroupRequests', JSON.stringify(storedCrossGroupRequests));
         setApiKeysState({ openai: '', anthropic: '', openaiConfigured: false, anthropicConfigured: false, providerConfigured: {}, providerSecrets: {} });
         const storedProviderConnections = JSON.parse(localStorage.getItem('providerConnections') || '[]');
         const normalizedProviders = normalizeProviderConnections(storedProviderConnections);
@@ -429,11 +465,17 @@ export function StoreProvider({ children }) {
   }, [persist]);
   const setAgentRoles = useCallback((roles) => {
     const normalized = normalizeAgentRoleState(roles, agents);
+    const indexedGroups = groups.map(group => ({
+      ...group,
+      capabilityIndex: buildGroupCapabilityIndex(group, normalized.agents),
+    }));
     setAgentRolesState(normalized.roles);
     setAgents(normalized.agents);
+    setGroups(indexedGroups);
     persist('agentRoles', normalized.roles);
     persist('agents', normalized.agents);
-  }, [agents, persist]);
+    persist('groups', indexedGroups);
+  }, [agents, groups, persist]);
   const setConversationLimits = useCallback((limits) => {
     const normalized = normalizeConversationLimits(limits);
     setConversationLimitsState(normalized);
@@ -460,6 +502,7 @@ export function StoreProvider({ children }) {
 
   const addMessage = useCallback((chatId, msg) => {
     setMessages(prev => {
+      if ((prev[chatId] || []).some(existing => String(existing?.id) === String(msg?.id))) return prev;
       const updated = { ...prev, [chatId]: [...(prev[chatId] || []), msg] };
       persist('messages', updated);
       return updated;
@@ -484,39 +527,101 @@ export function StoreProvider({ children }) {
   }, [persist]);
 
   const addAgent = useCallback((agent) => {
-    const newAgents = [...agents, { ...agent, id: uuidv4() }];
+    const newAgents = [...agents, { ...agent, capabilities: normalizeCapabilities(agent.capabilities), id: uuidv4() }];
     saveAgents(newAgents);
-  }, [agents, saveAgents]);
+    saveGroups(groups.map(group => ({
+      ...group,
+      capabilityIndex: buildGroupCapabilityIndex(group, newAgents),
+    })));
+  }, [agents, groups, saveAgents, saveGroups]);
 
   const updateAgent = useCallback((id, updates) => {
-    saveAgents(agents.map(a => a.id === id ? { ...a, ...updates } : a));
-  }, [agents, saveAgents]);
+    const newAgents = agents.map(a => a.id === id ? {
+      ...a,
+      ...updates,
+      ...(updates.capabilities != null ? { capabilities: normalizeCapabilities(updates.capabilities) } : {}),
+    } : a);
+    saveAgents(newAgents);
+    saveGroups(groups.map(group => ({
+      ...group,
+      capabilityIndex: buildGroupCapabilityIndex(group, newAgents),
+    })));
+  }, [agents, groups, saveAgents, saveGroups]);
 
   const deleteAgent = useCallback((id) => {
-    saveAgents(agents.filter(a => a.id !== id));
-    saveGroups(groups.map(g => ({ ...g, agentIds: g.agentIds.filter(aid => aid !== id) })));
+    const newAgents = agents.filter(a => a.id !== id);
+    saveAgents(newAgents);
+    saveGroups(groups.map(g => {
+      const updated = { ...g, agentIds: g.agentIds.filter(aid => aid !== id) };
+      return { ...updated, capabilityIndex: buildGroupCapabilityIndex(updated, newAgents) };
+    }));
   }, [agents, groups, saveAgents, saveGroups]);
 
   const addGroup = useCallback((group) => {
     const agentIds = group.agentIds?.includes(SYSTEM_PM_AGENT.id)
       ? group.agentIds
       : [SYSTEM_PM_AGENT.id, ...(group.agentIds || [])];
-    saveGroups([...groups, { ...group, agentIds, id: uuidv4(), type: 'group' }]);
-  }, [groups, saveGroups]);
+    const createdGroup = {
+      ...group,
+      crossGroupCollaborationEnabled: group.crossGroupCollaborationEnabled === true,
+      crossGroupTargetGroupIds: normalizeCrossGroupTargetIds(group.crossGroupTargetGroupIds, group.crossGroupTargetGroupId),
+      crossGroupTargetGroupId: undefined,
+      agentIds,
+      id: uuidv4(),
+      type: 'group',
+    };
+    createdGroup.capabilityIndex = buildGroupCapabilityIndex(createdGroup, agents);
+    saveGroups([...groups, createdGroup]);
+  }, [agents, groups, saveGroups]);
 
   const updateGroup = useCallback((id, updates) => {
+    const disablesCrossGroupWork = groups.some(group => (
+      group.id === id && group.crossGroupCollaborationEnabled && updates.crossGroupCollaborationEnabled === false
+    ));
+    const changesCrossGroupTargets = groups.some(group => (
+      group.id === id && updates.crossGroupTargetGroupIds !== undefined &&
+      JSON.stringify(normalizeCrossGroupTargetIds(group.crossGroupTargetGroupIds, group.crossGroupTargetGroupId)) !==
+        JSON.stringify(normalizeCrossGroupTargetIds(updates.crossGroupTargetGroupIds))
+    ));
     saveGroups(groups.map(g => {
       if (g.id !== id) return g;
       const updated = { ...g, ...updates };
+      updated.crossGroupTargetGroupIds = normalizeCrossGroupTargetIds(updated.crossGroupTargetGroupIds, updated.crossGroupTargetGroupId);
+      delete updated.crossGroupTargetGroupId;
       updated.agentIds = updated.agentIds?.includes(SYSTEM_PM_AGENT.id)
         ? updated.agentIds
         : [SYSTEM_PM_AGENT.id, ...(updated.agentIds || [])];
+      updated.capabilityIndex = buildGroupCapabilityIndex(updated, agents);
       return updated;
     }));
-  }, [groups, saveGroups]);
+    if (disablesCrossGroupWork) {
+      setCrossGroupRequests(previous => {
+        const updated = cancelRequestsOutsideSourceRoutes(previous, id, [], {
+          reason: 'Ausgehende Gruppenanfragen wurden für die Quellgruppe deaktiviert.',
+        });
+        persist('crossGroupRequests', updated);
+        return updated;
+      });
+    } else if (changesCrossGroupTargets) {
+      setCrossGroupRequests(previous => {
+        const updated = cancelRequestsOutsideSourceRoutes(previous, id, updates.crossGroupTargetGroupIds, {
+          reason: 'Die erreichbaren Zielgruppen der Quellgruppe wurden geändert.',
+        });
+        persist('crossGroupRequests', updated);
+        return updated;
+      });
+    }
+  }, [agents, groups, persist, saveGroups]);
 
   const deleteGroup = useCallback((id) => {
-    saveGroups(groups.filter(g => g.id !== id));
+    saveGroups(groups
+      .filter(g => g.id !== id)
+      .map(group => ({
+        ...group,
+        crossGroupTargetGroupIds: normalizeCrossGroupTargetIds(group.crossGroupTargetGroupIds, group.crossGroupTargetGroupId)
+          .filter(targetGroupId => targetGroupId !== id),
+        crossGroupTargetGroupId: undefined,
+      })));
     const withoutChat = previous => {
       if (!previous[id]) return previous;
       const updated = { ...previous };
@@ -541,6 +646,11 @@ export function StoreProvider({ children }) {
     setTaskGraphs(previous => {
       const updated = withoutChat(previous);
       persist('taskGraphs', updated);
+      return updated;
+    });
+    setCrossGroupRequests(previous => {
+      const updated = cancelRequestsForGroup(previous, id);
+      persist('crossGroupRequests', updated);
       return updated;
     });
     setGroupMemoryState(previous => {
@@ -616,6 +726,59 @@ export function StoreProvider({ children }) {
     });
   }, [persist]);
 
+  const updateTaskGraph = useCallback((chatId, updater) => {
+    setTaskGraphs(previous => {
+      const current = previous[chatId];
+      const graph = typeof updater === 'function' ? updater(current) : updater;
+      if (!graph || graph === current) return previous;
+      const updated = { ...previous, [chatId]: graph };
+      persist('taskGraphs', updated);
+      return updated;
+    });
+  }, [persist]);
+
+  const enqueueCrossGroupRequest = useCallback((request) => {
+    if (!request?.id) return;
+    setCrossGroupRequests(previous => {
+      if (previous[request.id]) return previous;
+      // A late provider response must not recreate a child after its request
+      // tree was explicitly deleted by the user.
+      if (
+        request.parentRequestId &&
+        (!previous[request.parentRequestId] || previous[request.parentRequestId].status === 'cancelled')
+      ) return previous;
+      const updated = normalizeCrossGroupRequests({ ...previous, [request.id]: request });
+      persist('crossGroupRequests', updated);
+      return updated;
+    });
+  }, [persist]);
+
+  const updateCrossGroupRequest = useCallback((requestId, updates) => {
+    setCrossGroupRequests(previous => {
+      const updated = updateCrossGroupRequestMap(previous, requestId, updates);
+      if (updated === previous) return previous;
+      persist('crossGroupRequests', updated);
+      return updated;
+    });
+  }, [persist]);
+
+  const retryCrossGroupRequest = useCallback((requestId) => {
+    setCrossGroupRequests(previous => {
+      const updated = retryCrossGroupRequestMap(previous, requestId);
+      if (updated === previous) return previous;
+      persist('crossGroupRequests', updated);
+      return updated;
+    });
+  }, [persist]);
+
+  const removeCrossGroupRequests = useCallback((requestIds) => {
+    setCrossGroupRequests(previous => {
+      const updated = removeCrossGroupRequestsMap(previous, requestIds);
+      persist('crossGroupRequests', updated);
+      return updated;
+    });
+  }, [persist]);
+
   const clearTaskGraph = useCallback((chatId) => {
     setTaskGraphs(prev => {
       if (!prev[chatId]) return prev;
@@ -630,13 +793,14 @@ export function StoreProvider({ children }) {
 
   return (
     <StoreContext.Provider value={{
-      agents, groups, messages, conversationStates, userRequestQueues, taskGraphs, apiKeys, providerConnections, kbPath, projectPath, groupMemory, mcpServers, mcpPermissions, agentRoles,
+      agents, groups, messages, conversationStates, userRequestQueues, taskGraphs, crossGroupRequests, apiKeys, providerConnections, kbPath, projectPath, groupMemory, mcpServers, mcpPermissions, agentRoles,
       qualityRouting, qualityStats, conversationLimits,
       addMessage, addAgent, updateAgent, deleteAgent,
       addGroup, updateGroup, deleteGroup, clearMessages,
       saveConversationState, clearConversationState,
       enqueueUserRequest, removeUserRequest, clearUserRequestQueue,
-      saveTaskGraph, clearTaskGraph,
+      saveTaskGraph, updateTaskGraph, clearTaskGraph,
+      enqueueCrossGroupRequest, updateCrossGroupRequest, retryCrossGroupRequest, removeCrossGroupRequests,
       setApiKeys, setProviderConnections, setKbPath, setProjectPath, setMcpServers, grantMcpPermission, consumeMcpPermission, clearMcpPermissions, setAgentRoles, setConversationLimits, setQualityRouting,
       recordQualityEvent, clearQualityStats,
       appendGroupMemory, clearGroupMemory,

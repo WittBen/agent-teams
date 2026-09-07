@@ -21,6 +21,14 @@ Windows runner. Generated installers remain outside Git history.
 
 ## Automated release
 
+The local release tool runs the security audit before tests and packaging. If
+npm reports a semver-compatible repair, the tool shows the affected packages,
+their dependency chain, and whether they are used in production or only for
+development/building. With confirmation it runs `npm audit fix` without
+`--force`, repeats the audit, and then runs the complete test and build suite
+against the repaired dependency tree. If no safe repair exists, or the registry
+cannot be reached, the release stops before commit, push, or publication.
+
 1. Update `package.json`, `package-lock.json`, `CHANGELOG.md` and the version in
    `README.md` through a reviewed pull request.
 2. Wait for the `main` CI workflow to pass on Windows and Ubuntu.
@@ -29,8 +37,8 @@ Windows runner. Generated installers remain outside Git history.
 ```powershell
 git switch main
 git pull --ff-only origin main
-git tag -a v1.1.0-beta.9 -m "Agent Teams v1.1.0-beta.9"
-git push origin v1.1.0-beta.9
+git tag -a v1.1.0-beta.10 -m "Agent Teams v1.1.0-beta.10"
+git push origin v1.1.0-beta.10
 ```
 
 The tag must equal `v` followed by the version in `package.json`. Beta versions
