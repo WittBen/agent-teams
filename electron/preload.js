@@ -14,6 +14,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   externalApiConfigure: (config) => ipcRenderer.invoke('external-api-configure', config),
   externalApiRegenerateToken: () => ipcRenderer.invoke('external-api-regenerate-token'),
   exportUserData: () => ipcRenderer.invoke('user-data-export'),
+  exportWorkflowFile: (document, suggestedName) => ipcRenderer.invoke('workflow-file-export', { document, suggestedName }),
+  importWorkflowFile: () => ipcRenderer.invoke('workflow-file-import'),
   deleteAllUserData: () => ipcRenderer.invoke('user-data-delete-all'),
   openUserDataFolder: () => ipcRenderer.invoke('user-data-open-folder'),
   pickMemoryFile: (params) => ipcRenderer.invoke('pick-memory-file', params),

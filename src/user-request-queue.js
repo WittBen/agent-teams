@@ -11,6 +11,8 @@ function normalizeQueueItem(item) {
     id,
     messageId,
     createdAt: Number(item.createdAt) || Date.now(),
+    ...(item.kind === 'cross-group-answer' ? { kind: item.kind } : {}),
+    ...(item.crossGroupBatchId ? { crossGroupBatchId: String(item.crossGroupBatchId).slice(0, 200) } : {}),
   };
 }
 

@@ -30,11 +30,77 @@ export function createEntry({ type = 'fact', namespace, content, tags = [], auth
   };
 }
 
+/**
+ * Build one bounded, traceable memory record for a successfully answered
+ * cross-group request. The stable id/dedupe key makes retries idempotent.
+ */
+export function createCrossGroupResultEntry({
+  namespace,
+  requestId,
+  requestKind = 'consultation',
+  question = '',
+  answer = '',
+  sourceGroupId = '',
+  sourceGroupName = '',
+  targetGroupId = '',
+  targetGroupName = '',
+  sourceTaskId = '',
+  sourceTaskTitle = '',
+  author = 'PM',
+} = {}) {
+  const normalizedRequestId = String(requestId || '').trim().slice(0, 200);
+  if (!normalizedRequestId) throw new Error('Request-ID für Gruppen-Memory fehlt.');
+  const entry = createEntry({
+    type: 'finding',
+    namespace,
+    content: {
+      question: String(question || '').trim().slice(0, 2000),
+      result: String(answer || '').trim().slice(0, 6000),
+      sourceGroup: String(sourceGroupName || '').trim().slice(0, 200),
+      targetGroup: String(targetGroupName || '').trim().slice(0, 200),
+      task: String(sourceTaskTitle || '').trim().slice(0, 500),
+    },
+    tags: ['cross-group', requestKind === 'task_delegation' ? 'delegation' : 'consultation'],
+    author,
+    confidence: 'medium',
+  });
+  return {
+    ...entry,
+    id: `${namespace}-CGR-${normalizedRequestId}`.slice(0, 500),
+    dedupeKey: `cross-group-result:${normalizedRequestId}`,
+    provenance: {
+      requestId: normalizedRequestId,
+      requestKind: requestKind === 'task_delegation' ? 'task_delegation' : 'consultation',
+      sourceGroupId: String(sourceGroupId || '').trim().slice(0, 200),
+      targetGroupId: String(targetGroupId || '').trim().slice(0, 200),
+      sourceTaskId: String(sourceTaskId || '').trim().slice(0, 200),
+    },
+  };
+}
+
 // ── Memory API (thin wrapper around provider) ─────────────────────────────────
 
 export class MemoryAPI {
   constructor(provider) {
     this.provider = provider;
+    this.changeListeners = new Set();
+  }
+
+  /** Subscribe to successful mutations performed through this provider. */
+  subscribe(listener) {
+    if (typeof listener !== 'function') return () => {};
+    this.changeListeners.add(listener);
+    return () => this.changeListeners.delete(listener);
+  }
+
+  _notifyChange(change) {
+    for (const listener of this.changeListeners) {
+      try {
+        listener(change);
+      } catch {
+        // A stale UI subscriber must never make a completed memory write fail.
+      }
+    }
   }
 
   /** Search by keyword relevance. Returns top-N entries. */
@@ -49,17 +115,35 @@ export class MemoryAPI {
 
   /** Write a new entry. Returns the created entry. */
   async write(namespace, entry) {
-    return this.provider.write(namespace, entry);
+    const result = await this.provider.write(namespace, entry);
+    this._notifyChange({ type: 'write', namespace, entry: result || entry });
+    return result;
+  }
+
+  /** Write an entry only when neither its stable id nor dedupe key exists. */
+  async writeOnce(namespace, entry) {
+    const entries = await this.list(namespace);
+    const existing = entries.find(candidate => (
+      candidate?.id === entry?.id ||
+      (entry?.dedupeKey && candidate?.dedupeKey === entry.dedupeKey)
+    ));
+    if (existing) return { created: false, entry: existing };
+    const written = await this.write(namespace, entry);
+    return { created: true, entry: written || entry };
   }
 
   /** Update an existing entry. */
   async update(namespace, id, updates) {
-    return this.provider.update(namespace, id, updates);
+    const result = await this.provider.update(namespace, id, updates);
+    if (result) this._notifyChange({ type: 'update', namespace, id, entry: result });
+    return result;
   }
 
   /** Permanently remove one entry from a namespace. */
   async delete(namespace, id) {
-    return this.provider.delete(namespace, id);
+    const result = await this.provider.delete(namespace, id);
+    if (result?.deleted !== false) this._notifyChange({ type: 'delete', namespace, id });
+    return result;
   }
 
   /** Create and store a structured handoff inside the group's shared namespace. */
@@ -80,7 +164,9 @@ export class MemoryAPI {
 
   /** Remove all entries from one namespace. */
   async clear(namespace) {
-    return this.provider.clear(namespace);
+    const result = await this.provider.clear(namespace);
+    this._notifyChange({ type: 'clear', namespace });
+    return result;
   }
 
   /** Format top-N search results for LLM injection. */

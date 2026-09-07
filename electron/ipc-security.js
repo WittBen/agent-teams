@@ -1,7 +1,7 @@
 const path = require('path');
 
 const APP_STATE_KEYS = new Set([
-  'agents', 'groups', 'messages', 'conversationStates', 'userRequestQueues', 'taskGraphs', 'groupMemory',
+  'agents', 'groups', 'messages', 'conversationStates', 'userRequestQueues', 'taskGraphs', 'crossGroupRequests', 'groupMemory',
   'kbPath', 'projectPath', 'mcpServers', 'mcpPermissions', 'mcpPresetVersion',
   'agentRoles', 'conversationLimits', 'qualityRouting', 'qualityStats', 'language',
   'providerConnections',

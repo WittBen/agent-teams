@@ -2,11 +2,180 @@
 
 All notable changes are documented here. The project follows semantic versioning while APIs remain subject to beta changes.
 
+## 1.1.0-beta.10 - 2026-09-07
+
+### Changed
+
+- new workflow window
+
 ## 1.1.0-beta.9 - 2026-08-31
 
 ### Changed
 
+- The beta release tool now explains security-audit failures, offers a safe
+  dependency repair without `--force`, repeats the audit, and verifies the
+  repaired tree before publishing.
+- Preflight problems now expose a focused prompt directly on the affected task
+  and a matching **Resolve** action in the chat. A response from either surface
+  is sent to the PM in planning mode, while duplicate chat notices for the same
+  workflow problem are suppressed.
+- Execution problems now escalate to the responsible PM before involving the
+  user. The PM may recover only inside the approved plan and must explicitly
+  confirm resolution; an unresolved or failed PM recovery pauses the task with
+  a visible user question, diagnosis and concrete choices. Provider rate limits
+  keep their automatic retry path.
+- Approved workflows now use idle capacity for bounded, dependency-independent
+  preparation while a predecessor is running. Draft output is checkpointed on
+  the task and reused after dependencies finish, without completing the task,
+  writing speculative project files or changing the approved plan.
+- Prepared tasks now have a distinct workflow state and expose their saved work
+  in task details. Timeout recovery also shows its ordered PM/agent substeps and
+  actual runtime model directly in the workflow.
+- Specialist results that still miss deterministic quality gates after model
+  escalation now enter the same visible, stepwise PM recovery path as timeouts,
+  with a distinct quality-problem state instead of being silently accepted.
+- Cross-group waits now retain the asking task's bounded intermediate result and
+  restore it with the group answer, preventing already completed work from being
+  lost or needlessly repeated.
+- Successful cross-group consultations and delegations now write one bounded,
+  provenance-tagged final result to the enabled Shared Memory of their source and
+  target groups. Intermediate chatter and unsuccessful requests are excluded;
+  stable request keys and destination collapsing prevent duplicate entries.
+- Planning mode is now the default for unused groups and still respects an
+  explicit suspension through the infobar X. Deleting a workflow immediately
+  opens a clean planning session, shows a reset notice and requires a new user
+  request so the PM cannot reconstruct the deleted plan from older chat history.
+- The single workflow-header delete action now clears both the main workflow and
+  all group-work trees visible to the current group. It remains enabled when only
+  group work exists, and late provider responses cannot recreate deleted child
+  requests. The redundant delete control inside the group-work tab was removed.
+- Added versioned workflow import and export through `.agent-workflow.json`
+  files. Exports contain only the portable plan contract; runtime state, local
+  identifiers and results are omitted. Imports are size/schema validated, map
+  symbolic roles to local agents and always enter user-owned planning mode for
+  preflight review and explicit approval instead of starting automatically.
+- The workflow window now has a confirmed delete action. It safely stops an
+  active run and clears the graph, plan/undo history and resumable checkpoint
+  while cancelling task-bound group requests and retaining chat messages,
+  groups, memory and project settings.
+- Every incoming group request or delegation now starts the receiving group's PM.
+  The PM owns a persistent runtime subplan whose planning, specialist, child wait,
+  synthesis and failure states are shown as a nested request tree in every
+  participating workflow window without changing the approved source plan.
+- The workflow window now separates the main plan and group work into full-size,
+  keyboard-accessible tabs. Completed group answers are additionally shown on the
+  originating task card and in its detail panel. The selected tab is remembered
+  per chat across status updates and workflow-window reopening.
+- Group-work branches now use the same full-contrast presentation in every chat;
+  remote group tasks are no longer rendered as disabled or desaturated cards.
+- PM-directed agent and group names are validated before execution. Unknown
+  `@Name:` targets receive one constrained correction pass and then fail visibly,
+  eliminating silently accepted work that no configured expert performed.
+- Group settings are now organized into accessible tabs for general membership,
+  cross-group collaboration, workspace/review configuration, and AI tools/memory.
+  Keyboard arrow, Home and End navigation is supported, and hidden-tab validation
+  problems are marked on the affected tab.
+- Cross-group requests now support bounded directed chains such as
+  Dev → Tech → Design. Parent requests wait for child consultations, resume the
+  exact target task with the returned information and then answer their own
+  source. Stored group paths prevent cycles, while replies require no reverse
+  group assignment.
+- Cross-group continuations now consume child answers as deltas. Processed
+  request IDs and a bounded rolling summary prevent the same answer from being
+  sent repeatedly to the PM. Approved workflow tasks receive prior results only
+  from their direct or transitive dependencies; independent branches no longer
+  inherit the complete result history.
+- Quality Cascading now covers receiving group PMs, parallel group specialists,
+  nested consultations and final group synthesis. The selected message quality
+  mode follows the request chain; explicit models in approved workflows remain
+  fixed to preserve the user's execution contract.
+- Agent context is now assembled per task: knowledge search uses the concrete
+  objective, specialists receive only the relevant plan ancestry and matching
+  project inventory, dependency results are bounded, and cross-group history is
+  relevance- and size-filtered instead of forwarding broad transcripts.
+- Group target lists are now outbound permissions. A selected target can receive
+  and reply without enabling an outbound route of its own; its toggle is needed
+  only when it should initiate requests to further groups.
+- The PM can now continue revising a user-edited workflow during planning,
+  including removing obsolete or invalid tasks through a complete replacement
+  draft. Approved plans remain immutable and still require explicit user approval.
+- Workflow tasks marked with the **Problem** badge now expose their concrete
+  validation/runtime errors and task-specific repair suggestions in the detail panel.
+- Added generic, capability-based task delegation between arbitrary groups. Each
+  task can disable delegation, request user approval or delegate automatically;
+  delegated work preserves the approved plan and independent branches continue
+  in parallel. Pending user approvals can now be granted directly from the
+  related chat message through a compact, single-use action.
+- Added one group-level collaboration option for both information requests and
+  task delegation. Each source group persists its own list of reachable groups,
+  so its PM and `@` picker see only those routes instead of searching every group.
+  The option governs outgoing work; selected targets can receive and reply.
+- Added free-form agent capability labels, delegation approval/local-execution
+  controls in the workflow window, route-aware preflight validation and schema-6
+  migration for the new group and agent settings. Schema 7 migrates the earlier
+  single-target setting into the new target list.
+- Groups now persist a local semantic capability index assembled from member
+  skills, roles and profile descriptions. The index is refreshed on group,
+  agent and role changes, keeps inferred matches distinguishable from explicit
+  skills and never broadens the configured outbound target routes.
+- Capability routing now prefers a single complete expert but can combine
+  several members of one group when their skills jointly cover a task. The
+  receiving PM coordinates such a team without changing the approved workflow.
+- Added persistent cross-group requests through `@Group name: question` in group
+  chats and line-start mentions in agent responses. The target PM may consult its
+  own specialists while the source task waits and independent workflow branches
+  continue in the background.
+- Added non-editable, group-colored request indicators to the workflow window,
+  exact-task resumption after answers, and visible retry controls for failed or
+  timed-out group requests. Requests recover safely after an app restart.
+- Added global per-agent execution leases so background group consultations and
+  normal workflows cannot run the same configured agent concurrently. Approved
+  task plans remain immutable throughout the exchange.
+- Replaced the obsolete PM solution-tip description with the deterministic
+  workflow preflight report used by the current interface.
 - fix: conversation language
+- Fixed the chat composer inheriting the app-wide selection lock; text fields
+  remain selectable and automatic focus restoration preserves the current range.
+- Workflow plans are now user-owned, versioned execution contracts. After user
+  approval, neither agents nor the PM can add, remove or rewrite tasks; problems
+  become visible waiting/retry states and only the user can open a new version.
+- Removed the separate sequential/parallel task mode. Blocking dependencies alone
+  determine order and safe parallel execution; card movement changes only the
+  visible line. Review tasks are optional and freely configurable.
+- Claude CLI session-limit responses such as `resets 2am` are classified as
+  retryable provider pauses instead of generic workflow failures.
+- Replaced the detached task-tree UI with a workflow window that supports
+  dependency-safe parallel planning and per-task model overrides.
+- Added an explicit per-group planning mode with a conditional composer infobar;
+  only the PM participates until the user finishes planning from the UI.
+- Approved workflows now act as execution contracts for task objectives,
+  dependencies, agents and models. Unplanned agent changes are rejected without
+  mutating the plan, while groups without a user-owned plan retain free mode.
+- Added workflow preflight validation, execution-compliance logging and guards
+  against acceptance before a task has finished.
+- Kept workflow nodes movable after plan approval by separating canvas positions
+  from the immutable execution contract; automatic layout now resets view state only.
+- Runtime task-status and evidence updates no longer appear as plan changes.
+  Versioned user plan drafts highlight affected tasks and connections in red and
+  show before/after values from the last approved snapshot.
+- Shared-memory mutations now notify the active group view immediately, so the
+  brain badge count and an open memory viewer update without an extra click.
+- Reworked the workflow canvas into a horizontal Git-style execution graph with
+  a left-to-right main line, vertically stacked parallel branches, automatic
+  fork/join markers and a collapsible legend.
+- Planning users can now add, edit, split, remove and reorder tasks, as well as
+  change task types, objectives, agents, compatible models, acceptance criteria
+  and dependencies. Lines and phases update immediately.
+- Removed PM delegation links from scheduling semantics. Only dependencies and
+  review edges gate execution; status updates remain layout-neutral, while
+  approved task semantics stay locked and cards remain visually movable.
+- The task detail sidebar can now be collapsed to reclaim canvas space and
+  pinned so clicks on the free workflow canvas do not close it accidentally.
+- Invalid planning drafts now offer a PM-powered solution tip in the upper-left
+  corner. Suggested nodes and edges are previewed in yellow, validated against
+  the workflow rules, and applied only after explicit user approval.
+- Preflight errors now identify their exact task nodes. Affected cards receive
+  an amber warning outline and issue badge, including both cards for conflicts.
 
 ## 1.1.0-beta.8 - 2026-08-30
 

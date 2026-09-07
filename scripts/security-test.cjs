@@ -48,6 +48,7 @@ function request(port, { token = '', origin = '' } = {}) {
 test('renderer state allowlist excludes credential and trust stores', () => {
   assert.equal(assertAllowedStateKey('messages'), 'messages');
   assert.equal(assertAllowedStateKey('userRequestQueues'), 'userRequestQueues');
+  assert.equal(assertAllowedStateKey('crossGroupRequests'), 'crossGroupRequests');
   assert.equal(assertAllowedStateKey('providerConnections'), 'providerConnections');
   assert.equal(assertAllowedStateKey('memspace:shared-team'), 'memspace:shared-team');
   for (const key of ['apiKeys', 'secureCredentials', 'providerSettings', 'trustedMcpServers', 'trustedReviewCommands']) {
@@ -85,9 +86,10 @@ test('legacy provider keys migrate to protected storage and leave ordinary store
 test('app-state migrations version and repair invalid containers', () => {
   const store = fakeStore({ dataSchemaVersion: 0, messages: [], userRequestQueues: [], groups: { invalid: true }, externalApi: { enabled: true, port: 12 } });
   const result = migrateAppData(store);
-  assert.equal(result.currentVersion, 4);
+  assert.equal(result.currentVersion, 7);
   assert.deepEqual(store.get('messages'), {});
   assert.deepEqual(store.get('userRequestQueues'), {});
+  assert.deepEqual(store.get('crossGroupRequests'), {});
   assert.deepEqual(store.get('groups'), []);
   assert.equal(store.get('externalApi').enabled, false);
   assert.equal(store.get('externalApi').port, 1024);
@@ -106,6 +108,30 @@ test('app-state migration adds a bounded group review profile', () => {
     previewUrl: '',
     testTimeoutMs: 120000,
   });
+  assert.equal(store.get('groups')[0].crossGroupCollaborationEnabled, false);
+  assert.deepEqual(store.get('groups')[0].crossGroupTargetGroupIds, []);
+});
+
+test('app-state migration normalizes generic collaboration capabilities and route', () => {
+  const store = fakeStore({
+    dataSchemaVersion: 5,
+    agents: [{ id: 'agent-1', name: 'Expert' }],
+    groups: [{ id: 'source', crossGroupCollaborationEnabled: true, crossGroupTargetGroupId: 'target' }],
+  });
+  migrateAppData(store);
+  assert.deepEqual(store.get('agents')[0].capabilities, []);
+  assert.equal(store.get('groups')[0].crossGroupCollaborationEnabled, true);
+  assert.deepEqual(store.get('groups')[0].crossGroupTargetGroupIds, ['target']);
+  assert.equal(store.get('groups')[0].crossGroupTargetGroupId, undefined);
+});
+
+test('schema 7 preserves and deduplicates multiple group routes', () => {
+  const store = fakeStore({
+    dataSchemaVersion: 6,
+    groups: [{ id: 'source', crossGroupTargetGroupIds: ['alpha', 'beta', 'alpha', ''] }],
+  });
+  migrateAppData(store);
+  assert.deepEqual(store.get('groups')[0].crossGroupTargetGroupIds, ['alpha', 'beta']);
 });
 
 test('custom AI providers require safe endpoints and bounded configuration', () => {

@@ -84,7 +84,7 @@ function fallbackModelFor(model) {
 }
 
 function isClaudeRateLimitMessage(value) {
-  return /(?:rate.?limit|usage.?limit|quota|too many requests|hit your limit|resets? at)/i.test(String(value || ''));
+  return /(?:rate.?limit|usage.?limit|session.?limit|quota|too many requests|hit your(?:\s+\w+){0,3}\s+limit|resets?(?:\s+at)?\s+\d)/i.test(String(value || ''));
 }
 
 function runClaude(args, {

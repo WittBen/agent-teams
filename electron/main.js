@@ -403,6 +403,22 @@ async function deleteConversationData(chatId, { keepGroup = false } = {}) {
   for (const key of ['messages', 'conversationStates', 'userRequestQueues', 'taskGraphs', 'mcpPermissions']) {
     removeChatKey(key, safeChatId);
   }
+  const crossGroupRequests = store.get('crossGroupRequests') || {};
+  const cancelledAt = Date.now();
+  store.set('crossGroupRequests', Object.fromEntries(Object.entries(crossGroupRequests).map(([requestId, request]) => {
+    if (
+      !request ||
+      ['answered', 'failed', 'timed_out', 'cancelled'].includes(request.status) ||
+      (request.sourceGroupId !== safeChatId && request.targetGroupId !== safeChatId)
+    ) return [requestId, request];
+    return [requestId, {
+      ...request,
+      status: 'cancelled',
+      error: 'Eine beteiligte Gruppe wurde gelöscht.',
+      completedAt: cancelledAt,
+      updatedAt: cancelledAt,
+    }];
+  })));
   if (!keepGroup) {
     removeChatKey('groupMemory', safeChatId);
     store.set('groups', (store.get('groups') || []).filter(item => item.id !== safeChatId));
@@ -482,6 +498,58 @@ function exportableUserData() {
   };
 }
 
+const MAX_WORKFLOW_FILE_BYTES = 1024 * 1024;
+
+function workflowFileDocument(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Der Workflow enthält kein gültiges Dokument.');
+  }
+  if (value.format !== 'agent-teams-workflow' || Number(value.schemaVersion) !== 1) {
+    throw new Error('Das Workflow-Dateiformat oder seine Version wird nicht unterstützt.');
+  }
+  if (!Array.isArray(value.nodes) || !Array.isArray(value.slots) ||
+      !Array.isArray(value.points) || !Array.isArray(value.connections)) {
+    throw new Error('Das Workflow-Dokument ist unvollständig.');
+  }
+  const serialized = JSON.stringify(value);
+  if (Buffer.byteLength(serialized, 'utf8') > MAX_WORKFLOW_FILE_BYTES) {
+    throw new Error('Die Workflow-Datei überschreitet die zulässige Größe von 1 MB.');
+  }
+  // The renderer applies the domain schema. Re-parsing here removes prototypes
+  // and ensures that only plain JSON crosses the file-system boundary.
+  return JSON.parse(serialized);
+}
+
+function workflowFileName(value = 'workflow') {
+  const safeName = String(value || 'workflow')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80) || 'workflow';
+  return `${safeName}.agent-workflow.json`;
+}
+
+function readBoundedWorkflowFile(filePath) {
+  const descriptor = fs.openSync(filePath, 'r');
+  try {
+    const stat = fs.fstatSync(descriptor);
+    if (!stat.isFile() || stat.size > MAX_WORKFLOW_FILE_BYTES) {
+      throw new Error('Die Workflow-Datei ist ungültig oder größer als 1 MB.');
+    }
+    const buffer = Buffer.alloc(stat.size);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const bytesRead = fs.readSync(descriptor, buffer, offset, buffer.length - offset, offset);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    return buffer.subarray(0, offset).toString('utf8').replace(/^\uFEFF/, '');
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
 function sendTaskWindowState() {
   if (!taskWindow || taskWindow.isDestroyed() || taskWindow.webContents.isLoading()) return;
   taskWindow.webContents.send('task-window-state', taskWindowState);
@@ -500,7 +568,7 @@ function loadTaskWindow() {
 
 function openTaskWindow(nextState = {}) {
   taskWindowState = nextState;
-  const title = brandedWindowTitle(nextState.windowTitle || 'Aufgabenbaum');
+  const title = brandedWindowTitle(nextState.windowTitle || 'Workflow');
   if (taskWindow && !taskWindow.isDestroyed()) {
     taskWindow.setTitle(title);
     sendTaskWindowState();
@@ -778,7 +846,7 @@ handleIpc('task-window-open', (_, state = {}) => {
 onIpc('task-window-update', (_, state = {}) => {
   taskWindowState = state;
   if (taskWindow && !taskWindow.isDestroyed()) {
-    taskWindow.setTitle(brandedWindowTitle(state.windowTitle || 'Aufgabenbaum'));
+    taskWindow.setTitle(brandedWindowTitle(state.windowTitle || 'Workflow'));
     sendTaskWindowState();
   }
 });
@@ -980,6 +1048,62 @@ handleIpc('user-data-export', async (event) => {
   } catch (error) {
     try { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); } catch {}
     return { error: error.message };
+  }
+});
+
+handleIpc('workflow-file-export', async (event, { document, suggestedName } = {}) => {
+  try {
+    const portableDocument = workflowFileDocument({
+      ...document,
+      exportedAt: new Date().toISOString(),
+    });
+    const owner = BrowserWindow.fromWebContents(event.sender) || mainWindow;
+    const options = {
+      title: 'Workflow exportieren',
+      defaultPath: path.join(app.getPath('documents'), workflowFileName(suggestedName || portableDocument.title)),
+      filters: [{ name: 'Agent Teams Workflow', extensions: ['json'] }],
+      properties: ['showOverwriteConfirmation', 'createDirectory'],
+    };
+    const result = owner ? await dialog.showSaveDialog(owner, options) : await dialog.showSaveDialog(options);
+    if (result.canceled || !result.filePath) return { cancelled: true };
+    const target = path.resolve(result.filePath);
+    const temporary = `${target}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      fs.writeFileSync(temporary, `${JSON.stringify(portableDocument, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
+      if (fs.existsSync(target)) {
+        fs.copyFileSync(temporary, target);
+        fs.unlinkSync(temporary);
+      } else {
+        fs.renameSync(temporary, target);
+      }
+      return { ok: true, fileName: path.basename(target) };
+    } catch (error) {
+      try { if (fs.existsSync(temporary)) fs.unlinkSync(temporary); } catch {}
+      return { error: error.message };
+    }
+  } catch (error) {
+    return { error: error.message };
+  }
+});
+
+handleIpc('workflow-file-import', async (event) => {
+  const owner = BrowserWindow.fromWebContents(event.sender) || mainWindow;
+  const options = {
+    title: 'Workflow importieren',
+    defaultPath: app.getPath('documents'),
+    filters: [{ name: 'Agent Teams Workflow', extensions: ['json'] }],
+    properties: ['openFile'],
+  };
+  const result = owner ? await dialog.showOpenDialog(owner, options) : await dialog.showOpenDialog(options);
+  const selectedPath = result.filePaths?.[0];
+  if (result.canceled || !selectedPath) return { cancelled: true };
+  try {
+    const resolvedPath = path.resolve(selectedPath);
+    const raw = readBoundedWorkflowFile(resolvedPath);
+    const document = workflowFileDocument(JSON.parse(raw));
+    return { ok: true, fileName: path.basename(resolvedPath), document };
+  } catch (error) {
+    return { error: error instanceof SyntaxError ? 'Die Workflow-Datei enthält kein gültiges JSON.' : error.message };
   }
 });
 

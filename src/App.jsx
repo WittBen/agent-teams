@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useStore } from './store';
 import ChatView from './ChatView';
+import CrossGroupCoordinator from './CrossGroupCoordinator';
 import { AgentModal, GroupModal, SettingsPanel } from './Modals';
 import { useI18n } from './i18n';
 import { getProviderEmoji } from './provider-catalog';
@@ -78,6 +79,7 @@ export default function App() {
       </div>
 
       <div className="app-layout">
+        <CrossGroupCoordinator />
         {/* Sidebar */}
         <div className={`sidebar ${sidebarCollapsed ? 'collapsed' : ''}`}>
           {/* Sidebar Header */}
@@ -254,16 +256,22 @@ export default function App() {
         {/* Main Chat Area */}
         <div className="chat-area">
           <div className="chat-bg" />
-          {activeChat ? (
-            <ChatView
-              key={activeChat.id}
-              chat={activeChat}
-              onEditGroup={group => {
-                setEditGroup(group);
-                setShowGroupModal(true);
-              }}
-            />
-          ) : (
+          {groups.map(group => (
+            <div key={group.id} className={`chat-view-slot ${activeChat?.id === group.id ? 'active' : 'inactive'}`}>
+              <ChatView
+                chat={group}
+                active={activeChat?.id === group.id}
+                onEditGroup={editedGroup => {
+                  setEditGroup(editedGroup);
+                  setShowGroupModal(true);
+                }}
+              />
+            </div>
+          ))}
+          {activeChat?.type === 'direct' && (
+            <ChatView key={activeChat.id} chat={activeChat} active />
+          )}
+          {!activeChat && (
             <div className="empty-state">
               <div className="empty-state-icon">💬</div>
               <div className="empty-state-text">{t('Wähle einen Chat aus oder erstelle eine neue Gruppe')}</div>
@@ -290,6 +298,7 @@ export default function App() {
       {showGroupModal && (
         <GroupModal
           group={editGroup}
+          groups={groups}
           agents={agents}
           onClose={() => { setShowGroupModal(false); setEditGroup(null); }}
           onSave={data => {

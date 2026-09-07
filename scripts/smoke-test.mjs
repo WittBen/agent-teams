@@ -14,6 +14,7 @@ const apiServerSource = await fs.readFile(path.join(root, 'electron/api-server.j
 const codexMainSource = await fs.readFile(path.join(root, 'electron/codex-main.js'), 'utf8');
 const preloadSource = await fs.readFile(path.join(root, 'electron/preload.js'), 'utf8');
 const appSource = await fs.readFile(path.join(root, 'src/App.jsx'), 'utf8');
+const crossGroupCoordinatorSource = await fs.readFile(path.join(root, 'src/CrossGroupCoordinator.jsx'), 'utf8');
 const chatViewSource = await fs.readFile(path.join(root, 'src/ChatView.jsx'), 'utf8');
 const modalsSource = await fs.readFile(path.join(root, 'src/Modals.jsx'), 'utf8');
 const i18nSource = await fs.readFile(path.join(root, 'src/i18n.jsx'), 'utf8');
@@ -23,6 +24,10 @@ const indexCssSource = await fs.readFile(path.join(root, 'src/index.css'), 'utf8
 const rendererEntrySource = await fs.readFile(path.join(root, 'src/main.jsx'), 'utf8');
 const taskGraphWindowSource = await fs.readFile(path.join(root, 'src/TaskGraphWindow.jsx'), 'utf8');
 const taskGraphPanelSource = await fs.readFile(path.join(root, 'src/TaskGraphPanel.jsx'), 'utf8');
+const workflowProblemDialogSource = await fs.readFile(path.join(root, 'src/WorkflowProblemDialog.jsx'), 'utf8');
+const workflowLayoutSource = await fs.readFile(path.join(root, 'src/workflow-layout.js'), 'utf8');
+const workflowPortabilitySource = await fs.readFile(path.join(root, 'src/workflow-portability.js'), 'utf8');
+const memoryProviderSource = await fs.readFile(path.join(root, 'src/memory-provider.js'), 'utf8');
 const reviewWindowSource = await fs.readFile(path.join(root, 'src/ReviewWindow.jsx'), 'utf8');
 const reviewEnvironmentSource = await fs.readFile(path.join(root, 'src/review-environment.js'), 'utf8');
 const artifactSandboxSource = await fs.readFile(path.join(root, 'electron/artifact-sandbox.js'), 'utf8');
@@ -39,13 +44,21 @@ assert.match(electronMainSource, /taskWindow\.loadFile\(distFile, \{ query: \{ t
 assert.match(preloadSource, /openTaskWindow:[\s\S]*onTaskWindowAction:/);
 assert.match(rendererEntrySource, /isTaskWindow[\s\S]*<TaskGraphWindow \/>/);
 assert.doesNotMatch(chatViewSource, /createPortal|FloatingTaskGraphWindow|floating-task-window/);
-assert.equal((chatViewSource.match(/openTaskGraphWindow\(/g) || []).length, 1);
-assert.match(chatViewSource, /title=\{t\('Aufgabenplan'\)\}[\s\S]*onClick=\{\(\) => openTaskGraphWindow\(\)\}/);
-assert.match(appSource, /<ChatView[\s\S]*onEditGroup=\{group =>/);
+assert.equal((chatViewSource.match(/openTaskGraphWindow\(/g) || []).length, 2);
+assert.ok(
+  chatViewSource.indexOf('const chatAgents =') < chatViewSource.indexOf('const openTaskGraphWindow ='),
+  'chatAgents must be initialized before the workflow-window callback reads it',
+);
+assert.match(chatViewSource, /title=\{t\('Workflow'\)\}[\s\S]*onClick=\{\(\) => openTaskGraphWindow\(\)\}/);
+assert.match(appSource, /groups\.map\(group =>[\s\S]*<ChatView[\s\S]*onEditGroup=\{editedGroup =>/);
+assert.match(appSource, /<CrossGroupCoordinator \/>/);
+assert.match(appSource, /chat-view-slot[\s\S]*active=\{activeChat\?\.id === group\.id\}/);
 assert.match(chatViewSource, /chat\.type === 'group' && !projectPath[\s\S]*project-folder-notice[\s\S]*Zielordner auswählen/);
 assert.match(modalsSource, /📁 Zielordner für Ausgaben[\s\S]*project-folder-form-warning/);
 assert.match(i18nSource, /'Zielordner auswählen': 'Choose output folder'/);
 assert.match(chatViewSource, /function MemoryBadge\(\{ count, onOpen \}\)/);
+assert.match(chatViewSource, /memoryAPI\.subscribe[\s\S]*refreshMemoryState\(\{ updateOpenViewer: true \}\)/);
+assert.match(chatViewSource, /data-memory-count=\{count\}[\s\S]*aria-live="polite"/);
 assert.match(chatViewSource, /Memory-Eintrag löschen[\s\S]*Alle Memory-Einträge löschen/);
 assert.match(chatViewSource, /window\.confirm\(t\('Alle Einträge dieses Gruppen-Memorys wirklich löschen\?'\)\)/);
 assert.match(hiddenStarterSource, /shell\.Run launchCommand, 1, False/);
@@ -53,14 +66,189 @@ assert.doesNotMatch(hiddenStarterSource, /shell\.Run launchCommand, 0, False/);
 assert.match(electronMainSource, /requestSingleInstanceLock\(\)[\s\S]*second-instance[\s\S]*mainWindow\.show\(\)[\s\S]*mainWindow\.focus\(\)/);
 assert.match(indexSource, /<title>Agent Teams<\/title>/);
 assert.equal(packageJson.build.productName, 'Agent Teams');
+assert.equal(packageJson.scripts.lint, 'oxlint . --deny-warnings');
 assert.match(electronMainSource, /const PRODUCT_NAME = 'Agent Teams'/);
 assert.match(electronMainSource, /prepareCliAttachmentParams[\s\S]*assertConfiguredProjectPath\(requestedCwd\)/);
 assert.match(codexMainSource, /--sandbox', cwd \? 'workspace-write' : 'read-only'/);
 assert.match(electronMainSource, /ensureOfficialMcpPreset\(store\)/);
-assert.match(electronMainSource, /brandedWindowTitle\(nextState\.windowTitle \|\| 'Aufgabenbaum'\)/);
+assert.match(electronMainSource, /brandedWindowTitle\(nextState\.windowTitle \|\| 'Workflow'\)/);
 assert.match(taskGraphWindowSource, /document\.title = `Agent Teams – \$\{detail\}`/);
 assert.match(taskGraphWindowSource, /acceptance-decision/);
-assert.match(taskGraphPanelSource, /Abnahmekriterien[\s\S]*User-Freigabe[\s\S]*onAcceptanceDecision/);
+assert.match(taskGraphPanelSource, /Abnahmekriterien[\s\S]*criterion\.verification === 'user'[\s\S]*onAcceptanceDecision/);
+assert.match(taskGraphPanelSource, /workflow-canvas/);
+assert.match(taskGraphPanelSource, /centeredViewportForScale[\s\S]*element\.clientWidth - scaledWidth[\s\S]*element\.clientHeight - scaledHeight/);
+assert.match(taskGraphPanelSource, /workflowIdentity[\s\S]*performInitialFit[\s\S]*initiallyFittedChatIdsRef\.current\.add\(workflowIdentity\)/);
+assert.match(taskGraphPanelSource, /freeMovementEnabled = nodesMovable && initializedChatId === workflowIdentity[\s\S]*setInitializedChatId\(workflowIdentity\)/);
+assert.match(taskGraphPanelSource, /movable=\{freeMovementEnabled\}/);
+assert.match(taskGraphPanelSource, /onPointerCancel=\{event => onDragEnd\(node\.id, event, true\)\}/);
+assert.match(taskGraphWindowSource, /structureEditable=\{!!state\.structureEditable\}[\s\S]*nodesMovable/);
+assert.match(taskGraphPanelSource, /ResizeObserver\(scheduleInitialFit\)[\s\S]*observer\?\.observe\(element\)/);
+assert.match(taskGraphPanelSource, /Zoom around the current viewport center[\s\S]*centerX - \(\(centerX - current\.x\) \* ratio\)/);
+assert.match(taskGraphPanelSource, /const fitView = useCallback[\s\S]*setViewport\(centeredViewportForScale\(nextScale\)\)/);
+assert.match(taskGraphPanelSource, /workflowEdgePath/);
+assert.match(taskGraphPanelSource, /workflowRailPath[\s\S]*workflow-manual-flow-edge/);
+assert.match(taskGraphPanelSource, /onContextMenu=\{handleCanvasContextMenu\}[\s\S]*Neue Aufgabe[\s\S]*Fork-Punkt erstellen[\s\S]*Join-Punkt erstellen/);
+assert.match(taskGraphPanelSource, /workflow-view-controls[\s\S]*onFlowPointAdd\?\.\('fork'\)[\s\S]*onFlowPointAdd\?\.\('join'\)/);
+assert.match(taskGraphPanelSource, /workflow-connection-tool dependency[\s\S]*setConnectionKind\('dependency'\)[\s\S]*workflow-connection-tool review[\s\S]*setConnectionKind\('review'\)/);
+assert.match(taskGraphPanelSource, /workflow-delete-selection[\s\S]*deleteToolbarSelection[\s\S]*Auswahl löschen/);
+assert.match(taskGraphPanelSource, /selectedFlowPointId[\s\S]*selected=\{selectedFlowPointId === point\.id\}[\s\S]*onSelect=\{selectFlowPoint\}/);
+assert.match(indexCssSource, /\.workflow-control-point\.selected/);
+assert.match(indexCssSource, /\.workflow-delete-selection/);
+assert.match(taskGraphPanelSource, /review-task[\s\S]*Neue Abnahme/);
+assert.match(taskGraphPanelSource, /Verbindungstyp[\s\S]*connection-dependency[\s\S]*connection-review/);
+assert.match(taskGraphPanelSource, /targetTaskId[\s\S]*delete-task[\s\S]*Aufgabe löschen/);
+assert.match(taskGraphPanelSource, /data-workflow-flowpoint[\s\S]*workflow-connector-in[\s\S]*workflow-connector-out/);
+assert.match(taskGraphPanelSource, /completed[\s\S]*workflow-completed-check[\s\S]*Aufgabe erledigt/);
+assert.match(taskGraphPanelSource, /node\.status === 'running'[\s\S]*aria-busy=\{working\}[\s\S]*workflow-task-spinner/);
+assert.match(indexCssSource, /\.workflow-task-spinner[\s\S]*workflow-task-spin[\s\S]*prefers-reduced-motion/);
+assert.match(taskGraphPanelSource, /working \? 'working'[\s\S]*aria-busy=\{working\}/);
+assert.match(indexCssSource, /\.workflow-node\.working[\s\S]*workflow-working-pulse[\s\S]*prefers-reduced-motion/);
+assert.match(taskGraphPanelSource, /completed \? 'completed'[\s\S]*timedOut \? 'timed-out'/);
+assert.match(indexCssSource, /\.workflow-node\.completed[\s\S]*\.workflow-node\.timed-out[\s\S]*workflow-timeout-pulse/);
+assert.match(taskGraphPanelSource, /pendingQuestion \|\| waitingForRecoveryDecision \? 'has-question'/);
+assert.match(indexCssSource, /\.workflow-node\.has-question[\s\S]*border-left-color: #a855f7/);
+assert.match(chatViewSource, /getActiveWorkflowTaskIds[\s\S]*activeAgentRunRef\.current\.values\(\)[\s\S]*graphNodeId/);
+assert.match(chatViewSource, /activeTaskIds: getActiveWorkflowTaskIds\(activeTaskGraph\)/);
+assert.match(taskGraphWindowSource, /activeTaskIds=\{state\.activeTaskIds \|\| \[\]\}/);
+assert.match(taskGraphPanelSource, /activeTaskIdSet\.has\(node\.id\)/);
+assert.match(taskGraphPanelSource, /workflow-play-button[\s\S]*onClick=\{startWorkflow\}[\s\S]*Workflow starten/);
+assert.match(taskGraphPanelSource, /if \(running\) onPauseWorkflow\?\.\(\)[\s\S]*Workflow unterbrechen/);
+assert.match(taskGraphWindowSource, /onPauseWorkflow=\{\(\) => sendAction\('pause-workflow'\)\}/);
+assert.match(chatViewSource, /action\.type === 'pause-workflow'[\s\S]*handleCancelRun\(\)/);
+assert.match(chatViewSource, /const persistActiveWork = \(\) => \{[\s\S]*runIdRef\.current !== myRunId/);
+assert.match(chatViewSource, /else if \(pm && agent\.id !== pm\.id\)[\s\S]*problemTrigger[\s\S]*buildTimeoutRecoveryTask[\s\S]*recoveryStatus: 'pm'/);
+assert.match(chatViewSource, /task\.runtimeRecovery && pm && agent\.id === pm\.id[\s\S]*buildRecoveryUserQuestion[\s\S]*recoveryStatus: 'user'/);
+assert.match(chatViewSource, /shouldStartQualityRecovery[\s\S]*isTaskComplexityFailure[\s\S]*const problemTrigger[\s\S]*trigger: problemTrigger/);
+assert.match(chatViewSource, /recoveredOriginalNodeId[\s\S]*approveAgentDoneTasks[\s\S]*PM hat die Recovery abgeschlossen/);
+assert.match(taskGraphPanelSource, /recoveryStatus[\s\S]*PM analysiert Timeout/);
+assert.match(taskGraphPanelSource, /recovering && <span className="workflow-recovery-badge"/);
+assert.match(taskGraphPanelSource, /timedOut && !recovering && !active[\s\S]*workflow-timeout-fix-button[\s\S]*onTimeoutRepair/);
+assert.match(taskGraphWindowSource, /onTimeoutRepair=\{taskId => sendAction\('repair-timeout-task'/);
+assert.match(chatViewSource, /action\.type === 'repair-timeout-task'[\s\S]*buildTimeoutRecoveryTask[\s\S]*recoveryStatus: 'pm'[\s\S]*Workflow-Fixer/);
+assert.match(indexCssSource, /\.workflow-timeout-fix-button[\s\S]*\.workflow-timeout-fix-button:hover/);
+assert.match(taskGraphPanelSource, /startWorkflow[\s\S]*onStartWorkflow\?\.\(readyParallelNodeIds\.length >= 2 \? readyParallelNodeIds : \[\]\)/);
+assert.match(indexCssSource, /\.workflow-play-button[\s\S]*linear-gradient[\s\S]*\.workflow-play-button\.running/);
+assert.match(chatViewSource, /RESUMABLE_CHECKPOINT_STATUSES[\s\S]*canResumeConversation[\s\S]*resumeMode/);
+assert.match(chatViewSource, /action\.type === 'resume-workflow'[\s\S]*handleRunNow\(\)/);
+assert.match(taskGraphWindowSource, /canResumeWorkflow=\{!!state\.canResumeWorkflow\}[\s\S]*onResumeWorkflow=\{\(\) => sendAction\('resume-workflow'\)\}/);
+assert.match(taskGraphPanelSource, /resumeMode[\s\S]*onResumeWorkflow\?\.\(\)[\s\S]*Workflow fortsetzen/);
+assert.match(indexCssSource, /\.workflow-play-button\.resume:not\(:disabled\)/);
+assert.match(chatViewSource, /workflowUndoStackRef[\s\S]*commitUndoableGraphChange[\s\S]*undo-workflow-change[\s\S]*\.pop\(\)/);
+assert.match(taskGraphWindowSource, /canUndo=\{!!state\.canUndo\}[\s\S]*onUndo=\{\(\) => sendAction\('undo-workflow-change'\)\}/);
+assert.match(taskGraphPanelSource, /workflow-undo-button[\s\S]*onClick=\{onUndo\}[\s\S]*Rückgängig/);
+assert.match(indexCssSource, /\.workflow-undo-button[\s\S]*\.workflow-undo-button:disabled/);
+assert.match(taskGraphPanelSource, /const deleteWorkflow[\s\S]*window\.confirm[\s\S]*onDeleteWorkflow/);
+assert.match(taskGraphPanelSource, /workflow-delete-button[\s\S]*onClick=\{deleteWorkflow\}/);
+assert.match(taskGraphWindowSource, /onDeleteWorkflow=\{\(\) => sendAction\('delete-workflow'\)\}/);
+assert.match(taskGraphWindowSource, /canDeleteWorkflow=\{!!state\.canDeleteWorkflow\}/);
+assert.match(chatViewSource, /canDeleteWorkflow: Boolean\(conversationCheckpoint \|\| activeTaskGraph\.nodes\.length > 0 \|\| chatGroupRequests\.length > 0\)/);
+assert.match(chatViewSource, /handleDeleteWorkflow[\s\S]*preserveProgress: false[\s\S]*discardConversationCheckpoint\(\)[\s\S]*clearTaskGraph\(chat\.id\)[\s\S]*workflowUndoStackRef\.current = \[\]/);
+assert.match(chatViewSource, /handleDeleteWorkflow[\s\S]*groupRequestIds = groupRequestTreeIds[\s\S]*cancelAndRemoveGroupRequests\(groupRequestIds/);
+assert.match(chatViewSource, /relatedRequestIds[\s\S]*status: 'cancelled'[\s\S]*finishRequestRuntimePlan[\s\S]*deliveredAt: cancelledAt/);
+assert.match(chatViewSource, /Object\.entries\(userRequestQueues \|\| \{\}\)[\s\S]*queuedRequest\.kind === 'cross-group-answer'[\s\S]*removeUserRequest\(queueChatId, queuedRequest\.id\)/);
+assert.match(chatViewSource, /action\.type === 'delete-workflow'[\s\S]*handleDeleteWorkflow\(\)/);
+assert.match(indexCssSource, /\.workflow-delete-button[\s\S]*\.workflow-delete-button:disabled/);
+assert.doesNotMatch(taskGraphPanelSource, /workflow-group-work-delete|onDeleteGroupWork/);
+assert.doesNotMatch(taskGraphWindowSource, /onDeleteGroupWork|delete-group-work/);
+assert.doesNotMatch(chatViewSource, /handleDeleteGroupWork|delete-group-work/);
+assert.doesNotMatch(indexCssSource, /workflow-group-work-delete/);
+assert.match(storeSource, /request\.parentRequestId[\s\S]*!previous\[request\.parentRequestId\][\s\S]*status === 'cancelled'/);
+assert.match(crossGroupCoordinatorSource, /const usableResults = specialistResults\.filter\(Boolean\);[\s\S]*!requestsRef\.current\?\.\[request\.id\][\s\S]*const childBatchId/);
+assert.match(storeSource, /removeCrossGroupRequestsMap[\s\S]*persist\('crossGroupRequests', updated\)/);
+assert.match(crossGroupCoordinatorSource, /!requestsRef\.current\?\.\[request\.id\][\s\S]*status === 'cancelled'/);
+assert.match(chatViewSource, /The first active view of an unused group starts in planning mode[\s\S]*activatePlanningMode\(\)/);
+assert.match(chatViewSource, /workflowResetRequired[\s\S]*Beginne die Planung vollständig neu[\s\S]*keine Aufgaben, IDs, Abhängigkeiten, Status oder Annahmen/);
+assert.match(chatViewSource, /activatePlanningMode\(\{ fresh: true, resetRequired: true \}\)[\s\S]*workflowReset: true/);
+assert.match(chatViewSource, /workflow-reset-input-required-[\s\S]*gelöschte Workflow wird nicht aus dem alten Chat rekonstruiert/);
+assert.match(preloadSource, /exportWorkflowFile:[\s\S]*workflow-file-export[\s\S]*importWorkflowFile:[\s\S]*workflow-file-import/);
+assert.match(electronMainSource, /MAX_WORKFLOW_FILE_BYTES = 1024 \* 1024[\s\S]*handleIpc\('workflow-file-export'[\s\S]*handleIpc\('workflow-file-import'/);
+assert.match(taskGraphPanelSource, /workflow-file-button import[\s\S]*onWorkflowImport[\s\S]*workflow-file-button export[\s\S]*onWorkflowExport/);
+assert.match(taskGraphPanelSource, /WorkflowImportDialog[\s\S]*workflow-import-mappings[\s\S]*Workflow als Entwurf importieren/);
+assert.match(taskGraphWindowSource, /import-workflow[\s\S]*export-workflow[\s\S]*map-workflow-import-slot[\s\S]*apply-workflow-import/);
+assert.match(chatViewSource, /createWorkflowExportDocument[\s\S]*suggestWorkflowAgentMappings[\s\S]*createImportedTaskGraph/);
+assert.match(chatViewSource, /action\.type === 'export-workflow'[\s\S]*action\.type === 'import-workflow'[\s\S]*action\.type === 'apply-workflow-import'/);
+assert.match(indexCssSource, /\.workflow-file-button[\s\S]*\.workflow-file-status[\s\S]*\.workflow-import-overlay[\s\S]*\.workflow-import-dialog/);
+assert.doesNotMatch(workflowPortabilitySource, /executionLog|approvedPlan|previousApprovedPlan|deliveredAt|childResponses/);
+assert.doesNotMatch(taskGraphPanelSource, /closeTitle|Workflowfenster schließen/);
+assert.match(chatViewSource, /getPendingWorkflowQuestions[\s\S]*askingGraphNodeId[\s\S]*pendingQuestions: getPendingWorkflowQuestions\(conversationCheckpoint\)/);
+assert.match(chatViewSource, /containsUserDirective[\s\S]*extractUserQuestions\(storedQuestion\)[\s\S]*keine konkrete Rückfrage formuliert/);
+assert.match(chatViewSource, /const userQuestions = task\.outOfBand \|\| task\.preparationOnly \? \[\] : extractUserQuestions\(rawReply\);[\s\S]*let asksUser = userQuestions\.length > 0/);
+assert.doesNotMatch(chatViewSource, /pauseQuestion[\s\S]{0,180}displayReply\.slice\(-700\)/);
+assert.match(chatViewSource, /answer-agent-question[\s\S]*sendUserMessage\(answer, \[\], messageQualityMode\)[\s\S]*runAgents\(\[\.\.\.chatMessagesRef\.current, userMessage\], answer\)/);
+assert.match(taskGraphWindowSource, /pendingQuestions=\{state\.pendingQuestions \|\| \[\]\}[\s\S]*answer-agent-question/);
+assert.match(taskGraphPanelSource, /WorkflowQuestionDialog[\s\S]*workflow-question-answer/);
+assert.match(taskGraphPanelSource, /pendingQuestion[\s\S]*workflow-question-badge[\s\S]*onQuestionOpen/);
+assert.match(indexCssSource, /\.workflow-question-badge[\s\S]*\.workflow-question-overlay[\s\S]*\.workflow-question-dialog textarea/);
+assert.match(workflowProblemDialogSource, /WorkflowProblemDialog[\s\S]*workflow-problem-answer[\s\S]*Lösung an PM senden/);
+assert.match(taskGraphPanelSource, /workflowProblem[\s\S]*workflow-problem-badge[\s\S]*onProblemOpen/);
+assert.match(taskGraphWindowSource, /workflowProblems=\{state\.workflowProblems \|\| \[\]\}[\s\S]*resolve-workflow-problem/);
+assert.match(chatViewSource, /collectWorkflowProblems[\s\S]*workflowProblemKey[\s\S]*Workflow-Problem bei/);
+assert.match(chatViewSource, /resolveWorkflowProblem[\s\S]*@PM: Löse das folgende Workflow-Problem[\s\S]*planningOnly: true/);
+assert.match(chatViewSource, /messageWorkflowProblem[\s\S]*label: t\('Lösen'\)[\s\S]*setOpenWorkflowProblem/);
+assert.match(indexCssSource, /\.workflow-problem-badge[\s\S]*\.workflow-problem-dialog/);
+assert.match(indexCssSource, /\.system-message-action\.problem/);
+assert.match(taskGraphPanelSource, /detailsCollapsed[\s\S]*detailsPinned/);
+assert.match(taskGraphPanelSource, /aria-pressed=\{pinned\}[\s\S]*aria-expanded=\{!collapsed\}/);
+assert.match(taskGraphPanelSource, /if \(!detailsPinned\) closeDetails\(\)/);
+assert.match(taskGraphPanelSource, /Workflow-Legende[\s\S]*Fork \/ Join/);
+assert.match(taskGraphPanelSource, /onTaskAdd[\s\S]*onTaskSplit[\s\S]*onTaskMove/);
+assert.match(taskGraphPanelSource, /workflow-connector-out[\s\S]*setPointerCapture\(event\.pointerId\)[\s\S]*onConnectionStart/);
+assert.match(taskGraphPanelSource, /connectionTargetAt[\s\S]*elementFromPoint[\s\S]*validateConnectionTarget/);
+assert.match(taskGraphPanelSource, /validateWorkflowConnection\(graph, sourceId, targetId, connectionKind\)[\s\S]*onDependencyAdd\?\.\(draft\.sourceId, targetId, validationResult\.kind\)/);
+assert.match(taskGraphPanelSource, /workflow-connection-preview/);
+assert.match(taskGraphPanelSource, /connection-target-/);
+assert.match(taskGraphPanelSource, /connectionEnabled=\{structureEditable\}/);
+assert.match(indexCssSource, /\.workflow-connector[\s\S]*\.workflow-connection-preview\.valid[\s\S]*\.workflow-connection-preview\.invalid/);
+assert.match(taskGraphPanelSource, /filter\(edge => edge\.kind === 'dependency' \|\| edge\.kind === 'review'\)[\s\S]*workflow-edge-hit/);
+assert.match(taskGraphPanelSource, /workflow-edge-remove[\s\S]*removeSelectedDependency/);
+assert.match(taskGraphPanelSource, /onDependencyRemove\?\.\(selectedDependency\.from, selectedDependency\.to, selectedDependency\.kind\)/);
+assert.match(taskGraphPanelSource, /Nur die Verbindung entfernen; Aufgaben bleiben erhalten/);
+assert.match(indexCssSource, /\.workflow-edge-hit[\s\S]*pointer-events: stroke[\s\S]*\.workflow-edge-remove/);
+assert.doesNotMatch(taskGraphPanelSource, /Lösungstipp|workflow-solution/);
+assert.match(taskGraphPanelSource, /workflow-check-plan[\s\S]*Aufgabenplan auf Ausführbarkeit prüfen/);
+assert.match(taskGraphPanelSource, /workflow-planning-actions[\s\S]*workflow-check-plan/);
+assert.doesNotMatch(taskGraphPanelSource, /PM komplett übernehmen|workflow-pm-takeover|workflow-restore-origin/);
+assert.match(taskGraphPanelSource, /inspectWorkflowPlan[\s\S]*workflow-inspection-report[\s\S]*Vorschläge/);
+assert.match(indexCssSource, /\.workflow-inspection-report[\s\S]*\.workflow-inspection-report\.error/);
+assert.match(taskGraphPanelSource, /onRestoreSnapshot[\s\S]*Snapshot wiederherstellen/);
+assert.match(taskGraphPanelSource, /Neue Abhängigkeit[\s\S]*Vorgänger auswählen…[\s\S]*Hinzufügen/);
+assert.match(taskGraphPanelSource, /validationHighlighted[\s\S]*workflow-validation-badge[\s\S]*Problem/);
+assert.match(taskGraphPanelSource, /problems\.length > 0[\s\S]*Erkannte Probleme[\s\S]*Mögliche Lösung/);
+assert.match(taskGraphPanelSource, /const selectedNodeProblems = useMemo[\s\S]*BLOCKED_REASON_LABELS/);
+assert.match(taskGraphPanelSource, /problems=\{selectedNodeProblems\}[\s\S]*problemSuggestions=\{selectedNodeProblemSuggestions\}/);
+assert.match(indexCssSource, /\.workflow-problem-details[\s\S]*\.workflow-problem-suggestions/);
+assert.match(taskGraphWindowSource, /preflightTaskIds=\{state\.preflightTaskIds \|\| \[\]\}/);
+assert.match(taskGraphWindowSource, /restore-workflow-snapshot/);
+assert.doesNotMatch(chatViewSource, /workflowSolution|solution-tip/);
+assert.doesNotMatch(chatViewSource, /pm-plan-takeover|restore-pm-plan-origin|beginPmPlanOverride|restorePmPlanOrigin/);
+assert.match(taskGraphPanelSource, /workflow-node/);
+assert.match(workflowLayoutSource, /buildWorkflowLayout[\s\S]*workflowPosition[\s\S]*workflowEdgePath/);
+assert.match(chatViewSource, /planning-mode-bar[\s\S]*Planversion freigeben & Workflow starten/);
+assert.match(chatViewSource, /handleDeactivatePlanningMode[\s\S]*planningSuspended: true[\s\S]*discardConversationCheckpoint/);
+assert.match(chatViewSource, /currentGraph\?\.planningSuspended[\s\S]*suspendedPlanningCheckpoint[\s\S]*workflowState: 'planning'/);
+assert.match(chatViewSource, /planning-mode-close[\s\S]*Planungsmodus deaktivieren/);
+assert.match(indexCssSource, /\.planning-mode-close[\s\S]*\.planning-mode-close:hover/);
+assert.match(chatViewSource, /mode: 'planning'[\s\S]*pendingTasks: \[\]/);
+assert.match(chatViewSource, /if \(planningOnly\)[\s\S]*planningPause[\s\S]*status: planningPause \? 'awaiting-user' : groupPauseExecutions\.length > 0 \? 'awaiting-group' : 'planning'/);
+assert.match(chatViewSource, /if \(asksUser && !groupPauseRequested\)[\s\S]*pauseRequested = true/);
+assert.match(chatViewSource, /buildPlanningPendingTasks[\s\S]*CLAIMABLE_PLAN_STATUSES[\s\S]*isTaskNodeReady/);
+assert.match(chatViewSource, /shouldRunAsWorkflowSideConversation[\s\S]*outOfBand: sideConversation/);
+assert.match(chatViewSource, /candidate\.outOfBand[\s\S]*mode: 'side-conversation'[\s\S]*validateApprovedTaskExecution/);
+assert.match(chatViewSource, /if \(!task\.outOfBand\)[\s\S]*recordTaskExecutionEvent\(graph, task, task\.preparationOnly \? 'preparation-failed' : 'failed'/);
+assert.match(chatViewSource, /action\.type === 'update-task-model'[\s\S]*modelOverride/);
+assert.match(chatViewSource, /action\.type === 'update-task-agent'[\s\S]*action\.type === 'add-dependency'[\s\S]*action\.type === 'remove-dependency'/);
+assert.match(chatViewSource, /validateApprovedTaskExecution[\s\S]*status: 'needs-attention'[\s\S]*Der Plan blieb unverändert/);
+assert.match(chatViewSource, /source: runtimeRecovery \? plannedNode\.source : 'approved-workflow'/);
+assert.match(chatViewSource, /checkpoint\.mode === 'planning' \? lockTaskGraphPlan\(scheduledGraph\) : scheduledGraph|checkpoint\.mode !== 'planning'/);
+assert.match(chatViewSource, /action\.type === 'update-task-position'[\s\S]*updateWorkflowViewPosition/);
+assert.match(taskGraphPanelSource, /Modell für diese Aufgabe[\s\S]*Planversion freigeben & Workflow starten/);
+assert.match(taskGraphPanelSource, /Plan bearbeiten/);
+assert.match(taskGraphPanelSource, /Aufgabe erneut versuchen/);
+assert.match(taskGraphPanelSource, /workflow-retry-actions[\s\S]*workflow-retry-task[\s\S]*onRetryTask/);
+assert.match(indexCssSource, /\.workflow-task-actions\.workflow-retry-actions > div[\s\S]*grid-template-columns: minmax\(0, 1fr\)[\s\S]*\.workflow-retry-task/);
+assert.match(taskGraphWindowSource, /edit-workflow[\s\S]*retry-task/);
+assert.match(chatViewSource, /action\.type === 'retry-task'[\s\S]*if \(planningActive\) return;[\s\S]*if \(running\)[\s\S]*nächsten freien passenden Agenten vorgemerkt/);
+assert.doesNotMatch(taskGraphPanelSource, /executionMode|Sequenziell/);
 assert.match(electronMainSource, /let reviewWindow;/);
 assert.match(electronMainSource, /reviewWindow = new BrowserWindow\([\s\S]*sandbox: true/);
 assert.match(electronMainSource, /review-window-open[\s\S]*review-list[\s\S]*review-run/);
@@ -82,6 +270,8 @@ assert.match(chatViewSource, /normalizeAcceptanceCriteria\(task\.acceptanceCrite
 assert.match(chatViewSource, /acceptanceReady: acceptanceSummary\.ready/);
 assert.match(chatViewSource, /reviewStop\(chat\.id, 'test'\)/);
 assert.match(chatViewSource, /memAPI\.handoff\(memoryNamespace, handoff\)/);
+assert.match(memoryProviderSource, /createCrossGroupResultEntry[\s\S]*dedupeKey: `cross-group-result:\$\{normalizedRequestId\}`[\s\S]*async writeOnce/);
+assert.match(crossGroupCoordinatorSource, /persistCrossGroupResultMemory[\s\S]*destinationsByKey[\s\S]*\.writeOnce\([\s\S]*memoryStoredAt:/);
 assert.equal((chatViewSource.match(/openReviewWindow\(/g) || []).length, 1);
 assert.match(chatViewSource, /typing-agent-name[\s\S]*agent\?\.name[\s\S]*typing-agent-role[\s\S]*agent\?\.role[\s\S]*typing-indicator/);
 assert.match(chatViewSource, /buildRelevantConversationHistory\(\{[\s\S]*includeGroupContext: !isDirectChat && task\.source === 'user'/);
@@ -89,6 +279,10 @@ assert.match(chatViewSource, /onCreateEntry=\{handleCreateMemoryEntry\}/);
 const messageComposerTextarea = chatViewSource.match(/<textarea[\s\S]*?className="message-input"[\s\S]*?\/>/)?.[0] || '';
 assert.match(messageComposerTextarea, /autoFocus/);
 assert.doesNotMatch(messageComposerTextarea, /disabled=\{running\}/);
+assert.doesNotMatch(indexCssSource, /body\s*\{[^}]*user-select:\s*none/);
+assert.match(indexCssSource, /input, textarea, \[contenteditable="true"\][\s\S]*-webkit-user-select: text;[\s\S]*user-select: text;/);
+assert.match(indexCssSource, /\.message-input \{[\s\S]*pointer-events: auto;[\s\S]*user-select: text;/);
+assert.match(chatViewSource, /const selectionStart = textarea\.selectionStart;[\s\S]*textarea\.focus\(\{ preventScroll: true \}\);[\s\S]*textarea\.setSelectionRange\(selectionStart, selectionEnd\)/);
 const messageComposerSendButton = chatViewSource.match(/<button[\s\S]*?className="send-btn"[\s\S]*?>➤<\/button>/)?.[0] || '';
 assert.match(messageComposerSendButton, /disabled=\{!input\.trim\(\) && !pendingAttachments\.length\}/);
 assert.doesNotMatch(messageComposerSendButton, /disabled=\{[^}]*running/);
@@ -96,7 +290,15 @@ assert.match(chatViewSource, /queueBehindActiveRun[\s\S]*enqueueUserRequest/);
 assert.match(chatViewSource, /buildQueuedRequestHistory[\s\S]*await runAgents[\s\S]*removeUserRequest/);
 assert.match(chatViewSource, /\[chat\.id, running, memoryViewer\.open, mcpApproval, focusComposer\]/);
 assert.match(chatViewSource, /window\.addEventListener\('focus', restoreComposerFocus\)/);
-assert.match(chatViewSource, /function McpPermissionDialog\(\{ request, onDecision \}\)/);
+assert.match(chatViewSource, /function MessageCopyButton\(\{ text \}\)[\s\S]*navigator\.clipboard|function copyText\(text\)[\s\S]*navigator\.clipboard/);
+assert.match(chatViewSource, /message-bubble[\s\S]*MessageCopyButton text=\{msgText\}/);
+assert.match(chatViewSource, /system-message-bubble[\s\S]*MessageCopyButton text=\{text\}/);
+assert.match(indexCssSource, /\.message-bubble[\s\S]*user-select: text/);
+assert.match(chatViewSource, /function McpPermissionPrompt\(\{ request, onDecision \}\)/);
+assert.match(chatViewSource, /mcp-inline-permission-actions[\s\S]*onDecision\('deny'\)[\s\S]*Verweigern[\s\S]*onDecision\('allow-once'\)[\s\S]*Zulassen/);
+assert.match(chatViewSource, /typingAgents[\s\S]*mcpApproval && <McpPermissionPrompt request=\{mcpApproval\}/);
+assert.doesNotMatch(chatViewSource, /mcp-permission-overlay|McpPermissionDialog/);
+assert.match(indexCssSource, /\.mcp-inline-permission[\s\S]*\.mcp-inline-permission-actions/);
 assert.match(chatViewSource, /requestPermission: requestMcpPermission/);
 assert.match(chatViewSource, /onPermissionConsumed: handleMcpPermissionConsumed/);
 assert.doesNotMatch(chatViewSource, /mcpChatPermissionGrants/);
@@ -107,7 +309,9 @@ assert.match(chatViewSource, /globalDecision === 'allow'[\s\S]*scope: 'global'/)
 assert.match(chatViewSource, /globalDecision === 'deny'[\s\S]*globale Einstellung blockiert/);
 assert.match(storeSource, /appStateGet\('mcpPermissions'\)/);
 assert.match(storeSource, /appStateGet\('userRequestQueues'\)/);
+assert.match(storeSource, /appStateGet\('crossGroupRequests'\)/);
 assert.match(storeSource, /persist\('userRequestQueues', updated\)/);
+assert.match(storeSource, /persist\('crossGroupRequests', updated\)/);
 assert.match(storeSource, /persist\('mcpPermissions', updated\)/);
 assert.doesNotMatch(preloadSource, /storeGet|storeSet|storeDelete/);
 assert.match(preloadSource, /providerCredentialsStatus/);
@@ -138,14 +342,26 @@ assert.match(modalsSource, /<code>codex login<\/code>/);
 assert.equal((modalsSource.match(/Claude Code CLI verbinden/g) || []).length, 1);
 assert.match(modalsSource, /OpenAI-kompatibel[\s\S]*Anthropic Messages[\s\S]*Google Gemini/);
 
+const delegationSource = await fs.readFile(path.join(root, 'src/delegation.js'), 'utf8');
+const delegationUrl = `data:text/javascript;base64,${Buffer.from(delegationSource).toString('base64')}`;
+
 async function importSource(relativePath) {
-  const source = await fs.readFile(path.join(root, relativePath), 'utf8');
+  const source = (await fs.readFile(path.join(root, relativePath), 'utf8'))
+    .replace(/from '\.\/delegation';/g, `from '${delegationUrl}';`);
   return import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 }
 
 const orchestration = await importSource('src/orchestrator.js');
 const memoryRules = await importSource('src/memory.js');
-const taskGraph = await importSource('src/task-graph.js');
+const taskGraphPreparedSource = (await fs.readFile(path.join(root, 'src/task-graph.js'), 'utf8'))
+  .replace(/from '\.\/delegation';/g, `from '${delegationUrl}';`);
+const taskGraphUrl = `data:text/javascript;base64,${Buffer.from(taskGraphPreparedSource).toString('base64')}`;
+const taskGraph = await import(taskGraphUrl);
+const workflowPortabilityPreparedSource = workflowPortabilitySource
+  .replace(/from '\.\/task-graph';/g, `from '${taskGraphUrl}';`)
+  .replace(/from '\.\/delegation';/g, `from '${delegationUrl}';`);
+const workflowPortability = await import(`data:text/javascript;base64,${Buffer.from(workflowPortabilityPreparedSource).toString('base64')}`);
+const workflowLayout = await importSource('src/workflow-layout.js');
 const llm = await importSource('src/llm.js');
 const mcp = await importSource('src/mcp.js');
 const excalidraw = await importSource('src/excalidraw.js');
@@ -154,6 +370,8 @@ const agentRoles = await importSource('src/agent-roles.js');
 const conversationLimits = await importSource('src/conversation-limits.js');
 const userRequestQueue = await importSource('src/user-request-queue.js');
 const providerCatalog = await importSource('src/provider-catalog.js');
+const crossGroup = await importSource('src/cross-group.js');
+const delegation = await import(delegationUrl);
 assert.equal(llm.normalizeConversationLanguage('en'), 'en');
 assert.equal(llm.normalizeConversationLanguage('de'), 'de');
 assert.equal(llm.normalizeConversationLanguage('fr'), 'de');
@@ -165,6 +383,80 @@ const pm = { id: 'pm', name: 'PM', role: 'Projektleiter', isSystemAgent: true };
 const coder = { id: 'coder', name: 'Max', role: 'Developer' };
 const coderTwo = { id: 'coder-two', name: 'Alex', role: 'Developer' };
 const tester = { id: 'tester', name: 'Lisa', role: 'QA' };
+
+const portableWorkflowFixture = {
+  format: workflowPortability.WORKFLOW_FILE_FORMAT,
+  schemaVersion: workflowPortability.WORKFLOW_FILE_SCHEMA_VERSION,
+  title: 'Portable React App',
+  description: 'Build and review a small React application.',
+  slots: [{ id: 'builder', name: 'Max', role: 'Developer', capabilities: ['react'] }],
+  nodes: [
+    { id: 'root', type: 'request', title: 'React App', objective: 'Create the application.' },
+    {
+      id: 'implementation', type: 'task', slotId: 'builder', title: 'Implement UI',
+      objective: 'Implement the React UI.', order: 1,
+      acceptanceCriteria: [{ id: 'ui-ready', text: 'The UI is usable.', required: true, verification: 'agent' }],
+      delegation: { mode: 'allow', requiredCapabilities: ['react'] },
+      position: { x: 420, y: 180 },
+    },
+  ],
+  points: [],
+  connections: [{ from: 'root', to: 'implementation', kind: 'delegation' }],
+};
+const portableAgents = [{ ...coder, provider: 'openai', model: 'gpt-test', capabilities: ['react'] }];
+const portablePreview = workflowPortability.suggestWorkflowAgentMappings(portableWorkflowFixture, portableAgents);
+assert.equal(portablePreview.mappings.builder, coder.id);
+assert.equal(portablePreview.slots[0].suggestionReason, 'name');
+const importedPortable = workflowPortability.createImportedTaskGraph(portablePreview.document, {
+  chatId: 'portable-chat', chatName: 'Portable', agents: portableAgents, mappings: portablePreview.mappings,
+});
+assert.equal(importedPortable.graph.workflowState, 'planning');
+assert.equal(importedPortable.graph.planOwner, 'user');
+assert.equal(importedPortable.graph.approvedPlan, null);
+const importedPortableTask = importedPortable.graph.nodes.find(node => node.nodeType === 'task');
+assert.equal(importedPortableTask.status, 'planned');
+assert.equal(importedPortableTask.agentId, coder.id);
+assert.deepEqual(importedPortableTask.acceptanceCriteria[0].evidence, []);
+assert.equal(taskGraph.validateWorkflowPlan(importedPortable.graph).ok, true);
+const exportedPortable = workflowPortability.createWorkflowExportDocument({
+  ...importedPortable.graph,
+  executionLog: [{ output: 'must not leave this app' }],
+  approvedPlan: { revision: 99 },
+  nodes: importedPortable.graph.nodes.map(node => ({
+    ...node,
+    status: node.nodeType === 'task' ? 'completed' : node.status,
+    error: 'local runtime error',
+  })),
+}, { agents: portableAgents });
+const exportedPortableText = JSON.stringify(exportedPortable);
+assert.equal(exportedPortable.format, 'agent-teams-workflow');
+assert.doesNotMatch(exportedPortableText, /must not leave this app|local runtime error|portable-chat/);
+assert.equal(exportedPortable.nodes.find(node => node.type === 'task').slotId, 'slot-1');
+assert.throws(() => workflowPortability.createImportedTaskGraph(portableWorkflowFixture, {
+  chatId: 'portable-chat', agents: portableAgents, mappings: {},
+}), /noch nicht zugeordnet/);
+assert.throws(() => workflowPortability.normalizeWorkflowDocument({
+  ...portableWorkflowFixture, schemaVersion: 999,
+}), /Schemaversion/);
+assert.throws(() => workflowPortability.normalizeWorkflowDocument({
+  ...portableWorkflowFixture,
+  nodes: portableWorkflowFixture.nodes.map(node => node.id === 'implementation' ? { ...node, type: 'script' } : node),
+}), /unbekannten Typ/);
+const cyclicPortableWorkflow = {
+  ...portableWorkflowFixture,
+  nodes: [
+    ...portableWorkflowFixture.nodes,
+    { ...portableWorkflowFixture.nodes[1], id: 'verification', title: 'Verify UI', order: 2 },
+  ],
+  connections: [
+    ...portableWorkflowFixture.connections,
+    { from: 'implementation', to: 'verification', kind: 'dependency' },
+    { from: 'verification', to: 'implementation', kind: 'dependency' },
+  ],
+};
+assert.throws(() => workflowPortability.createImportedTaskGraph(cyclicPortableWorkflow, {
+  chatId: 'portable-chat', agents: portableAgents, mappings: { builder: coder.id },
+}), /Abhängigkeitszyklus|nicht ausführbar/);
 
 const openRouterConnection = providerCatalog.createProviderConnection('openrouter', 'api-openrouter-test');
 assert.equal(openRouterConnection.baseUrl, 'https://openrouter.ai/api/v1');
@@ -194,7 +486,60 @@ assert.match(chatViewSource, /status: 'limit-reached'/);
 assert.doesNotMatch(chatViewSource, /maxTurns: 12/);
 assert.doesNotMatch(chatViewSource, /500 \+ Math\.min\(taskQueue\.turns/);
 assert.match(chatViewSource, /findSafeAutoParallelTaskIds[\s\S]*taskQueue\.prioritize/);
+assert.match(chatViewSource, /runWorkConservingApprovedBatch[\s\S]*Promise\.race/);
+assert.match(chatViewSource, /enqueueReadyApprovedWorkflowTasks[\s\S]*isTaskNodeReady/);
+assert.match(chatViewSource, /nextMatching[\s\S]*!activeAgentIds\.has\(candidate\.agent\.id\)/);
+assert.match(chatViewSource, /enqueueDependencyPreparationTasks[\s\S]*findDependencyPreparationCandidateIds/);
+assert.match(chatViewSource, /preparationOnly[\s\S]*Zwischengespeicherte Vorarbeit dieser Aufgabe/);
+assert.match(chatViewSource, /interimResult: execution\.interimResult/);
 assert.match(chatViewSource, /useLeanFastPath[\s\S]*skipFastFinalReview/);
+assert.match(chatViewSource, /extractGroupMentions\(rawReply[\s\S]*status: 'awaiting-group'/);
+assert.match(chatViewSource, /waiting_group[\s\S]*Unabhängige Aufgaben laufen weiter/);
+assert.match(chatViewSource, /function ErrorBubble[\s\S]*system-message-action/);
+assert.match(chatViewSource, /delegationTaskId[\s\S]*pendingDelegations\.find[\s\S]*resolve-task-delegation/);
+assert.match(chatViewSource, /targetCandidateId: delegationCandidate\.candidateId \|\| delegationCandidate\.agentId/);
+assert.match(indexCssSource, /\.system-message-action[\s\S]*rgba\(192,132,252/);
+assert.match(crossGroupCoordinatorSource, /MAX_PARALLEL_GROUP_REQUESTS[\s\S]*getGroupPMAgent[\s\S]*status: 'answered'/);
+assert.match(crossGroupCoordinatorSource, /enqueueUserRequest[\s\S]*kind: 'cross-group-answer'/);
+assert.match(crossGroupCoordinatorSource, /parentRequestId: request\.id[\s\S]*status: 'waiting_child'/);
+assert.match(crossGroupCoordinatorSource, /childResponses[\s\S]*resumeCount[\s\S]*status: 'queued'/);
+assert.match(crossGroupCoordinatorSource, /requestGroupPath[\s\S]*MAX_CROSS_GROUP_REQUEST_DEPTH/);
+assert.match(crossGroupCoordinatorSource, /getUnprocessedChildResponses\(request\)[\s\S]*processedChildResponseIds[\s\S]*Nur neu eingetroffene Ergebnisse der Unteranfragen/);
+assert.match(crossGroupCoordinatorSource, /requestContextIds[\s\S]*targetHistory[\s\S]*processedContextSummary/);
+assert.match(crossGroupCoordinatorSource, /executeQualityCall[\s\S]*runQualityCascade[\s\S]*specialistResults = await Promise\.all/);
+assert.match(crossGroupCoordinatorSource, /specialistResults = await Promise\.all[\s\S]*executeQualityCall[\s\S]*cross-group-specialist-input/);
+assert.match(crossGroupCoordinatorSource, /final-synthesis[\s\S]*executeQualityCall[\s\S]*cross-group-synthesis-input/);
+assert.match(crossGroupCoordinatorSource, /qualityMode: request\.qualityMode \|\| 'auto'/);
+assert.match(crossGroupCoordinatorSource, /requireQueryMatch: true[\s\S]*groupLimit: 6[\s\S]*maxCharacters: 12000/);
+assert.match(chatViewSource, /workflowDependencyAncestorIds\(currentGraph, plannedNode\.id\)[\s\S]*relevantResults\.map\(item =>/);
+assert.doesNotMatch(chatViewSource, /findings: delegatedResults\.map\(item => `\$\{item\.agent\}: \$\{item\.result\}`\)/);
+assert.match(chatViewSource, /kbSearch\(\{ query: objective[\s\S]*buildRelevantProjectInventoryContext[\s\S]*relevantPlanNodeIds/);
+assert.doesNotMatch(chatViewSource, /projectResult\.files\.slice\(0, 100\)/);
+assert.doesNotMatch(chatViewSource, /projectContext \+=/);
+assert.match(chatViewSource, /const executeAgentTask = async[\s\S]*resolveQualityPolicy[\s\S]*runWorkConservingApprovedBatch[\s\S]*executeAgentTask\(nextTask\)/);
+assert.match(chatViewSource, /callWithoutTools[\s\S]*MCP side effects must never be repeated[\s\S]*usedMcp[\s\S]*callWithoutTools/);
+assert.doesNotMatch(crossGroupCoordinatorSource, /gruppenübergreifende Ketten werden[\s\S]*nicht automatisch erzeugt/);
+assert.match(taskGraphWindowSource, /groupRequests=\{state\.groupRequests \|\| \[\]\}[\s\S]*retry-group-request/);
+assert.match(taskGraphPanelSource, /GroupRequestBranch[\s\S]*runtimePlan\?\.steps[\s\S]*GroupWorkView[\s\S]*workflow-workspace-tabs[\s\S]*onGroupRequestRetry/);
+assert.match(taskGraphPanelSource, /workflow-tab-main[\s\S]*workflow-tab-collaboration[\s\S]*workflow-main-view/);
+assert.match(taskGraphPanelSource, /function GroupWorkView[\s\S]*workflow-collaboration-view/);
+assert.doesNotMatch(taskGraphPanelSource, /remote \? 'remote' : 'local'/);
+assert.doesNotMatch(indexCssSource, /\.workflow-group-request\.remote/);
+assert.match(taskGraphPanelSource, /WORKFLOW_TAB_STORAGE_PREFIX[\s\S]*readWorkflowWorkspaceTab[\s\S]*localStorage\.getItem[\s\S]*persistWorkflowWorkspaceTab[\s\S]*localStorage\.setItem/);
+assert.match(taskGraphPanelSource, /useEffect\(\(\) => setActiveWorkspaceTab\(readWorkflowWorkspaceTab\(chatId\)\), \[chatId\]\)[\s\S]*selectWorkspaceTab/);
+assert.match(taskGraphPanelSource, /workflow-task-group-results[\s\S]*request\.answer[\s\S]*groupRequests=\{groupRequestsByTask\.get\(selectedNode\.id\)/);
+assert.match(indexCssSource, /\.workflow-node\.cross-group-waiting[\s\S]*\.workflow-group-request/);
+assert.match(modalsSource, /crossGroupCollaborationEnabled[\s\S]*crossGroupTargetGroupIds[\s\S]*Erreichbare Zielgruppen/);
+assert.match(modalsSource, /Ausgehende Informationsanfragen und Aufgabendelegationen erlauben/);
+assert.match(modalsSource, /buildGroupCapabilityIndex[\s\S]*Semantischer Kompetenzindex/);
+assert.match(storeSource, /capabilityIndex: buildGroupCapabilityIndex/);
+assert.match(modalsSource, /role="tablist"[\s\S]*group-tab-general[\s\S]*group-tab-collaboration[\s\S]*group-tab-workspace[\s\S]*group-tab-tools/);
+assert.match(modalsSource, /ArrowRight[\s\S]*ArrowLeft[\s\S]*Home[\s\S]*End/);
+assert.match(chatViewSource, /reachableCrossGroupIds\.includes\(group\.id\)/);
+assert.match(crossGroupCoordinatorSource, /requestExecutionKey[\s\S]*group:\$\{request\.targetGroupId\}/);
+assert.match(crossGroupCoordinatorSource, /const leadAgent = pm[\s\S]*pm_planning[\s\S]*extractUnknownDirectedMentions[\s\S]*-correction/);
+assert.match(crossGroupCoordinatorSource, /specialistHandoffs[\s\S]*persistRuntimePlan\('executing'[\s\S]*group_wait[\s\S]*finishRequestRuntimePlan/);
+assert.match(taskGraphPanelSource, /pendingDelegations[\s\S]*Delegation freigeben[\s\S]*Lokal ausführen/);
 
 const queuedRequestOne = { id: 'request-1', messageId: 'message-1', createdAt: 1 };
 const queuedRequestTwo = { id: 'request-2', messageId: 'message-2', createdAt: 2 };
@@ -209,6 +554,327 @@ assert.deepEqual(userRequestQueue.buildQueuedRequestHistory([
 userQueues = userRequestQueue.removeUserRequest(userQueues, 'chat-1', 'request-1');
 assert.deepEqual(userQueues['chat-1'].map(item => item.id), ['request-2']);
 assert.deepEqual(userRequestQueue.clearUserRequests(userQueues, 'chat-1'), {});
+const crossGroupQueue = userRequestQueue.enqueueUserRequest({}, 'chat-1', {
+  id: 'cross-answer', messageId: 'answer-message', kind: 'cross-group-answer', crossGroupBatchId: 'batch-1', createdAt: 3,
+});
+assert.equal(crossGroupQueue['chat-1'][0].kind, 'cross-group-answer');
+assert.equal(crossGroupQueue['chat-1'][0].crossGroupBatchId, 'batch-1');
+
+const sourceGroup = { id: 'dev', name: 'Dev', crossGroupCollaborationEnabled: true, crossGroupTargetGroupIds: ['product', 'qa'], agentIds: ['coder'] };
+const productGroup = { id: 'product', name: 'Produkt Design', emoji: '🎨', crossGroupCollaborationEnabled: true, agentIds: ['designer'] };
+const qaGroup = { id: 'qa', name: 'QA', crossGroupCollaborationEnabled: true, agentIds: ['tester'] };
+const operationsGroup = { id: 'operations', name: 'Operations', crossGroupCollaborationEnabled: true, agentIds: [] };
+assert.deepEqual(
+  crossGroup.extractGroupMentions('Bitte @Produkt Design: Welche Farben sind freigegeben?', [sourceGroup, productGroup, qaGroup], { sourceGroupId: sourceGroup.id, userAuthored: true })
+    .map(item => [item.group.id, item.question]),
+  [['product', 'Welche Farben sind freigegeben?']],
+);
+assert.deepEqual(
+  crossGroup.extractGroupMentions('Status.\n@QA: Ist der Ablauf geprüft?', [sourceGroup, productGroup, qaGroup], { sourceGroupId: sourceGroup.id })
+    .map(item => item.group.id),
+  ['qa'],
+);
+assert.equal(crossGroup.extractGroupMentions('```\n@QA: nur Beispiel\n```', [qaGroup], {}).length, 0);
+assert.deepEqual(
+  crossGroup.extractUnknownDirectedMentions('@Mira: Entwurf\n@Noah: Umsetzung\n@Produkt Design: Rückfrage', ['Noah', 'Produkt Design']),
+  ['Mira'],
+);
+assert.deepEqual(crossGroup.extractUnknownDirectedMentions('```\n@Mira: nur Beispiel\n```', []), []);
+const groupRequest = crossGroup.createCrossGroupRequest({
+  sourceGroup,
+  targetGroup: productGroup,
+  sourceAgent: coder,
+  sourceTask: { graphNodeId: 'task-1', objective: 'UI bauen' },
+  question: 'Welche Farben gelten?',
+  batchId: 'batch-1',
+  qualityMode: 'deep',
+});
+assert.equal(groupRequest.status, 'queued');
+assert.equal(groupRequest.qualityMode, 'deep');
+assert.equal(groupRequest.runtimePlan.status, 'queued');
+assert.deepEqual(groupRequest.runtimePlan.steps, []);
+assert.equal(groupRequest.sourceTaskId, 'task-1');
+assert.deepEqual(groupRequest.groupPath, ['dev', 'product']);
+assert.equal(groupRequest.parentRequestId, '');
+assert.equal(crossGroup.createCrossGroupRequest({
+  sourceGroup,
+  targetGroup: qaGroup,
+  question: 'Darf diese zweite konfigurierte Gruppe angesprochen werden?',
+})?.status, 'queued');
+assert.equal(crossGroup.createCrossGroupRequest({
+  sourceGroup,
+  targetGroup: operationsGroup,
+  question: 'Darf eine nicht konfigurierte Gruppe angesprochen werden?',
+}), null);
+const techGroup = { id: 'tech', name: 'Tech', crossGroupCollaborationEnabled: true, crossGroupTargetGroupIds: ['design', 'dev'] };
+const receivingOnlyDesignGroup = { id: 'design', name: 'Design', crossGroupCollaborationEnabled: false };
+const devToTechRequest = crossGroup.createCrossGroupRequest({
+  sourceGroup: { ...sourceGroup, crossGroupTargetGroupIds: ['tech'] },
+  targetGroup: techGroup,
+  question: 'Implementiert die Anwendung.',
+});
+const techToDesignRequest = crossGroup.createCrossGroupRequest({
+  sourceGroup: techGroup,
+  targetGroup: receivingOnlyDesignGroup,
+  question: 'Welche Gestaltung wird benötigt?',
+  parentRequestId: devToTechRequest.id,
+  rootRequestId: devToTechRequest.id,
+  groupPath: devToTechRequest.groupPath,
+  depth: 1,
+});
+assert.equal(techToDesignRequest.status, 'queued', 'a configured target may receive without an outbound route of its own');
+assert.equal(techToDesignRequest.parentRequestId, devToTechRequest.id);
+assert.deepEqual(techToDesignRequest.groupPath, ['dev', 'tech', 'design']);
+assert.equal(crossGroup.createCrossGroupRequest({
+  sourceGroup: receivingOnlyDesignGroup,
+  targetGroup: techGroup,
+  question: 'Eine reine Empfängergruppe darf keine neue Anfrage beginnen.',
+}), null);
+const waitingNestedRequests = crossGroup.normalizeCrossGroupRequests({
+  [devToTechRequest.id]: {
+    ...devToTechRequest,
+    status: 'waiting_child',
+    childRequestIds: [techToDesignRequest.id],
+  },
+  [techToDesignRequest.id]: techToDesignRequest,
+});
+assert.deepEqual(
+  crossGroup.requestsForChat(waitingNestedRequests, 'dev').map(request => request.id),
+  [devToTechRequest.id, techToDesignRequest.id],
+  'the source group sees the complete nested request tree',
+);
+assert.deepEqual(
+  crossGroup.requestsForChat(waitingNestedRequests, 'design').map(request => request.id),
+  [devToTechRequest.id, techToDesignRequest.id],
+  'a nested target sees the request ancestry as context',
+);
+assert.equal(crossGroup.resolveChildRequestBatch(waitingNestedRequests, devToTechRequest.id), null);
+const removedNestedRequests = crossGroup.removeCrossGroupRequestsMap(
+  waitingNestedRequests,
+  [devToTechRequest.id, techToDesignRequest.id],
+);
+assert.deepEqual(removedNestedRequests, {}, 'deleting group work removes the complete visible request tree');
+const recoveredNestedRequests = crossGroup.normalizeCrossGroupRequests({
+  ...waitingNestedRequests,
+  [techToDesignRequest.id]: { ...techToDesignRequest, status: 'running' },
+}, { recoverRunning: true });
+assert.equal(recoveredNestedRequests[devToTechRequest.id].status, 'waiting_child');
+assert.equal(recoveredNestedRequests[techToDesignRequest.id].status, 'queued');
+const answeredNestedRequests = crossGroup.updateCrossGroupRequestMap(
+  waitingNestedRequests,
+  techToDesignRequest.id,
+  { status: 'answered', answer: 'Verwendet dieses Designsystem.' },
+);
+const nestedResolution = crossGroup.resolveChildRequestBatch(answeredNestedRequests, devToTechRequest.id);
+assert.equal(nestedResolution.parent.id, devToTechRequest.id);
+assert.deepEqual(nestedResolution.visitedGroupIds, ['dev', 'tech', 'design']);
+assert.deepEqual(nestedResolution.responses.map(response => [response.groupId, response.status, response.answer]), [
+  ['design', 'answered', 'Verwendet dieses Designsystem.'],
+]);
+const deltaParent = crossGroup.normalizeCrossGroupRequests({
+  [devToTechRequest.id]: {
+    ...devToTechRequest,
+    childResponses: [
+      ...nestedResolution.responses,
+      {
+        requestId: 'second-child',
+        groupId: 'qa',
+        groupName: 'QA',
+        question: 'Ist das Ergebnis geprüft?',
+        status: 'answered',
+        answer: 'Erste, überholte Antwort.',
+      },
+      {
+        requestId: 'second-child',
+        groupId: 'qa',
+        groupName: 'QA',
+        question: 'Ist das Ergebnis geprüft?',
+        status: 'answered',
+        answer: 'Ja, die Prüfung ist abgeschlossen.',
+      },
+    ],
+    processedChildResponseIds: [techToDesignRequest.id],
+    processedContextSummary: 'Die Designantwort wurde bereits verarbeitet.',
+  },
+})[devToTechRequest.id];
+assert.deepEqual(
+  crossGroup.getUnprocessedChildResponses(deltaParent).map(response => [response.requestId, response.answer]),
+  [['second-child', 'Ja, die Prüfung ist abgeschlossen.']],
+  'only the latest representation of a not-yet-consumed child response is returned',
+);
+assert.equal(deltaParent.processedContextSummary, 'Die Designantwort wurde bereits verarbeitet.');
+const failedNestedRequests = crossGroup.updateCrossGroupRequestMap(
+  waitingNestedRequests,
+  techToDesignRequest.id,
+  { status: 'timed_out', error: 'Design antwortete nicht rechtzeitig.' },
+);
+assert.deepEqual(crossGroup.resolveChildRequestBatch(failedNestedRequests, devToTechRequest.id).responses.map(response => [response.status, response.error]), [
+  ['timed_out', 'Design antwortete nicht rechtzeitig.'],
+]);
+assert.equal(crossGroup.createCrossGroupRequest({
+  sourceGroup: techGroup,
+  targetGroup: sourceGroup,
+  question: 'Diese Kette würde zur bereits besuchten Dev-Gruppe zurücklaufen.',
+  groupPath: devToTechRequest.groupPath,
+  depth: 1,
+}), null, 'the persisted request path blocks cycles');
+assert.equal(crossGroup.createCrossGroupRequest({
+  sourceGroup: techGroup,
+  targetGroup: receivingOnlyDesignGroup,
+  question: 'Dieselbe Zielgruppe darf in der Anfragekette nicht erneut befragt werden.',
+  groupPath: devToTechRequest.groupPath,
+  visitedGroupIds: nestedResolution.visitedGroupIds,
+  depth: 1,
+}), null, 'groups visited by completed child branches remain cycle-protected');
+assert.equal(crossGroup.createCrossGroupRequest({
+  sourceGroup: techGroup,
+  targetGroup: receivingOnlyDesignGroup,
+  question: 'Diese Kette ist zu tief.',
+  groupPath: ['one', 'two', 'three', 'tech'],
+  depth: crossGroup.MAX_CROSS_GROUP_REQUEST_DEPTH + 1,
+}), null);
+let groupRequestMap = crossGroup.normalizeCrossGroupRequests({ [groupRequest.id]: { ...groupRequest, status: 'running' } }, { recoverRunning: true });
+assert.equal(groupRequestMap[groupRequest.id].status, 'queued');
+let runtimePlan = crossGroup.updateRequestRuntimePlan(groupRequest.runtimePlan, {
+  status: 'planning',
+  steps: [{ id: 'pm-plan-1', kind: 'pm_planning', title: 'Teilplan erstellen', agentId: 'pm', agentName: 'PM', status: 'running' }],
+});
+runtimePlan = crossGroup.updateRequestRuntimePlan(runtimePlan, {
+  status: 'executing',
+  steps: [
+    { id: 'pm-plan-1', status: 'completed', completedAt: Date.now() },
+    { id: 'expert-1', kind: 'agent_task', title: 'Fachaufgabe lösen', agentId: 'expert', agentName: 'Expertin', status: 'running' },
+  ],
+});
+assert.deepEqual(runtimePlan.steps.map(step => [step.id, step.status]), [['pm-plan-1', 'completed'], ['expert-1', 'running']]);
+const recoveredRuntimeRequest = crossGroup.normalizeCrossGroupRequests({
+  [groupRequest.id]: { ...groupRequest, status: 'running', runtimePlan },
+}, { recoverRunning: true })[groupRequest.id];
+assert.equal(recoveredRuntimeRequest.runtimePlan.status, 'queued');
+assert.equal(recoveredRuntimeRequest.runtimePlan.steps.find(step => step.id === 'expert-1').status, 'planned');
+const failedRuntimePlan = crossGroup.finishRequestRuntimePlan(runtimePlan, 'timed_out', 'Zeitlimit');
+assert.equal(failedRuntimePlan.status, 'timed_out');
+assert.equal(failedRuntimePlan.steps.find(step => step.id === 'expert-1').status, 'timed_out');
+groupRequestMap = crossGroup.updateCrossGroupRequestMap(groupRequestMap, groupRequest.id, { status: 'timed_out', runtimePlan: failedRuntimePlan });
+groupRequestMap = crossGroup.retryCrossGroupRequestMap(groupRequestMap, groupRequest.id);
+assert.equal(groupRequestMap[groupRequest.id].status, 'queued');
+assert.equal(groupRequestMap[groupRequest.id].attempt, 2);
+assert.equal(groupRequestMap[groupRequest.id].runtimePlan.status, 'queued');
+const reroutedRequests = crossGroup.cancelRequestsOutsideSourceRoutes(groupRequestMap, sourceGroup.id, [qaGroup.id]);
+assert.equal(reroutedRequests[groupRequest.id].status, 'cancelled');
+groupRequestMap = crossGroup.cancelRequestsForGroup(groupRequestMap, productGroup.id);
+assert.equal(groupRequestMap[groupRequest.id].status, 'cancelled');
+
+const genericAgents = [
+  { id: 'local-generalist', name: 'Mira', capabilities: ['Moderation'] },
+  { id: 'ceramics-expert', name: 'Noah', capabilities: ['Porzellan-Brennen', 'Glasurprüfung'] },
+  { id: 'music-expert', name: 'Iris', capabilities: ['Harmonielehre'] },
+];
+const genericGroups = [
+  { id: 'source-any-domain', name: 'Team Alpha', agentIds: ['local-generalist'], crossGroupCollaborationEnabled: true, crossGroupTargetGroupIds: ['ceramics', 'music'] },
+  { id: 'ceramics', name: 'Werkstatt Sieben', agentIds: ['ceramics-expert'], crossGroupCollaborationEnabled: true },
+  { id: 'music', name: 'Klanglabor', agentIds: ['music-expert'], crossGroupCollaborationEnabled: true },
+];
+const automaticDelegation = delegation.evaluateTaskDelegation({
+  taskNode: { delegation: { mode: 'automatic', requiredCapabilities: ['Glasurprüfung'], allowedTargetGroupIds: [] } },
+  sourceGroup: genericGroups[0],
+  groups: genericGroups,
+  agents: genericAgents,
+});
+assert.equal(automaticDelegation.action, 'delegate');
+assert.equal(automaticDelegation.candidate.agentId, 'ceramics-expert');
+assert.equal(delegation.evaluateTaskDelegation({
+  taskNode: { delegation: { mode: 'ask', requiredCapabilities: ['Harmonielehre'] } },
+  sourceGroup: genericGroups[0],
+  groups: genericGroups,
+  agents: genericAgents,
+}).action, 'ask', 'the router considers every target persisted in the source group route list');
+assert.equal(delegation.evaluateTaskDelegation({
+  taskNode: { delegation: { mode: 'automatic', requiredCapabilities: ['Glasurprüfung'], allowedTargetGroupIds: ['music'] } },
+  sourceGroup: genericGroups[0],
+  groups: genericGroups,
+  agents: genericAgents,
+}).action, 'unavailable', 'the immutable task contract may further restrict the group route list');
+assert.equal(delegation.evaluateTaskDelegation({
+  taskNode: { delegation: { mode: 'automatic', requiredCapabilities: ['Moderation'] } },
+  sourceGroup: genericGroups[0],
+  groups: genericGroups,
+  agents: genericAgents,
+}).reason, 'local-expert');
+assert.equal(delegation.evaluateTaskDelegation({
+  taskNode: { delegation: { mode: 'automatic', requiredCapabilities: ['Glasurprüfung'] } },
+  sourceGroup: { ...genericGroups[0], crossGroupCollaborationEnabled: false },
+  groups: genericGroups,
+  agents: genericAgents,
+}).reason, 'group-disabled');
+assert.equal(delegation.findDelegationCandidates({
+  sourceGroupId: genericGroups[0].id,
+  groups: genericGroups.map(group => group.id === 'ceramics' ? { ...group, crossGroupCollaborationEnabled: false } : group),
+  agents: genericAgents,
+  policy: { mode: 'automatic', requiredCapabilities: ['Glasurprüfung'] },
+}).length, 1, 'the source route authorizes a receiving-only target group');
+
+const semanticAgents = [
+  { id: 'semantic-pm', name: 'PM', role: 'Coordinator', systemPrompt: 'Coordinates work.' },
+  {
+    id: 'semantic-developer',
+    name: 'Robin',
+    role: 'Senior Developer',
+    systemPrompt: 'Experienced full-stack developer.\n• Frontend: React, Vue\n• Backend: Node.js',
+  },
+  { id: 'researcher', name: 'Sam', role: 'Researcher', capabilities: ['Qualitative Research'] },
+  { id: 'statistician', name: 'Lee', role: 'Statistician', capabilities: ['Statistical Analysis'] },
+];
+const semanticSource = {
+  id: 'semantic-source',
+  name: 'Source',
+  agentIds: ['semantic-pm'],
+  crossGroupCollaborationEnabled: true,
+  crossGroupTargetGroupIds: ['semantic-tech', 'semantic-research'],
+};
+const semanticTech = { id: 'semantic-tech', name: 'Tech', agentIds: ['semantic-pm', 'semantic-developer'] };
+semanticTech.capabilityIndex = delegation.buildGroupCapabilityIndex(semanticTech, semanticAgents);
+assert.equal(semanticTech.capabilityIndex.members.length, 2);
+assert.equal(semanticTech.capabilityIndex.explicitCapabilities.length, 0);
+assert.equal(delegation.evaluateTaskDelegation({
+  taskNode: { delegation: { mode: 'automatic', requiredCapabilities: ['Game Development', 'Frontend Development'] } },
+  sourceGroup: semanticSource,
+  groups: [semanticSource, semanticTech],
+  agents: semanticAgents,
+}).candidate.agentId, 'semantic-developer', 'role and profile terms feed the persisted semantic group index');
+
+const semanticResearch = { id: 'semantic-research', name: 'Research', agentIds: ['researcher', 'statistician'] };
+semanticResearch.capabilityIndex = delegation.buildGroupCapabilityIndex(semanticResearch, semanticAgents);
+const teamDelegation = delegation.evaluateTaskDelegation({
+  taskNode: { delegation: { mode: 'automatic', requiredCapabilities: ['Qualitative Research', 'Statistical Analysis'], allowedTargetGroupIds: ['semantic-research'] } },
+  sourceGroup: semanticSource,
+  groups: [semanticSource, semanticTech, semanticResearch],
+  agents: semanticAgents,
+});
+assert.equal(teamDelegation.action, 'delegate');
+assert.equal(teamDelegation.candidate.team, true, 'a group may combine members to cover all required capabilities');
+assert.deepEqual(new Set(teamDelegation.candidate.agentIds), new Set(['researcher', 'statistician']));
+const teamRequest = crossGroup.createCrossGroupRequest({
+  sourceGroup: semanticSource,
+  targetGroup: semanticResearch,
+  targetAgent: semanticAgents.find(agent => agent.id === teamDelegation.candidate.agentId),
+  targetAgents: teamDelegation.candidate.agentIds.map(agentId => semanticAgents.find(agent => agent.id === agentId)),
+  question: 'Research and analyze the result.',
+  kind: 'task_delegation',
+  requiredCapabilities: ['Qualitative Research', 'Statistical Analysis'],
+});
+assert.deepEqual(new Set(teamRequest.targetAgentIds), new Set(['researcher', 'statistician']));
+assert.deepEqual(
+  new Set(crossGroup.normalizeCrossGroupRequests({ [teamRequest.id]: teamRequest })[teamRequest.id].targetAgentIds),
+  new Set(['researcher', 'statistician']),
+  'delegated expert teams survive request persistence',
+);
+assert.equal(delegation.findDelegationCandidates({
+  sourceGroupId: semanticSource.id,
+  groups: [semanticSource, semanticTech, semanticResearch],
+  agents: semanticAgents,
+  policy: { mode: 'automatic', requiredCapabilities: ['Qualitative Research'], allowedTargetGroupIds: ['semantic-tech'] },
+}).length, 0, 'semantic search never escapes the task and source-group route restrictions');
 
 const migratedRoles = agentRoles.normalizeAgentRoleState([
   { id: 'role-dev', name: 'Developer' },
@@ -267,6 +933,32 @@ assert.equal(quality.evaluateResponseQuality({
 const qualityStats = quality.updateQualityStats({}, { outcome: 'escalated', unresolved: false, estimatedInputTokens: 100, estimatedOutputTokens: 25 });
 assert.equal(qualityStats.escalations, 1);
 assert.equal(qualityStats.estimatedInputTokens + qualityStats.estimatedOutputTokens, 125);
+const qualityCallPhases = [];
+const cascadedQualityResult = await quality.runQualityCascade({
+  agent: qualityAgent,
+  policy: {
+    enabled: true,
+    directStrong: false,
+    maxEscalations: 1,
+    escalationAgent: { ...qualityAgent, model: 'claude-sonnet-4-5' },
+    acceptanceCriteria: 'Liefere ein vollständiges Ergebnis.',
+  },
+  history: [{ agentId: 'user', text: 'Analysiere die Migration.' }],
+  objective: 'Analysiere die Migration vollständig.',
+  complexity: { level: 'high' },
+  call: async ({ agent, phase }) => {
+    qualityCallPhases.push([phase, agent.model]);
+    return phase === 'baseline'
+      ? 'Kurz.'
+      : 'Die Migration wurde vollständig analysiert und enthält Risiken, Maßnahmen und eine überprüfbare Abschlussbewertung.';
+  },
+});
+assert.deepEqual(qualityCallPhases, [
+  ['baseline', 'claude-haiku-4-5'],
+  ['escalated', 'claude-sonnet-4-5'],
+]);
+assert.equal(cascadedQualityResult.outcome, 'escalated');
+assert.equal(cascadedQualityResult.unresolved, false);
 assert.match(chatViewSource, /quality-mode-select[\s\S]*Schnell[\s\S]*Automatisch[\s\S]*Gründlich/);
 
 const browserAttachments = [
@@ -594,7 +1286,81 @@ graph = taskGraph.upsertTaskNode(graph, { id: 'qa', title: 'Testplan erstellen',
 graph = taskGraph.addTaskEdge(graph, { from: 'plan', to: 'frontend', kind: 'delegation' });
 graph = taskGraph.addTaskEdge(graph, { from: 'plan', to: 'qa', kind: 'delegation' });
 assert.equal(taskGraph.validateParallelSelection(graph, ['frontend', 'qa']).ok, true);
-assert.equal(taskGraph.graphNodeDepths(graph).get('frontend'), 1);
+const flowLayout = workflowLayout.buildWorkflowLayout(graph);
+assert.equal(flowLayout.positions.get('frontend').x, flowLayout.positions.get('qa').x);
+assert.notEqual(flowLayout.positions.get('frontend').y, flowLayout.positions.get('qa').y);
+assert.ok(flowLayout.positions.get('frontend').x > flowLayout.positions.get('plan').x);
+assert.deepEqual(flowLayout.flowPoints, []);
+assert.deepEqual(flowLayout.flowEdges, []);
+const statusChangedLayout = workflowLayout.buildWorkflowLayout(
+  taskGraph.updateTaskNodeStatus(graph, 'frontend', 'running'),
+);
+assert.deepEqual([...statusChangedLayout.positions], [...flowLayout.positions]);
+assert.deepEqual(statusChangedLayout.flowEdges, flowLayout.flowEdges);
+assert.match(workflowLayout.workflowEdgePath(
+  flowLayout.positions.get('plan'),
+  flowLayout.positions.get('frontend'),
+), /^M /);
+const manuallyPositionedGraph = taskGraph.updateWorkflowViewPosition(graph, 'frontend', { x: 880, y: 340 });
+assert.deepEqual(manuallyPositionedGraph.viewState.positions.frontend, { x: 880, y: 340 });
+assert.deepEqual(workflowLayout.buildWorkflowLayout(manuallyPositionedGraph).positions.get('frontend'), { x: 880, y: 340 });
+assert.equal(taskGraph.updateWorkflowViewPosition(graph, '__fork-1', { x: 300, y: 410 }), graph);
+assert.equal(taskGraph.updateWorkflowViewPosition(graph, '__unknown-1', { x: 10, y: 10 }), graph);
+assert.equal(taskGraph.resetWorkflowViewState(manuallyPositionedGraph).viewState.positions.frontend, undefined);
+let explicitFlowGraph = taskGraph.upsertTaskNode(graph, { id: 'release', title: 'Release vorbereiten', objective: 'Release vorbereiten', agentId: pm.id, agentName: pm.name, source: 'PM', parentNodeId: 'plan', status: 'planned' });
+explicitFlowGraph = taskGraph.addWorkflowPoint(explicitFlowGraph, { type: 'fork', position: { x: 320, y: 210 }, rootNodeId: 'plan' });
+explicitFlowGraph = taskGraph.addWorkflowPoint(explicitFlowGraph, { type: 'join', position: { x: 760, y: 210 }, rootNodeId: 'plan' });
+const explicitForkId = explicitFlowGraph.flowPoints.find(point => point.type === 'fork').id;
+const explicitJoinId = explicitFlowGraph.flowPoints.find(point => point.type === 'join').id;
+explicitFlowGraph = taskGraph.addTaskDependency(explicitFlowGraph, 'plan', explicitForkId);
+explicitFlowGraph = taskGraph.addTaskDependency(explicitFlowGraph, explicitForkId, 'frontend');
+explicitFlowGraph = taskGraph.addTaskDependency(explicitFlowGraph, explicitForkId, 'qa');
+explicitFlowGraph = taskGraph.addTaskDependency(explicitFlowGraph, 'frontend', explicitJoinId);
+explicitFlowGraph = taskGraph.addTaskDependency(explicitFlowGraph, 'qa', explicitJoinId);
+explicitFlowGraph = taskGraph.addTaskDependency(explicitFlowGraph, explicitJoinId, 'release');
+assert.equal(taskGraph.validateWorkflowPlan(explicitFlowGraph).ok, true);
+assert.equal(explicitFlowGraph.flowEdges.length, 6);
+assert.equal(taskGraph.isTaskNodeReady(explicitFlowGraph, 'frontend'), true);
+assert.equal(taskGraph.isTaskNodeReady(explicitFlowGraph, 'release'), false);
+explicitFlowGraph = taskGraph.updateTaskNodeStatus(explicitFlowGraph, 'frontend', 'completed');
+explicitFlowGraph = taskGraph.updateTaskNodeStatus(explicitFlowGraph, 'qa', 'completed');
+assert.equal(taskGraph.isTaskNodeReady(explicitFlowGraph, 'release'), true);
+assert.equal(taskGraph.validateTaskDependency(explicitFlowGraph, 'release', explicitForkId).ok, false);
+assert.deepEqual(workflowLayout.buildWorkflowLayout(explicitFlowGraph).flowPoints.map(point => point.type), ['fork', 'join']);
+const lockedExplicitFlowGraph = taskGraph.lockTaskGraphPlan(explicitFlowGraph);
+assert.equal(lockedExplicitFlowGraph.approvedPlan.flowPoints.length, 2);
+assert.equal(lockedExplicitFlowGraph.approvedPlan.flowEdges.length, 6);
+const repairedCompletedFlowGraph = taskGraph.updateTaskNodeStatus({
+  ...lockedExplicitFlowGraph,
+  edges: [],
+  flowEdges: [],
+}, 'release', 'completed');
+assert.deepEqual(repairedCompletedFlowGraph.edges, lockedExplicitFlowGraph.approvedPlan.edges);
+assert.deepEqual(repairedCompletedFlowGraph.flowEdges, lockedExplicitFlowGraph.approvedPlan.flowEdges);
+assert.equal(workflowLayout.buildWorkflowLayout(repairedCompletedFlowGraph).flowEdges.length, 6);
+const removedExplicitFlowGraph = taskGraph.removeWorkflowPoint(explicitFlowGraph, explicitJoinId);
+assert.equal(removedExplicitFlowGraph.flowPoints.some(point => point.id === explicitJoinId), false);
+assert.equal(removedExplicitFlowGraph.flowEdges.some(edge => edge.from === explicitJoinId || edge.to === explicitJoinId), false);
+let typedConnectionGraph = taskGraph.upsertTaskNode(graph, { id: 'manual-review', title: 'Manuelle Abnahme', objective: 'Ergebnisse prüfen', agentId: pm.id, agentName: pm.name, nodeType: 'review', status: 'planned' });
+assert.equal(taskGraph.validateWorkflowConnection(typedConnectionGraph, 'frontend', 'qa', 'review').ok, false);
+typedConnectionGraph = taskGraph.addWorkflowConnection(typedConnectionGraph, 'frontend', 'manual-review', 'review');
+assert.equal(typedConnectionGraph.edges.some(edge => edge.from === 'frontend' && edge.to === 'manual-review' && edge.kind === 'review'), true);
+typedConnectionGraph = taskGraph.removeWorkflowConnection(typedConnectionGraph, 'frontend', 'manual-review', 'review');
+assert.equal(typedConnectionGraph.edges.some(edge => edge.from === 'frontend' && edge.to === 'manual-review' && edge.kind === 'review'), false);
+let editableDependencyGraph = taskGraph.addTaskDependency(graph, 'frontend', 'qa');
+assert.equal(editableDependencyGraph.edges.some(edge => edge.kind === 'dependency' && edge.from === 'frontend' && edge.to === 'qa'), true);
+assert.equal(taskGraph.validateTaskDependency(editableDependencyGraph, 'qa', 'frontend').ok, false);
+assert.ok(
+  workflowLayout.buildWorkflowLayout(editableDependencyGraph).positions.get('qa').x >
+  workflowLayout.buildWorkflowLayout(editableDependencyGraph).positions.get('frontend').x,
+);
+editableDependencyGraph = taskGraph.removeTaskDependency(editableDependencyGraph, 'frontend', 'qa');
+assert.equal(editableDependencyGraph.edges.some(edge => edge.kind === 'dependency' && edge.from === 'frontend' && edge.to === 'qa'), false);
+assert.equal(
+  workflowLayout.buildWorkflowLayout(editableDependencyGraph).positions.get('qa').x,
+  workflowLayout.buildWorkflowLayout(editableDependencyGraph).positions.get('frontend').x,
+);
+assert.equal(taskGraph.graphNodeDepths(graph).get('frontend'), 0);
 const baseTree = taskGraph.projectTaskTree(graph);
 assert.deepEqual(baseTree.roots.map(node => node.id), ['plan']);
 assert.deepEqual(baseTree.childrenByParent.get('plan').map(node => node.id), ['frontend', 'qa']);
@@ -623,7 +1389,8 @@ releaseParallelTasks();
 assert.deepEqual(await parallelRun, ['frontend-done', 'qa-done']);
 
 const dependentGraph = taskGraph.updateTaskNodeStatus(graph, 'plan', 'planned');
-assert.match(taskGraph.validateParallelSelection(dependentGraph, ['plan', 'frontend']).reason, /vorherige Aufgabe|hängen voneinander ab/);
+assert.equal(taskGraph.isTaskNodeReady(dependentGraph, 'frontend'), true);
+assert.match(taskGraph.validateParallelSelection(dependentGraph, ['plan', 'frontend']).reason, /keine parallel ausführbare/);
 assert.equal(taskGraph.inferHandoffDependency('Prüfe danach die Umsetzung von Max.', [
   { graphNodeId: 'frontend', agent: coder },
 ]), 'frontend');
@@ -657,10 +1424,10 @@ plannedGraph = taskGraph.upsertTaskNode(plannedGraph, {
 plannedGraph = taskGraph.materializeTaskPlan(plannedGraph, {
   rootNodeId: 'plan-root',
   tasks: [
-    { id: 'implement', title: 'CMD implementieren', agentId: coder.id, agentName: coder.name, type: 'task', dependsOn: [], executionMode: 'parallel', order: 0 },
-    { id: 'docs', title: 'Nutzung dokumentieren', agentId: tester.id, agentName: tester.name, type: 'task', dependsOn: [], executionMode: 'parallel', order: 1 },
-    { id: 'qa', title: 'CMD testen', agentId: tester.id, agentName: tester.name, type: 'task', dependsOn: ['implement'], executionMode: 'sequential', order: 2 },
-    { id: 'final-review', title: 'Finale PM-Abnahme', agentId: pm.id, agentName: pm.name, type: 'review', dependsOn: ['docs', 'qa'], executionMode: 'sequential', order: 3 },
+    { id: 'implement', title: 'CMD implementieren', agentId: coder.id, agentName: coder.name, type: 'task', dependsOn: [], order: 0 },
+    { id: 'docs', title: 'Nutzung dokumentieren', agentId: tester.id, agentName: tester.name, type: 'task', dependsOn: [], order: 1 },
+    { id: 'qa', title: 'CMD testen', agentId: tester.id, agentName: tester.name, type: 'task', dependsOn: ['implement'], order: 2 },
+    { id: 'final-review', title: 'Finale PM-Abnahme', agentId: pm.id, agentName: pm.name, type: 'review', dependsOn: ['docs', 'qa'], order: 3 },
   ],
 });
 const plannedIds = Object.fromEntries(plannedGraph.nodes
@@ -672,12 +1439,313 @@ assert.equal(taskGraph.isTaskNodeReady(plannedGraph, plannedIds.docs), true);
 assert.equal(taskGraph.isTaskNodeReady(plannedGraph, plannedIds.qa), false);
 assert.equal(taskGraph.isTaskNodeReady(plannedGraph, plannedIds['final-review']), false);
 assert.equal(taskGraph.validateParallelSelection(plannedGraph, [plannedIds.implement, plannedIds.docs]).ok, true);
+assert.deepEqual([...taskGraph.workflowDependencyAncestorIds(plannedGraph, plannedIds.implement)], []);
+assert.deepEqual([...taskGraph.workflowDependencyAncestorIds(plannedGraph, plannedIds.qa)], [plannedIds.implement]);
+assert.deepEqual(
+  [...taskGraph.workflowDependencyAncestorIds(plannedGraph, plannedIds['final-review'])].sort(),
+  [plannedIds.docs, plannedIds.implement, plannedIds.qa].sort(),
+  'a review task receives results from direct and transitive dependencies only',
+);
+assert.equal(plannedGraph.edges.some(edge => edge.kind === 'delegation' && edge.from === 'plan-root'), false);
+const completedContractGraph = taskGraph.updateTaskNodeStatus(plannedGraph, plannedIds.implement, 'completed');
+const unchangedContractGraph = taskGraph.materializeTaskPlan(completedContractGraph, {
+  rootNodeId: 'plan-root',
+  tasks: [{ id: 'implement', title: 'CMD implementieren', agentId: coder.id, agentName: coder.name, type: 'task', dependsOn: [], order: 0 }],
+});
+assert.equal(unchangedContractGraph.nodes.find(node => node.id === plannedIds.implement).status, 'completed');
+const changedContractGraph = taskGraph.materializeTaskPlan(completedContractGraph, {
+  rootNodeId: 'plan-root',
+  tasks: [{ id: 'implement', title: 'CMD grundlegend anders implementieren', agentId: coder.id, agentName: coder.name, type: 'task', dependsOn: [], order: 0 }],
+});
+assert.equal(changedContractGraph.nodes.find(node => node.id === plannedIds.implement).status, 'planned');
+const completedBeforePmChange = taskGraph.updateTaskNodeStatus(plannedGraph, plannedIds.implement, 'completed');
+const deduplicatedPmChange = taskGraph.materializeTaskPlan(completedBeforePmChange, {
+  rootNodeId: 'plan-root',
+  replace: true,
+  tasks: [
+    { id: 'implement-v2', title: 'Task 1: CMD implementieren', agentId: coder.id, agentName: coder.name, type: 'task', dependsOn: [], order: 0 },
+    { id: 'implement-copy', title: 'CMD implementieren', agentId: coder.id, agentName: coder.name, type: 'task', dependsOn: [], order: 1 },
+    { id: 'final-review-v2', title: 'Finale PM-Abnahme', agentId: pm.id, agentName: pm.name, type: 'review', dependsOn: ['implement-v2', 'implement-copy'], order: 2 },
+  ],
+});
+const deduplicatedPlanNodes = deduplicatedPmChange.nodes.filter(node => node.planRootId === 'plan-root');
+assert.equal(deduplicatedPlanNodes.filter(node => node.nodeType !== 'review').length, 1);
+assert.equal(deduplicatedPmChange.nodes.some(node => node.planTaskId === 'implement-v2'), false);
+assert.equal(deduplicatedPmChange.nodes.find(node => node.id === plannedIds.implement).status, 'completed');
+assert.equal(deduplicatedPmChange.edges.filter(edge => edge.from === plannedIds.implement && edge.to === plannedIds['final-review']).length, 1);
+let userEditedPlan = taskGraph.addPlanningTask(plannedGraph, { rootNodeId: 'plan-root', agent: coder, title: 'Manuelle Aufgabe' });
+const invalidDelegationPlan = taskGraph.updatePlanningTask(plannedGraph, plannedIds.implement, {
+  delegation: { mode: 'automatic', requiredCapabilities: [] },
+});
+assert.equal(taskGraph.validateWorkflowPlan(invalidDelegationPlan).messageKey, '„{title}“ benötigt für die Delegation mindestens eine Fähigkeit.');
+const invalidDelegationInspection = taskGraph.inspectWorkflowPlan(invalidDelegationPlan);
+assert.ok(invalidDelegationInspection.suggestions.some(suggestion => suggestion.taskIds?.includes(plannedIds.implement)));
+const validDelegationPlan = taskGraph.updatePlanningTask(invalidDelegationPlan, plannedIds.implement, {
+  delegation: { mode: 'ask', requiredCapabilities: ['Frei definierte Fähigkeit'], allowedTargetGroupIds: ['ceramics'] },
+});
+assert.equal(taskGraph.validateWorkflowPlan(validDelegationPlan).ok, true);
+assert.equal(validDelegationPlan.nodes.find(node => node.id === plannedIds.implement).delegation.mode, 'ask');
+const manualTask = userEditedPlan.nodes.find(node => node.source === 'User-Plan');
+assert.ok(manualTask);
+assert.equal(userEditedPlan.edges.some(edge => edge.from === manualTask.id || edge.to === manualTask.id), false);
+userEditedPlan = taskGraph.addPlanningTask(userEditedPlan, { rootNodeId: 'plan-root', agent: pm, nodeType: 'review' });
+const manualReview = userEditedPlan.nodes.find(node => node.source === 'User-Plan' && taskGraph.inferTaskNodeType(node) === 'review');
+assert.equal(manualReview.title, 'Neue Abnahme');
+assert.deepEqual(manualReview.acceptanceCriteria, []);
+assert.equal(userEditedPlan.edges.some(edge => edge.from === manualReview.id || edge.to === manualReview.id), false);
+userEditedPlan = taskGraph.updatePlanningTask(userEditedPlan, manualTask.id, { title: 'Vom User geändert', objective: 'Klares Ergebnis' });
+assert.equal(userEditedPlan.nodes.find(node => node.id === manualTask.id).objective, 'Klares Ergebnis');
+const orderBeforeMove = userEditedPlan.nodes.find(node => node.id === manualTask.id).planOrder;
+userEditedPlan = taskGraph.movePlanningTask(userEditedPlan, manualTask.id, -1);
+assert.ok(userEditedPlan.nodes.find(node => node.id === manualTask.id).planOrder < orderBeforeMove);
+userEditedPlan = taskGraph.splitPlanningTask(userEditedPlan, manualTask.id);
+assert.equal(userEditedPlan.nodes.filter(node => node.source === 'User-Plan' && taskGraph.inferTaskNodeType(node) === 'task').length, 2);
+const splitSuccessor = userEditedPlan.nodes.find(node => node.source === 'User-Plan' && taskGraph.inferTaskNodeType(node) === 'task' && node.id !== manualTask.id);
+assert.equal(userEditedPlan.edges.some(edge => edge.kind === 'dependency' && edge.from === manualTask.id && edge.to === splitSuccessor.id), true);
+userEditedPlan = taskGraph.removePlanningTask(userEditedPlan, splitSuccessor.id);
+assert.equal(userEditedPlan.nodes.some(node => node.id === splitSuccessor.id), false);
+const revisedPlannedGraph = taskGraph.materializeTaskPlan(plannedGraph, {
+  rootNodeId: 'plan-root',
+  replace: true,
+  tasks: [
+    { id: 'implement', title: 'CMD neu implementieren', agentId: coder.id, agentName: coder.name, type: 'task', dependsOn: [], order: 0 },
+    { id: 'final-review', title: 'Finale PM-Abnahme', agentId: pm.id, agentName: pm.name, type: 'review', dependsOn: ['implement'], order: 1 },
+  ],
+});
+assert.equal(revisedPlannedGraph.nodes.some(node => node.planTaskId === 'docs'), false);
+assert.equal(revisedPlannedGraph.nodes.some(node => node.planTaskId === 'qa'), false);
+assert.equal(revisedPlannedGraph.nodes.find(node => node.planTaskId === 'implement').title, 'CMD neu implementieren');
+assert.equal(revisedPlannedGraph.planRevision, 1);
+assert.deepEqual(
+  revisedPlannedGraph.edges
+    .filter(edge => edge.planRootId === 'plan-root')
+    .map(edge => `${edge.kind}:${edge.from}->${edge.to}`),
+  [`review:${plannedIds.implement}->${plannedIds['final-review']}`],
+);
+const approvedPlannedGraph = taskGraph.lockTaskGraphPlan(revisedPlannedGraph);
+assert.equal(approvedPlannedGraph.workflowState, 'executing');
+assert.equal(approvedPlannedGraph.planOwner, 'user');
+assert.equal(approvedPlannedGraph.approvedPlan.revision, 1);
+assert.equal(approvedPlannedGraph.approvedPlan.approvedBy, 'user');
+assert.notEqual(approvedPlannedGraph.approvedPlan.nodes, approvedPlannedGraph.nodes);
+assert.equal(taskGraph.materializeTaskPlan(approvedPlannedGraph, {
+  rootNodeId: 'plan-root',
+  replace: true,
+  allowPlanningRevision: true,
+  tasks: [{ id: 'intruder', title: 'Nicht freigegebene PM-Aufgabe', agentId: pm.id, agentName: pm.name, type: 'task', dependsOn: [], order: 0 }],
+}), approvedPlannedGraph);
+const movedApprovedGraph = taskGraph.updateWorkflowViewPosition(approvedPlannedGraph, plannedIds.implement, { x: 640, y: 420 });
+assert.equal(movedApprovedGraph.approvedPlan, approvedPlannedGraph.approvedPlan);
+assert.deepEqual(movedApprovedGraph.viewState.positions[plannedIds.implement], { x: 640, y: 420 });
+const finishedApprovedGraph = taskGraph.updateTaskNodeStatus(movedApprovedGraph, plannedIds.implement, 'agent_done', {
+  completedAt: Date.now(),
+});
+const statusOnlyDraft = taskGraph.beginUserPlanEdit(finishedApprovedGraph);
+const statusOnlyChanges = taskGraph.buildWorkflowChangeSet(statusOnlyDraft);
+assert.equal(statusOnlyChanges.active, true);
+assert.equal(statusOnlyChanges.hasContractChanges, false);
+assert.deepEqual(statusOnlyChanges.nodeChanges, {});
+assert.equal(statusOnlyDraft.changeRequest.reason, 'user-edit');
+assert.equal(statusOnlyDraft.planRevision, approvedPlannedGraph.planRevision + 1);
+assert.deepEqual(finishedApprovedGraph.viewState.positions[plannedIds.implement], { x: 640, y: 420 });
+const damagedDraft = taskGraph.removePlanningTask(statusOnlyDraft, plannedIds.implement);
+assert.equal(damagedDraft.nodes.some(node => node.id === plannedIds.implement), false);
+const restoredSnapshot = taskGraph.restoreTaskGraphSnapshot(damagedDraft);
+assert.equal(restoredSnapshot.nodes.find(node => node.id === plannedIds.implement).status, 'agent_done');
+assert.equal(restoredSnapshot.nodes.find(node => node.id === plannedIds.implement).title, approvedPlannedGraph.approvedPlan.nodes.find(node => node.id === plannedIds.implement).title);
+assert.equal(restoredSnapshot.edges.some(edge => edge.kind === 'review' && edge.from === plannedIds.implement && edge.to === plannedIds['final-review']), true);
+assert.deepEqual(restoredSnapshot.viewState.positions[plannedIds.implement], { x: 640, y: 420 });
+assert.equal(restoredSnapshot.changeRequest.reason, 'snapshot-restored');
+assert.equal(taskGraph.buildWorkflowChangeSet(restoredSnapshot).hasContractChanges, false);
+assert.equal(restoredSnapshot.approvedPlan, null);
+const editedRestoredSnapshot = taskGraph.upsertTaskNode(restoredSnapshot, {
+  id: plannedIds.implement,
+  title: 'Nach Snapshot sichtbar geändert',
+});
+assert.equal(taskGraph.buildWorkflowChangeSet(editedRestoredSnapshot).nodeChanges[plannedIds.implement].type, 'changed');
+const requestedDraft = taskGraph.beginUserPlanEdit(finishedApprovedGraph);
+const changedAgentDraft = taskGraph.upsertTaskNode(requestedDraft, {
+  id: plannedIds.implement,
+  agentId: coderTwo.id,
+  agentName: coderTwo.name,
+});
+const changedAgentSet = taskGraph.buildWorkflowChangeSet(changedAgentDraft);
+assert.equal(changedAgentSet.hasContractChanges, true);
+assert.equal(changedAgentSet.nodeChanges[plannedIds.implement].changes.some(change => change.field === 'agentId'), true);
+const changedDependencyDraft = taskGraph.addTaskDependency(changedAgentDraft, plannedIds.implement, plannedIds['final-review']);
+const changedDependencySet = taskGraph.buildWorkflowChangeSet(changedDependencyDraft);
+assert.equal(Object.values(changedDependencySet.edgeChanges).some(change => change.type === 'added'), true);
+assert.equal(taskGraph.validateWorkflowPlan(revisedPlannedGraph).ok, true);
+const planWithoutReview = taskGraph.removePlanningTask(revisedPlannedGraph, plannedIds['final-review']);
+assert.equal(planWithoutReview.nodes.some(node => taskGraph.inferTaskNodeType(node) === 'review'), false);
+assert.equal(taskGraph.validateWorkflowPlan(planWithoutReview).ok, true);
+const reviewlessInspection = taskGraph.inspectWorkflowPlan(planWithoutReview);
+assert.equal(reviewlessInspection.ok, true);
+assert.equal(reviewlessInspection.warnings.some(entry => entry.messageKey === 'Es ist keine abschließende Abnahme eingeplant.'), true);
+let disconnectedProposalGraph = taskGraph.upsertTaskNode(revisedPlannedGraph, {
+  id: 'proposed-review', title: 'Zusatzprüfung', objective: 'Ergebnis zusätzlich prüfen',
+  agentId: pm.id, agentName: pm.name, source: 'User-Plan', nodeType: 'review',
+  status: 'planned', planRootId: 'plan-root',
+});
+const disconnectedValidation = taskGraph.validateWorkflowPlan(disconnectedProposalGraph);
+assert.equal(disconnectedValidation.ok, false);
+assert.deepEqual(disconnectedValidation.taskIds, ['proposed-review']);
+const disconnectedInspection = taskGraph.inspectWorkflowPlan(disconnectedProposalGraph);
+assert.equal(disconnectedInspection.ok, false);
+assert.deepEqual(disconnectedInspection.taskIds, ['proposed-review']);
+assert.equal(disconnectedInspection.suggestions.some(entry => entry.messageKey.includes('Verbinde die Abnahme')), true);
+assert.equal(taskGraph.validateApprovedTaskExecution(approvedPlannedGraph, {
+  graphNodeId: plannedIds.implement,
+  agent: coder,
+}).ok, true);
+assert.equal(taskGraph.validateApprovedTaskExecution(approvedPlannedGraph, {
+  graphNodeId: 'unapproved-extra-task',
+  agent: coder,
+}).ok, false);
+assert.equal(taskGraph.validateApprovedTaskExecution(approvedPlannedGraph, {
+  graphNodeId: plannedIds.implement,
+  agent: coder,
+  objective: 'Anderes, nicht freigegebenes Ziel',
+}).ok, false);
+assert.equal(taskGraph.validateApprovedTaskExecution(approvedPlannedGraph, {
+  graphNodeId: plannedIds.implement,
+  agent: coder,
+  objective: 'Fortsetzung nach einer User-Antwort',
+  approvedContinuation: true,
+}).ok, true);
+const approvedRecovery = {
+  runtimeRecovery: true,
+  source: 'timeout-recovery',
+  graphNodeId: 'runtime-recovery-review',
+  agent: pm,
+  recovery: {
+    originalGraphNodeId: plannedIds.implement,
+    originalAgentId: coder.id,
+    originalAgentName: coder.name,
+    pmAgentId: pm.id,
+  },
+};
+const approvedRecoveryGraph = taskGraph.updateTaskNodeStatus(approvedPlannedGraph, plannedIds.implement, 'timed_out', {
+  recoveryStatus: 'pm',
+});
+assert.equal(taskGraph.validateApprovedTaskExecution(approvedRecoveryGraph, approvedRecovery).mode, 'timeout-recovery');
+assert.equal(taskGraph.validateApprovedTaskExecution(approvedRecoveryGraph, {
+  ...approvedRecovery,
+  source: 'timeout-recovery-step',
+  agent: coder,
+}).ok, true);
+assert.equal(taskGraph.validateApprovedTaskExecution(approvedRecoveryGraph, {
+  ...approvedRecovery,
+  source: 'timeout-recovery-step',
+  agent: tester,
+}).ok, false);
+assert.equal(taskGraph.validateApprovedTaskExecution(approvedRecoveryGraph, {
+  ...approvedRecovery,
+  runtimeRecovery: false,
+}).ok, false);
+assert.equal(taskGraph.validateApprovedTaskExecution(taskGraph.createTaskGraph('free-mode'), {
+  graphNodeId: 'dynamic-task',
+  agent: coder,
+}).mode, 'free');
+let preparationGraph = taskGraph.lockTaskGraphPlan(plannedGraph);
+preparationGraph = taskGraph.updateTaskNodeStatus(preparationGraph, plannedIds.implement, 'running');
+assert.deepEqual(taskGraph.findDependencyPreparationCandidateIds(preparationGraph, {
+  activeNodeIds: [plannedIds.implement],
+}), [plannedIds.qa]);
+const dependencyPreparation = {
+  graphNodeId: plannedIds.qa,
+  agent: tester,
+  objective: 'Nur unabhängige Vorarbeit durchführen',
+  source: 'dependency-preparation',
+  preparationOnly: true,
+  approvedContinuation: true,
+};
+assert.equal(taskGraph.validateApprovedTaskExecution(preparationGraph, dependencyPreparation).mode, 'dependency-preparation');
+preparationGraph = taskGraph.updateTaskNodeStatus(preparationGraph, plannedIds.qa, 'prepared', {
+  preparationAttemptedAt: Date.now(),
+  preparationCompletedAt: Date.now(),
+  interimResult: 'Testgerüst ohne Annahmen vorbereitet.',
+});
+assert.equal(taskGraph.isTaskNodeReady(preparationGraph, plannedIds.qa), false);
+assert.deepEqual(taskGraph.findDependencyPreparationCandidateIds(preparationGraph, {
+  activeNodeIds: [plannedIds.implement],
+}), []);
+preparationGraph = taskGraph.updateTaskNodeStatus(preparationGraph, plannedIds.implement, 'agent_done');
+assert.equal(taskGraph.isTaskNodeReady(preparationGraph, plannedIds.qa), true);
+const changeRequestGraph = taskGraph.beginUserPlanEdit(approvedPlannedGraph);
+assert.equal(changeRequestGraph.approvedPlan, null);
+assert.equal(changeRequestGraph.workflowState, 'planning');
+assert.equal(changeRequestGraph.changeRequest.reason, 'user-edit');
+assert.deepEqual(changeRequestGraph.changeRequest.taskIds, []);
+assert.equal(taskGraph.materializeTaskPlan(changeRequestGraph, {
+  rootNodeId: 'plan-root',
+  replace: true,
+  tasks: [{ id: 'intruder', title: 'Nicht freigegebene PM-Aufgabe', agentId: pm.id, agentName: pm.name, type: 'task', dependsOn: [], order: 0 }],
+}), changeRequestGraph);
+const pmRevisedChangeRequestGraph = taskGraph.materializeTaskPlan(changeRequestGraph, {
+  rootNodeId: 'plan-root',
+  replace: true,
+  allowPlanningRevision: true,
+  tasks: [{
+    id: 'implement',
+    title: 'CMD nach User-Rückmeldung anpassen',
+    agentId: coder.id,
+    agentName: coder.name,
+    type: 'task',
+    dependsOn: [],
+    order: 0,
+  }],
+});
+assert.equal(pmRevisedChangeRequestGraph.nodes.some(node => node.planTaskId === 'final-review'), false);
+assert.equal(pmRevisedChangeRequestGraph.nodes.find(node => node.planTaskId === 'implement').title, 'CMD nach User-Rückmeldung anpassen');
+assert.equal(pmRevisedChangeRequestGraph.planOwner, 'user');
+assert.equal(pmRevisedChangeRequestGraph.approvedPlan, null);
+assert.equal(pmRevisedChangeRequestGraph.previousApprovedPlan, changeRequestGraph.previousApprovedPlan);
+const relockedGraph = taskGraph.lockTaskGraphPlan(changeRequestGraph);
+assert.equal(relockedGraph.approvedPlan.revision, approvedPlannedGraph.approvedPlan.revision + 1);
+assert.equal(relockedGraph.planHistory.some(plan => plan.revision === approvedPlannedGraph.approvedPlan.revision), true);
+const failedApprovedGraph = taskGraph.updateTaskNodeStatus(approvedPlannedGraph, plannedIds.implement, 'failed', {
+  error: 'Provider vorübergehend nicht verfügbar',
+});
+const retriedApprovedGraph = taskGraph.retryTaskNode(failedApprovedGraph, plannedIds.implement);
+assert.equal(retriedApprovedGraph.nodes.find(node => node.id === plannedIds.implement).status, 'planned');
+assert.equal(retriedApprovedGraph.nodes.find(node => node.id === plannedIds.implement).error, undefined);
+assert.equal(retriedApprovedGraph.approvedPlan, approvedPlannedGraph.approvedPlan);
+const retriedRecoveryGraph = taskGraph.retryTaskNode(approvedRecoveryGraph, plannedIds.implement);
+assert.equal(retriedRecoveryGraph.nodes.find(node => node.id === plannedIds.implement).status, 'planned');
+assert.equal(retriedRecoveryGraph.nodes.find(node => node.id === plannedIds.implement).recoveryStatus, null);
+const initialUserDraft = taskGraph.beginUserPlanEdit(taskGraph.createTaskGraph('initial-user-plan'));
+assert.equal(initialUserDraft.planRevision, 1);
+assert.equal(initialUserDraft.planOwner, 'user');
+const executionLoggedGraph = taskGraph.recordTaskExecutionEvent(approvedPlannedGraph, {
+  graphNodeId: plannedIds.implement, agent: coder,
+}, 'started');
+assert.equal(executionLoggedGraph.executionLog.at(-1).compliant, true);
+const freeExecutionLog = taskGraph.recordTaskExecutionEvent(taskGraph.createTaskGraph('free-log'), {
+  graphNodeId: 'dynamic-task', agent: coder,
+}, 'started');
+assert.equal(freeExecutionLog.executionLog.at(-1).compliant, null);
+const cyclicWorkflow = taskGraph.addTaskEdge(revisedPlannedGraph, {
+  from: revisedPlannedGraph.nodes.find(node => node.planTaskId === 'final-review').id,
+  to: plannedIds.implement,
+  kind: 'dependency',
+});
+assert.equal(taskGraph.validateWorkflowPlan(cyclicWorkflow).ok, false);
+assert.ok(taskGraph.validateWorkflowPlan(cyclicWorkflow).taskIds.includes(plannedIds.implement));
+const danglingWorkflow = taskGraph.addTaskEdge(revisedPlannedGraph, {
+  from: 'missing-task',
+  to: plannedIds['final-review'],
+  kind: 'dependency',
+});
+const danglingValidation = taskGraph.validateWorkflowPlan(danglingWorkflow);
+assert.equal(danglingValidation.ok, false);
+assert.match(danglingValidation.reason, /nicht vorhandenen Aufgabe/);
 assert.deepEqual(taskGraph.findSafeAutoParallelTaskIds(plannedGraph, [
   { graphNodeId: plannedIds.implement },
   { graphNodeId: plannedIds.docs },
   { graphNodeId: plannedIds.qa },
 ]), [plannedIds.implement, plannedIds.docs]);
-assert.match(taskGraph.validateParallelSelection(plannedGraph, [plannedIds.qa, plannedIds.docs]).reason, /sequenzieller Schritt/);
+assert.match(taskGraph.validateParallelSelection(plannedGraph, [plannedIds.qa, plannedIds.docs]).reason, /wartet noch/);
 plannedGraph = taskGraph.updateTaskNodeStatus(plannedGraph, plannedIds.implement, 'agent_done');
 assert.equal(taskGraph.isTaskNodeReady(plannedGraph, plannedIds.qa), true);
 plannedGraph = taskGraph.updateTaskNodeStatus(plannedGraph, plannedIds.docs, 'agent_done');
@@ -697,7 +1765,7 @@ acceptanceGraph = taskGraph.materializeTaskPlan(acceptanceGraph, {
   rootNodeId: 'acceptance-root',
   tasks: [{
     id: 'deliverable', title: 'Fachliches Ergebnis erstellen', agentId: coder.id, agentName: coder.name,
-    type: 'task', dependsOn: [], executionMode: 'sequential', order: 0,
+    type: 'task', dependsOn: [], order: 0,
     acceptanceCriteria: [
       { id: 'quality', text: 'Das Ergebnis erfüllt die fachlichen Anforderungen.', verification: 'reviewer', required: true },
       { id: 'user-release', text: 'Der User gibt das Ergebnis frei.', verification: 'user', required: true },
@@ -757,6 +1825,32 @@ assert.deepEqual(
   orchestration.orchestrate({ request: '@everyone prüfen', chatAgents: [pm, coder, tester], isEveryone: true }).agents,
   [pm],
 );
+assert.equal(orchestration.hasUserDirectedMention('Bitte @Max prüfe den Fehler.', 'Max'), true);
+assert.equal(orchestration.hasUserDirectedMention('```text\nBitte @Max nur als Beispiel\n```', 'Max'), false);
+assert.equal(orchestration.shouldRunAsWorkflowSideConversation({
+  chatType: 'group',
+  triggerText: 'Bitte @Max prüfe den Fehler.',
+  chatAgents: [pm, coder, tester],
+  continuation: { mode: 'planning', status: 'awaiting-schedule' },
+}), true);
+assert.equal(orchestration.shouldRunAsWorkflowSideConversation({
+  chatType: 'group',
+  triggerText: '@PM ändere den Plan.',
+  chatAgents: [pm, coder, tester],
+  continuation: { mode: 'planning' },
+}), false);
+assert.equal(orchestration.shouldMaterializeTaskPlan({
+  isOrchestrator: true, planningOnly: true, taskSource: 'user', hasApprovedPlan: true,
+}), false);
+assert.equal(orchestration.shouldMaterializeTaskPlan({
+  isOrchestrator: true, planningOnly: true, taskSource: 'user', hasApprovedPlan: false,
+}), true);
+assert.equal(orchestration.shouldMaterializeTaskPlan({
+  isOrchestrator: true, planningOnly: true, taskSource: 'user', hasApprovedPlan: false, userOwnedPlan: true,
+}), true);
+assert.equal(orchestration.shouldMaterializeTaskPlan({
+  isOrchestrator: true, planningOnly: false, taskSource: 'team-synthesis', hasApprovedPlan: true,
+}), false);
 const directBubbleSortHistory = [
   { id: 'd1', agentId: 'user', senderName: 'User', text: 'Kannst du mir Bubble Sort erklären?' },
   { id: 'd2', agentId: coder.id, senderName: coder.name, text: 'Bubble Sort vergleicht benachbarte Werte.' },
@@ -799,6 +1893,27 @@ assert.deepEqual(orchestration.buildRelevantConversationHistory({
   chatType: 'group',
   includeGroupContext: false,
 }), []);
+const requestRelevantContext = orchestration.buildRelevantConversationHistory({
+  history: [
+    { id: 'architecture', agentId: pm.id, text: 'Die OAuth-Architektur verwendet PKCE und kurzlebige Tokens.' },
+    { id: 'design', agentId: coder.id, text: 'Das Designsystem verwendet violette Schaltflächen.' },
+    { id: 'unrelated', agentId: tester.id, text: 'Der Termin für das Teammeeting steht fest.' },
+  ],
+  agent: pm,
+  chatType: 'group',
+  includeGroupContext: true,
+  query: 'Welche OAuth-Token-Architektur wird verwendet?',
+  requireQueryMatch: true,
+  groupLimit: 6,
+  maxCharacters: 1000,
+});
+assert.deepEqual(requestRelevantContext.map(message => message.id), ['architecture']);
+const relevantProjectInventory = orchestration.buildRelevantProjectInventoryContext({
+  files: [{ name: 'src/auth/oauth-client.js' }, { name: 'src/design/colors.css' }, { name: 'README.md' }],
+  objective: 'Prüfe den OAuth Client.',
+});
+assert.match(relevantProjectInventory, /oauth-client\.js/);
+assert.doesNotMatch(relevantProjectInventory, /colors\.css|README\.md/);
 
 assert.equal(orchestration.shouldRequestPMFinalReview({
   pm, agent: coder, taskSource: 'user', routeMode: 'explicit', explicitMentionCount: 1,
@@ -914,6 +2029,8 @@ assert.deepEqual(orchestration.extractUserQuestions(userQuestionReply), [
   'Welche Hauptfarbe soll verwendet werden?',
   'Soll ein vorhandenes Logo eingebunden werden?',
 ]);
+assert.deepEqual(orchestration.extractUserQuestions('Ergebnis vollständig geliefert.\n@user'), []);
+assert.deepEqual(orchestration.extractUserQuestions('@user\nWelche Variante soll verwendet werden?'), []);
 assert.deepEqual(orchestration.extractUserQuestions('```js\nconst owner = "@user";\n```'), []);
 assert.deepEqual(orchestration.extractUserQuestions('Im Fließtext steht @user: Soll das pausieren?'), []);
 assert.deepEqual(orchestration.extractUserQuestions('  @user Soll das eingerückt pausieren?'), []);
@@ -941,6 +2058,14 @@ assert.deepEqual(
   [autoParallelQueue.next().graphNodeId, autoParallelQueue.next().graphNodeId, autoParallelQueue.next().graphNodeId],
   ['parallel-a', 'parallel-b', 'sequential'],
 );
+const availableAgentQueue = new orchestration.AgentTaskQueue({ maxTurns: 8, maxTurnsPerAgent: 3 });
+availableAgentQueue.enqueue({ agent: coder, objective: 'Max arbeitet bereits', graphNodeId: 'max-busy' });
+availableAgentQueue.enqueue({ agent: tester, objective: 'Lisa kann nachrücken', graphNodeId: 'lisa-ready' });
+assert.equal(
+  availableAgentQueue.nextMatching(candidate => candidate.agent.id !== coder.id).graphNodeId,
+  'lisa-ready',
+);
+assert.equal(availableAgentQueue.next().graphNodeId, 'max-busy');
 const providerRetryQueue = new orchestration.AgentTaskQueue({ maxTurns: 2, maxTurnsPerAgent: 1 });
 providerRetryQueue.enqueue({ agent: coder, objective: 'Temporär begrenzter Task', source: 'PM' });
 const limitedTask = providerRetryQueue.next();
@@ -982,11 +2107,42 @@ const timeoutRecoveryTask = orchestration.buildTimeoutRecoveryTask({
   originalAgent: coder,
   objective: 'Implementiere die gesamte Anwendung in einem Schritt.',
   errorMessage: '120s ohne Aktivität',
+  originalGraphNodeId: 'approved-original-task',
+  planRootId: 'approved-plan-root',
 });
 assert.equal(timeoutRecoveryTask.agent.name, 'PM');
 assert.equal(timeoutRecoveryTask.source, 'timeout-recovery');
 assert.equal(timeoutRecoveryTask.recovery.originalAgentName, 'Max');
+assert.equal(timeoutRecoveryTask.recovery.originalGraphNodeId, 'approved-original-task');
+assert.equal(timeoutRecoveryTask.recovery.pmAgentId, pm.id);
+assert.equal(timeoutRecoveryTask.runtimeRecovery, true);
+assert.equal(timeoutRecoveryTask.planRootId, 'approved-plan-root');
 assert.match(timeoutRecoveryTask.handoff.summary, /ausschließlich den ersten ausführbaren Schritt/);
+const qualityRecoveryTask = orchestration.buildTimeoutRecoveryTask({
+  pm,
+  originalAgent: coder,
+  objective: 'Eine fachlich zu große Aufgabe.',
+  errorMessage: 'Qualitätskriterien nach Eskalation nicht erfüllt',
+  originalGraphNodeId: 'approved-quality-task',
+  planRootId: 'approved-plan-root',
+  trigger: 'quality',
+});
+assert.equal(qualityRecoveryTask.recovery.trigger, 'quality');
+assert.equal(qualityRecoveryTask.recovery.originalStatus, 'blocked');
+assert.match(qualityRecoveryTask.handoff.summary, /Qualitäts-Recovery/);
+const problemRecoveryTask = orchestration.buildTimeoutRecoveryTask({
+  pm,
+  originalAgent: coder,
+  objective: 'Eine Aufgabe ist mit einem Ausführungsfehler abgebrochen.',
+  errorMessage: 'Werkzeug lieferte kein verwertbares Ergebnis',
+  originalGraphNodeId: 'approved-problem-task',
+  planRootId: 'approved-plan-root',
+  trigger: 'error',
+});
+assert.equal(problemRecoveryTask.recovery.trigger, 'error');
+assert.equal(problemRecoveryTask.recovery.originalStatus, 'blocked');
+assert.match(problemRecoveryTask.handoff.summary, /Problem-Recovery/);
+assert.match(problemRecoveryTask.handoff.findings.join('\n'), /@user/);
 const timeoutPriorityQueue = new orchestration.AgentTaskQueue();
 timeoutPriorityQueue.enqueue({ agent: tester, objective: 'Wartende QA-Aufgabe', source: 'PM' });
 timeoutPriorityQueue.prepend([timeoutRecoveryTask]);
@@ -998,7 +2154,20 @@ const timeoutReviewTask = orchestration.buildTimeoutRecoveryReviewTask({
   result: 'Grundgerüst fertig.',
 });
 assert.equal(timeoutReviewTask.agent.name, 'PM');
+assert.equal(timeoutReviewTask.runtimeRecovery, true);
+assert.equal(timeoutReviewTask.recovery.originalGraphNodeId, 'approved-original-task');
 assert.match(timeoutReviewTask.handoff.findings.join(' '), /Grundgerüst fertig/);
+const workflowRecoveryPrompt = orchestration.buildIsolatedSystemPrompt({
+  agent: pm,
+  groupName: 'Recovery-Team',
+  groupAgents: [pm, coder],
+  isOrchestrator: true,
+  userOwnedWorkflow: true,
+  recoveryMode: true,
+});
+assert.match(workflowRecoveryPrompt, /automatisch ausgelöste Timeout-Recovery/);
+assert.match(workflowRecoveryPrompt, /höchstens EINEN kleinen/);
+assert.match(workflowRecoveryPrompt, /freigegebene User-Plan bleibt unverändert/);
 const turnLimitReviewTask = orchestration.buildTurnLimitReviewTask({
   pm,
   initialObjective: 'Baue und teste die Anwendung.',
@@ -1122,6 +2291,7 @@ assert.match(parsedArtifacts[1].content, /```bash\nnpm start\n```/);
 assert.equal(orchestration.hasProjectDoneSignal(artifactReply), true);
 assert.doesNotMatch(orchestration.cleanAgentReply(artifactReply), /console\.log|PROJECT_DONE/);
 assert.doesNotMatch(orchestration.cleanAgentReply(artifactReply), /README\.mdbash|npm start/);
+assert.doesNotMatch(orchestration.cleanAgentReply('Gelöst. [[RECOVERY_RESOLVED]]'), /RECOVERY_RESOLVED/);
 const reviewEvidence = orchestration.buildProjectReviewEvidence({
   displayReply: orchestration.cleanAgentReply(artifactReply),
   projectFiles: parsedArtifacts,
@@ -1132,9 +2302,9 @@ assert.match(reviewEvidence, /## Bedienung/);
 const structuredPlanReply = [
   '[[TASK_PLAN]]',
   '{"tasks":[',
-  '{"id":"implement","title":"CMD implementieren","agent":"Max","type":"task","parentId":null,"dependsOn":[],"executionMode":"parallel","acceptanceCriteria":[{"id":"starts","text":"Die CMD-Datei startet den vorgesehenen Ablauf.","required":true,"verification":"automatic"}]},',
-  '{"id":"qa","title":"CMD testen","agent":"Lisa","type":"task","parentId":null,"dependsOn":["implement"],"executionMode":"sequential"},',
-  '{"id":"final-review","title":"Finale PM-Abnahme","agent":"PM","type":"review","parentId":null,"dependsOn":["qa"],"executionMode":"sequential"}',
+  '{"id":"implement","title":"CMD implementieren","agent":"Max","type":"task","parentId":null,"dependsOn":[],"acceptanceCriteria":[{"id":"starts","text":"Die CMD-Datei startet den vorgesehenen Ablauf.","required":true,"verification":"automatic"}]},',
+  '{"id":"qa","title":"CMD testen","agent":"Lisa","type":"task","parentId":null,"dependsOn":["implement"]},',
+  '{"id":"final-review","title":"Finale PM-Abnahme","agent":"PM","type":"review","parentId":null,"dependsOn":["qa"]}',
   ']}',
   '[[/TASK_PLAN]]',
   'Der vollständige Weg ist geplant.',
@@ -1190,8 +2360,8 @@ assert.equal(distributedDeveloperTasks[3].agent, 'PM');
 const parallelRolePlan = orchestration.extractTaskPlan([
   '[[TASK_PLAN]]',
   '{"tasks":[',
-  '{"id":"frontend","title":"Frontend-Modul erstellen","agent":"Max","type":"task","dependsOn":[],"executionMode":"parallel"},',
-  '{"id":"backend","title":"Backend-Modul erstellen","agent":"Max","type":"task","dependsOn":[],"executionMode":"parallel"}',
+  '{"id":"frontend","title":"Frontend-Modul erstellen","agent":"Max","type":"task","dependsOn":[]},',
+  '{"id":"backend","title":"Backend-Modul erstellen","agent":"Max","type":"task","dependsOn":[]}',
   ']}',
   '[[/TASK_PLAN]]',
 ].join('\n'));
@@ -1222,7 +2392,7 @@ const projectPrompt = orchestration.buildIsolatedSystemPrompt({
 });
 assert.match(projectPrompt, /````file:relativer\/pfad\.ext/);
 assert.match(projectPrompt, /\[\[PROJECT_DONE\]\]/);
-assert.match(projectPrompt, /abschließenden Final-Review/);
+assert.match(projectPrompt, /Abschluss-Review durch, sofern einer vorgesehen ist/);
 assert.match(projectPrompt, /Ist noch etwas offen/);
 assert.match(projectPrompt, /keine zusätzlichen README-/);
 assert.match(projectPrompt, /AUFGABENPLAN/);
@@ -1232,6 +2402,49 @@ assert.match(projectPrompt, /Max \(Developer\)/);
 assert.match(projectPrompt, /Rollenpool mit mindestens zwei Agenten/);
 assert.match(projectPrompt, /gemeinsamen Arbeitsbereich freigegeben/);
 assert.match(projectPrompt, /Verändere niemals \.git, \.svn oder node_modules/);
+const planningPrompt = orchestration.buildIsolatedSystemPrompt({
+  agent: pm,
+  groupName: 'Dev Team',
+  groupAgents: [pm, coder, coderTwo],
+  isOrchestrator: true,
+  planningMode: true,
+});
+assert.match(planningPrompt, /PM im Planungsmodus/);
+assert.match(planningPrompt, /Rückfrage[\s\S]*eigenen Zeile mit "@user" beginnen/);
+assert.doesNotMatch(planningPrompt, /keine @Agent- oder @user-Zeilen/);
+assert.match(planningPrompt, /ausschließlich über den UI-Button/);
+assert.doesNotMatch(planningPrompt, /gemeinsamen Arbeitsbereich freigegeben/);
+const userOwnedPlanningPrompt = orchestration.buildIsolatedSystemPrompt({
+  agent: pm,
+  groupName: 'Dev Team',
+  groupAgents: [pm, coder, coderTwo],
+  isOrchestrator: true,
+  planningMode: true,
+  userOwnedWorkflow: true,
+});
+assert.match(userOwnedPlanningPrompt, /PLANUNGSMODUS/);
+assert.match(userOwnedPlanningPrompt, /nicht mehr benötigte oder fehlerhafte Aufgaben entfernen/);
+assert.match(userOwnedPlanningPrompt, /Entwurf enthält Entscheidungen des Users/);
+assert.match(userOwnedPlanningPrompt, /vollständigen Workflow als gültigen \[\[TASK_PLAN\]\]-Block/);
+assert.match(userOwnedPlanningPrompt, /Rückfrage[\s\S]*"@user" beginnen/);
+const userOwnedPmPrompt = orchestration.buildIsolatedSystemPrompt({
+  agent: pm,
+  groupName: 'Dev Team',
+  groupAgents: [pm, coder, coderTwo],
+  isOrchestrator: true,
+  userOwnedWorkflow: true,
+});
+assert.match(userOwnedPmPrompt, /VERBINDLICHER USER-PLAN/);
+assert.match(userOwnedPmPrompt, /Delegiere keine neue Arbeit/);
+assert.match(userOwnedPmPrompt, /Nur der User kann/);
+const userOwnedSpecialistPrompt = orchestration.buildIsolatedSystemPrompt({
+  agent: coder,
+  groupName: 'Dev Team',
+  groupAgents: [pm, coder, coderTwo],
+  userOwnedWorkflow: true,
+});
+assert.match(userOwnedSpecialistPrompt, /frage den PM oder User/);
+assert.match(userOwnedSpecialistPrompt, /verändere den Plan nicht/);
 const sharedProjectFileContext = orchestration.buildSharedProjectFileContext({
   agentName: 'Max',
   projectFiles: [
@@ -1259,7 +2472,7 @@ assert.match(directChatPrompt, /direkten Einzelchat/);
 assert.match(directChatPrompt, /kein PM vorgeschaltet/);
 assert.match(directChatPrompt, /Antworte unmittelbar selbst/);
 assert.doesNotMatch(directChatPrompt, /Du bist der Orchestrator/);
-assert.doesNotMatch(directChatPrompt, /abschließenden Final-Review/);
+assert.doesNotMatch(directChatPrompt, /VERBINDLICHER USER-PLAN/);
 
 const memoryStore = new Map();
 const localMemoryRuntime = require(path.join(root, 'electron/memory-local.js'));
@@ -1278,12 +2491,35 @@ const memory = await importSource('src/memory-provider.js');
 const sharedA = memory.getMemoryAPI({ provider: 'local', namespace: 'shared-project' });
 const sharedB = memory.getMemoryAPI({ provider: 'local', namespace: 'shared-project' });
 await sharedA.clear('shared-project');
+await sharedA.clear('cross-group-memory-test');
+const observedMemoryChanges = [];
+const unsubscribeMemoryChanges = sharedB.subscribe(change => observedMemoryChanges.push(change));
 const localMemoryEntry = memory.createEntry({
   type: 'decision', namespace: 'shared-project', content: 'PostgreSQL verwenden', tags: ['database'], author: 'PM',
 });
 await sharedA.write('shared-project', localMemoryEntry);
+assert.equal(observedMemoryChanges.at(-1).type, 'write');
+assert.equal(observedMemoryChanges.at(-1).namespace, 'shared-project');
 assert.equal((await sharedB.list('shared-project')).length, 1);
 assert.equal((await sharedB.search('shared-project', 'PostgreSQL', 5))[0].type, 'decision');
+const crossGroupMemoryEntry = memory.createCrossGroupResultEntry({
+  namespace: 'cross-group-memory-test',
+  requestId: 'request-42',
+  requestKind: 'task_delegation',
+  question: 'Welche Architektur ist freigegeben?',
+  answer: 'Die modulare Architektur ist geprüft.',
+  sourceGroupId: 'dev',
+  sourceGroupName: 'Dev',
+  targetGroupId: 'tech',
+  targetGroupName: 'Tech',
+  sourceTaskId: 'task-1',
+  sourceTaskTitle: 'Architektur klären',
+  author: 'Tech PM',
+});
+assert.equal((await sharedA.writeOnce('cross-group-memory-test', crossGroupMemoryEntry)).created, true);
+assert.equal((await sharedB.writeOnce('cross-group-memory-test', crossGroupMemoryEntry)).created, false);
+assert.equal((await sharedA.list('cross-group-memory-test')).length, 1);
+assert.equal(crossGroupMemoryEntry.provenance.requestId, 'request-42');
 await Promise.all([
   sharedA.write('parallel-project', memory.createEntry({
     type: 'finding', namespace: 'parallel-project', content: 'Parallel A', tags: ['parallel'], author: 'Max',
@@ -1296,6 +2532,7 @@ assert.equal((await sharedA.list('parallel-project')).length, 2);
 await sharedA.handoff('shared-project', {
   from: 'Max', to: 'Lisa', taskId: 'task-shared', summary: 'Bitte Ergebnis prüfen.', findings: ['A'],
 });
+assert.equal(observedMemoryChanges.at(-1).entry.type, 'handoff');
 await sharedA.handoff('shared-project', {
   from: 'Tom', to: 'Max', taskId: 'task-max', summary: 'Prüfung nur für Max.', findings: ['C'],
 });
@@ -1308,11 +2545,17 @@ assert.doesNotMatch(lisaSharedContext, /Prüfung nur für Max/);
 assert.doesNotMatch(lisaSharedContext, /Andere Gruppe/);
 assert.equal(memoryStore.has('memspace:_handoff_Lisa'), false);
 assert.deepEqual(await sharedB.delete('shared-project', localMemoryEntry.id), { ok: true, deleted: true });
+assert.equal(observedMemoryChanges.at(-1).type, 'delete');
 assert.deepEqual((await sharedA.list('shared-project')).map(entry => entry.type), ['handoff', 'handoff']);
 assert.deepEqual(await sharedB.delete('shared-project', localMemoryEntry.id), { ok: false, deleted: false });
 await sharedB.clear('shared-project');
+assert.equal(observedMemoryChanges.at(-1).type, 'clear');
+const observedBeforeUnsubscribe = observedMemoryChanges.length;
+unsubscribeMemoryChanges();
 await sharedB.clear('parallel-project');
 await sharedB.clear('other-project');
+await sharedB.clear('cross-group-memory-test');
+assert.equal(observedMemoryChanges.length, observedBeforeUnsubscribe);
 assert.equal((await sharedA.list('shared-project')).length, 0);
 
 const chatAttachments = require(path.join(root, 'electron/chat-attachments.js'));
@@ -1387,6 +2630,18 @@ try {
     type: 'finding', namespace: 'shared-project', content: 'Datei-Memory funktioniert', tags: ['json'], author: 'Lisa',
   });
   await fileMemory.write('shared-project', fileEntry);
+  const fileCrossGroupEntry = memory.createCrossGroupResultEntry({
+    namespace: 'shared-project',
+    requestId: 'file-request-42',
+    question: 'Welche Datei gilt?',
+    answer: 'Die freigegebene JSON-Datei gilt.',
+    sourceGroupId: 'source',
+    sourceGroupName: 'Source',
+    targetGroupId: 'target',
+    targetGroupName: 'Target',
+  });
+  assert.equal((await fileMemory.writeOnce('shared-project', fileCrossGroupEntry)).created, true);
+  assert.equal((await fileMemory.writeOnce('shared-project', fileCrossGroupEntry)).created, false);
   await fileMemory.write('second-space', memory.createEntry({
     type: 'fact', namespace: 'second-space', content: 'Getrennter Namespace', tags: ['separate'], author: 'PM',
   }));
@@ -1406,7 +2661,7 @@ try {
   assert.equal(storedMemory.version, 1);
   assert.deepEqual(Object.keys(storedMemory.namespaces).sort(), ['second-space', 'shared-project']);
   assert.deepEqual(await fileMemory.delete('shared-project', fileEntry.id), { ok: true, deleted: true });
-  assert.equal((await fileMemory.list('shared-project')).length, 1);
+  assert.equal((await fileMemory.list('shared-project')).length, 2);
   assert.deepEqual(await fileMemory.delete('shared-project', fileEntry.id), { ok: false, deleted: false });
   await fileMemory.clear('shared-project');
   assert.equal((await fileMemory.list('shared-project')).length, 0);
@@ -1434,6 +2689,7 @@ assert.equal(claude.resolveClaudeCommand({ platform: 'linux' }), 'claude');
 assert.equal(claude.fallbackModelFor('claude-opus-4-5'), 'sonnet');
 assert.equal(claude.fallbackModelFor('claude-sonnet-4-5'), null);
 assert.equal(claude.isClaudeRateLimitMessage('You have hit your usage limit'), true);
+assert.equal(claude.isClaudeRateLimitMessage("You've hit your session limit · resets 2am (Europe/Berlin)"), true);
 assert.equal(claude.parseClaudeResult('{"type":"result","result":"ok"}').result, 'ok');
 assert.equal(claude.cancelClaudeRun('nicht-vorhanden').ok, false);
 const claudeAttachmentPath = path.join(os.tmpdir(), 'attachment.bin');
@@ -1577,7 +2833,7 @@ try {
 
 console.log(JSON.stringify({
   ok: true,
-  checks: ['no-artificial-agent-delay', 'safe-auto-parallel-batching', 'lean-fast-mode', 'configurable-run-limits', 'pm-turn-limit-review', 'resumable-run-segments', 'agent-teams-window-branding', 'typing-agent-identity', 'always-focused-chat-composer', 'draft-while-agent-runs', 'persistent-user-request-queue', 'global-agent-role-catalog', 'legacy-agent-role-migration', 'routing', 'direct-chat-conversation-history', 'directed-group-context-window', 'direct-specialist-without-pm-review', 'explicit-memory-commands', 'manual-memory-entry', 'quality-cascade-policy', 'quality-deterministic-gates', 'quality-chat-controls', 'custom-provider-quality-cascade', 'direct-chat-without-pm', 'mixed-provider-routing', 'generic-provider-presets', 'encrypted-provider-credentials', 'provider-protocol-routing', 'claude-cli-oauth-routing', 'anthropic-api-key-routing', 'claude-rate-limit-metadata', 'retryable-provider-queue', 'retry-after-parsing', 'claude-opus-sonnet-fallback', 'claude-cli-status', 'claude-windows-native-path', 'group-output-folder-notice', 'browser-file-attachments', 'persistent-file-attachments', 'provider-native-file-payloads', 'cli-file-access', 'detached-singleton-task-window', 'memory-entry-delete-controls', 'multi-handoffs', 'strict-line-start-mentions', 'left-aligned-mention-layout', 'code-block-mention-isolation', 'direct-user-question-display', 'multi-turn-task-queue', 'direct-handoff-priority', 'deferred-pm-handoff', 'timeout-detection', 'immediate-pm-timeout-recovery', 'stepwise-timeout-review', 'persistent-conversation-checkpoint', 'interrupted-agent-checkpoint', 'resume-without-restarting-pm', 'short-agent-activity', 'pm-final-review-rules', 'pause-resume-user-handoff', 'persistent-task-graph', 'generic-acceptance-evidence-gate', 'initial-pm-plan-protocol', 'upfront-plan-materialization', 'planned-future-gating', 'sequential-plan-selection-guard', 'agent-role-pool-distribution', 'delegation-tree-hierarchy', 'dependency-cross-links', 'multi-result-review-placement', 'legacy-graph-tree-migration', 'agent-subtask-branching', 'graph-dependencies', 'parallel-selection-validation', 'parallel-batch-execution', 'parallel-file-conflict-guard', 'pm-task-approval', 'project-artifact-protocol', 'nested-markdown-artifact-fences', 'project-review-evidence', 'rephrased-file-task-loop-guard', 'persistent-loop-guard', 'safe-project-writes', 'project-completion-signal', 'task-capsules', 'isolated-sessions', 'shared-local-memory', 'shared-json-file-memory', 'versioned-memory-file', 'legacy-memory-file-migration', 'mcp-global-group-merge', 'mcp-official-excalidraw-preset', 'mcp-official-perplexity-preset', 'mcp-direct-chat-global-access', 'mcp-tool-permission-gate', 'mcp-global-tool-catalog', 'mcp-global-tool-policy', 'mcp-unknown-tool-asks', 'full-screen-settings', 'mcp-persistent-chat-grants', 'mcp-once-grant-consumed-on-invocation', 'mcp-timeout-keeps-pending-once-grant', 'mcp-permission-wording-recovery', 'mcp-neutral-json-planner', 'mcp-ui-result-short-circuit', 'mcp-denied-tool-path', 'mcp-app-tool-filtering', 'excalidraw-inline-preview', 'mcp-call-protocol', 'mcp-provider-neutral-tool-loop', 'mcp-stdio-integration', 'codex-progress-events', 'codex-cancel-routing', 'codex-status'],
+  checks: ['portable-workflow-import-export', 'cross-group-memory-writeback', 'no-artificial-agent-delay', 'safe-auto-parallel-batching', 'work-conserving-workflow-scheduler', 'lean-fast-mode', 'configurable-run-limits', 'pm-turn-limit-review', 'resumable-run-segments', 'agent-teams-window-branding', 'typing-agent-identity', 'always-focused-chat-composer', 'draft-while-agent-runs', 'persistent-user-request-queue', 'global-agent-role-catalog', 'legacy-agent-role-migration', 'routing', 'direct-chat-conversation-history', 'directed-group-context-window', 'direct-specialist-without-pm-review', 'explicit-memory-commands', 'manual-memory-entry', 'quality-cascade-policy', 'quality-deterministic-gates', 'quality-chat-controls', 'custom-provider-quality-cascade', 'direct-chat-without-pm', 'mixed-provider-routing', 'generic-provider-presets', 'encrypted-provider-credentials', 'provider-protocol-routing', 'claude-cli-oauth-routing', 'anthropic-api-key-routing', 'claude-rate-limit-metadata', 'retryable-provider-queue', 'retry-after-parsing', 'claude-opus-sonnet-fallback', 'claude-cli-status', 'claude-windows-native-path', 'group-output-folder-notice', 'browser-file-attachments', 'persistent-file-attachments', 'provider-native-file-payloads', 'cli-file-access', 'detached-singleton-task-window', 'memory-entry-delete-controls', 'multi-handoffs', 'strict-line-start-mentions', 'left-aligned-mention-layout', 'code-block-mention-isolation', 'direct-user-question-display', 'multi-turn-task-queue', 'direct-handoff-priority', 'deferred-pm-handoff', 'timeout-detection', 'immediate-pm-timeout-recovery', 'stepwise-timeout-review', 'persistent-conversation-checkpoint', 'interrupted-agent-checkpoint', 'resume-without-restarting-pm', 'short-agent-activity', 'pm-final-review-rules', 'pause-resume-user-handoff', 'persistent-task-graph', 'generic-acceptance-evidence-gate', 'initial-pm-plan-protocol', 'upfront-plan-materialization', 'planned-future-gating', 'dependency-readiness-guard', 'agent-role-pool-distribution', 'delegation-tree-hierarchy', 'dependency-cross-links', 'multi-result-review-placement', 'legacy-graph-tree-migration', 'agent-subtask-branching', 'graph-dependencies', 'parallel-selection-validation', 'parallel-batch-execution', 'parallel-file-conflict-guard', 'pm-task-approval', 'project-artifact-protocol', 'nested-markdown-artifact-fences', 'project-review-evidence', 'rephrased-file-task-loop-guard', 'persistent-loop-guard', 'safe-project-writes', 'project-completion-signal', 'task-capsules', 'isolated-sessions', 'shared-local-memory', 'shared-json-file-memory', 'versioned-memory-file', 'legacy-memory-file-migration', 'mcp-global-group-merge', 'mcp-official-excalidraw-preset', 'mcp-official-perplexity-preset', 'mcp-direct-chat-global-access', 'mcp-tool-permission-gate', 'mcp-global-tool-catalog', 'mcp-global-tool-policy', 'mcp-unknown-tool-asks', 'full-screen-settings', 'mcp-persistent-chat-grants', 'mcp-once-grant-consumed-on-invocation', 'mcp-timeout-keeps-pending-once-grant', 'mcp-permission-wording-recovery', 'mcp-neutral-json-planner', 'mcp-ui-result-short-circuit', 'mcp-denied-tool-path', 'mcp-app-tool-filtering', 'excalidraw-inline-preview', 'mcp-call-protocol', 'mcp-provider-neutral-tool-loop', 'mcp-stdio-integration', 'codex-progress-events', 'codex-cancel-routing', 'codex-status'],
   codex: codexStatus,
   claude: claudeStatus,
 }, null, 2));

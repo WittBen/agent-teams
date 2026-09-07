@@ -1,10 +1,10 @@
 const { normalizeProviderConnections } = require('./provider-config');
 
-const CURRENT_DATA_SCHEMA_VERSION = 4;
+const CURRENT_DATA_SCHEMA_VERSION = 7;
 
 const ARRAY_KEYS = ['agents', 'groups', 'mcpServers', 'agentRoles', 'providerConnections'];
 const OBJECT_KEYS = [
-  'messages', 'conversationStates', 'userRequestQueues', 'taskGraphs', 'groupMemory', 'mcpPermissions',
+  'messages', 'conversationStates', 'userRequestQueues', 'taskGraphs', 'crossGroupRequests', 'groupMemory', 'mcpPermissions',
   'conversationLimits', 'qualityRouting', 'qualityStats',
 ];
 
@@ -64,6 +64,39 @@ function migrateAppData(store) {
             testTimeoutMs: 120000,
           },
       })));
+    }
+  }
+
+  if (previousVersion < 5 && store.get('crossGroupRequests') === undefined) {
+    store.set('crossGroupRequests', {});
+  }
+
+  if (previousVersion < 6) {
+    const agents = store.get('agents');
+    if (Array.isArray(agents)) {
+      store.set('agents', agents.map(agent => ({
+        ...agent,
+        capabilities: Array.isArray(agent?.capabilities) ? agent.capabilities : [],
+      })));
+    }
+  }
+
+  if (previousVersion < 7) {
+    const groups = store.get('groups');
+    if (Array.isArray(groups)) {
+      store.set('groups', groups.map(group => {
+        const { crossGroupTargetGroupId, ...groupFields } = group || {};
+        const rawTargetIds = Array.isArray(group?.crossGroupTargetGroupIds)
+          ? group.crossGroupTargetGroupIds
+          : (crossGroupTargetGroupId ? [crossGroupTargetGroupId] : []);
+        return {
+          ...groupFields,
+          crossGroupCollaborationEnabled: group?.crossGroupCollaborationEnabled === true,
+          crossGroupTargetGroupIds: [...new Set(rawTargetIds
+            .map(id => String(id || '').trim().slice(0, 200))
+            .filter(Boolean))].slice(0, 30),
+        };
+      }));
     }
   }
 
