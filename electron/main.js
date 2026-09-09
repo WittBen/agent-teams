@@ -3,21 +3,23 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const Store = require('electron-store');
-const { callAnthropicMessages, callConfiguredProvider, httpsPostDirect } = require('./llm-main');
+const { callAnthropicMessages, callConfiguredProvider, callOpenAIChat } = require('./llm-main');
 const { AgentAPIServer } = require('./api-server');
-const { callCodexCLI, cancelCodexRun, getCodexStatus, startCodexLogin } = require('./codex-main');
+const { callCodexCLI, cancelCodexRun, getCodexStatus, startCodexLogin, stopCodexAppServer } = require('./codex-main');
 const { callClaudeCLI, cancelClaudeRun, getClaudeStatus } = require('./claude-main');
 const { writeProjectFile, listProjectFiles } = require('./project-files');
 const { createArtifactSandbox } = require('./artifact-sandbox');
 const { ReviewRunner, commandFingerprint, normalizeReviewEnvironment } = require('./review-runner');
 const { ensureMemoryFile, operateMemoryFile, validateMemoryFilePath } = require('./memory-file');
 const { createLocalMemoryOperationQueue } = require('./memory-local');
+const { operateLearning } = require('./learning-store');
 const { McpManager, configFingerprint, normalizeServer } = require('./mcp-manager');
 const { ensureOfficialMcpPreset } = require('./mcp-preset');
 const { createCredentialStore } = require('./credential-store');
 const { migrateAppData } = require('./app-migrations');
 const { assertAllowedStateKey, createSenderValidator } = require('./ipc-security');
 const { findProviderConnection, normalizeProviderConnections } = require('./provider-config');
+const { createTaskTicketStore } = require('./task-ticket-store');
 const {
   attachmentData,
   appendAttachmentContext,
@@ -48,6 +50,12 @@ const credentialStore = createCredentialStore(store, safeStorage);
 const assertTrustedSender = createSenderValidator({ appRoot: path.join(__dirname, '..'), isDev });
 const artifactSandbox = createArtifactSandbox({ snapshotRoot: path.join(app.getPath('userData'), 'artifact-snapshots') });
 const queueLocalMemoryOperation = createLocalMemoryOperationQueue(store);
+const taskTicketStore = createTaskTicketStore({
+  projectPathForChat(chatId) {
+    const group = (store.get('groups') || []).find(candidate => candidate.id === chatId);
+    return group?.projectPath || store.get('projectPath') || null;
+  },
+});
 
 function handleIpc(channel, handler) {
   ipcMain.handle(channel, (event, ...args) => {
@@ -164,29 +172,28 @@ if (!hasSingleInstanceLock) {
   });
 }
 
+function sendLlmProgress(event, requestId, provider, progress, legacyChannel = '') {
+  if (event.sender.isDestroyed()) return;
+  const payload = { requestId, provider, ...progress };
+  event.sender.send('llm-progress', payload);
+  if (legacyChannel) event.sender.send(legacyChannel, payload);
+}
+
 handleIpc('codex-call', async (event, params = {}) => {
   if (credentialStore.getProviderSettings().codexCli === false) {
     return { error: 'Codex CLI wurde in den Einstellungen getrennt.', status: 401, disconnected: true };
   }
   return callCodexCLI({
     ...prepareCliAttachmentParams(params),
-    onProgress: (progress) => {
-      if (!event.sender.isDestroyed()) {
-        event.sender.send('codex-progress', { requestId: params.requestId, ...progress });
-      }
-    },
+    onProgress: progress => sendLlmProgress(event, params.requestId, 'codex', progress, 'codex-progress'),
   });
 });
 handleIpc('codex-cancel', async (_, requestId) => cancelCodexRun(requestId));
-handleIpc('codex-status', async () => getCodexStatus());
+handleIpc('codex-status', async (_, options = {}) => getCodexStatus({ force: options.force === true }));
 handleIpc('codex-login', async () => startCodexLogin());
 handleIpc('claude-call', async (event, params = {}) => callClaudeCLI({
   ...prepareCliAttachmentParams(params),
-  onProgress: (progress) => {
-    if (!event.sender.isDestroyed()) {
-      event.sender.send('claude-progress', { requestId: params.requestId, ...progress });
-    }
-  },
+  onProgress: progress => sendLlmProgress(event, params.requestId, 'anthropic', progress, 'claude-progress'),
 }));
 handleIpc('claude-cancel', async (_, requestId) => cancelClaudeRun(requestId));
 handleIpc('claude-status', async () => getClaudeStatus());
@@ -320,28 +327,34 @@ handleIpc('mcp-test-server', async (event, { server } = {}) => (
 handleIpc('mcp-disconnect', async (_, serverId) => mcpManager.disconnect(serverId));
 
 // ── LLM API call via IPC ──────────────────────────────────────────────────────
-handleIpc('llm-call', async (_, { provider, model, systemContent, merged, cwd, attachments = [] }) => {
+const activeApiRequests = new Map();
+handleIpc('llm-cancel', (event, requestId) => {
+  const controller = activeApiRequests.get(`${event.sender.id}:${requestId}`);
+  controller?.abort();
+  return { cancelled: !!controller };
+});
+handleIpc('llm-call', async (event, { provider, model, systemContent, merged, cwd, attachments = [], requestId = '' }) => {
+  const key = `${event.sender.id}:${requestId}`;
+  const controller = new AbortController();
+  if (requestId) activeApiRequests.set(key, controller);
   try {
+    const onProgress = progress => sendLlmProgress(event, requestId, provider, progress);
     if (provider === 'codex') {
       if (credentialStore.getProviderSettings().codexCli === false) {
         return { error: 'Codex CLI wurde in den Einstellungen getrennt.', status: 401, disconnected: true };
       }
-      return callCodexCLI(prepareCliAttachmentParams({ systemContent, merged, model, cwd, attachments }));
+      return await callCodexCLI(prepareCliAttachmentParams({ systemContent, merged, model, cwd, attachments, requestId, onProgress }));
     }
     if (provider === 'anthropic') {
       const apiKey = credentialStore.getSecret('anthropic');
       if (!apiKey) return { error: 'Anthropic ist nicht konfiguriert.', status: 401 };
       const prepared = prepareApiMessages({ messages: merged, attachments, root: chatAttachmentsRoot(), provider: 'anthropic' });
-      return callAnthropicMessages({ auth: { type: 'api-key', value: apiKey }, model, systemContent, messages: prepared.messages });
+      return await callAnthropicMessages({ auth: { type: 'api-key', value: apiKey }, model, systemContent, messages: prepared.messages, onProgress, signal: controller.signal });
     } else if (provider === 'openai') {
       const apiKey = credentialStore.getSecret('openai');
       if (!apiKey) return { error: 'OpenAI ist nicht konfiguriert.', status: 401 };
       const prepared = prepareApiMessages({ messages: merged, attachments, root: chatAttachmentsRoot(), provider: 'openai' });
-      const headers = { 'content-type': 'application/json', 'Authorization': `Bearer ${apiKey}` };
-      const res = await httpsPostDirect('api.openai.com', '/v1/chat/completions', headers,
-        JSON.stringify({ model, messages: [{ role: 'system', content: systemContent }, ...prepared.messages], temperature: 0.85, max_tokens: 300 }));
-      if (res.body.error) return { error: res.body.error.message, status: res.status };
-      return { text: res.body.choices?.[0]?.message?.content || '' };
+      return await callOpenAIChat({ apiKey, model, systemContent, messages: prepared.messages, onProgress, signal: controller.signal });
     }
     const connection = findProviderConnection(store.get('providerConnections'), provider);
     if (!connection) return { error: 'Der konfigurierte API-Provider wurde nicht gefunden.', status: 404 };
@@ -349,9 +362,9 @@ handleIpc('llm-call', async (_, { provider, model, systemContent, merged, cwd, a
     if (connection.requiresApiKey && !apiKey) return { error: `Für „${connection.name}“ ist kein API-Key konfiguriert.`, status: 401 };
     const attachmentProtocol = connection.protocol === 'anthropic' ? 'anthropic' : 'openai';
     const prepared = prepareApiMessages({ messages: merged, attachments, root: chatAttachmentsRoot(), provider: attachmentProtocol });
-    return callConfiguredProvider({ connection, apiKey, model, systemContent, messages: prepared.messages });
+    return await callConfiguredProvider({ connection, apiKey, model, systemContent, messages: prepared.messages, onProgress, signal: controller.signal });
   } catch (e) {
-    return { error: e.message };
+    return { error: e.message, cancelled: controller.signal.aborted };
   }
 });
 // Run bundled MCP migrations before the renderer reads its initial state. This
@@ -399,6 +412,13 @@ async function deleteConversationData(chatId, { keepGroup = false } = {}) {
     reviewRunner.stop({ chatId: safeChatId, action: 'test' }),
     reviewRunner.stop({ chatId: safeChatId, action: 'preview' }),
   ]);
+  try {
+    taskTicketStore.archiveWorkflow(safeChatId);
+  } catch (error) {
+    // A project folder is optional. Conversation deletion must still work when
+    // no ticket archive can be created.
+    if (!/kein Projektordner/i.test(error.message)) throw error;
+  }
   if (reviewWindowState?.chatId === safeChatId && reviewWindow && !reviewWindow.isDestroyed()) reviewWindow.close();
   for (const key of ['messages', 'conversationStates', 'userRequestQueues', 'taskGraphs', 'mcpPermissions']) {
     removeChatKey(key, safeChatId);
@@ -820,6 +840,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', (event) => {
   stopExternalApiServer();
+  stopCodexAppServer();
   if (closingMcpConnections) return;
   if (!reviewRunner.hasActiveRuns() && mcpManager.connections.size === 0) return;
   event.preventDefault();
@@ -856,6 +877,10 @@ onIpc('task-window-close', () => {
 });
 onIpc('task-window-action', (_, action = {}) => {
   if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (['configure-acceptance-tests', 'open-acceptance-preview', 'configure-expertise-groups', 'create-expert'].includes(action.type)) {
+    mainWindow.show();
+    mainWindow.focus();
+  }
   mainWindow.webContents.send('task-window-action', action);
 });
 
@@ -965,6 +990,40 @@ handleIpc('app-state-delete', (_, key) => {
   store.delete(assertAllowedStateKey(key));
   return { ok: true };
 });
+
+// Persistent workflow tickets live inside the configured project. The renderer
+// supplies only a chat id; the main process resolves the trusted project path.
+handleIpc('task-tickets-reconcile', (_, { chatId, graph } = {}) => {
+  const safeChatId = String(chatId || '').trim().slice(0, 200);
+  if (!safeChatId) throw new Error('Chat-ID fehlt.');
+  try {
+    return { ok: true, graph: taskTicketStore.reconcileWorkflow(safeChatId, graph) };
+  } catch (error) {
+    if (/kein Projektordner/i.test(error.message)) return { ok: false, unavailable: true, error: error.message };
+    throw error;
+  }
+});
+handleIpc('task-tickets-save', (_, { chatId, graph, reason } = {}) => {
+  const safeChatId = String(chatId || '').trim().slice(0, 200);
+  if (!safeChatId) throw new Error('Chat-ID fehlt.');
+  try {
+    return { ok: true, graph: taskTicketStore.saveWorkflow(safeChatId, graph, { reason }) };
+  } catch (error) {
+    if (/kein Projektordner/i.test(error.message)) return { ok: false, unavailable: true, error: error.message };
+    throw error;
+  }
+});
+handleIpc('task-tickets-archive', (_, { chatId } = {}) => {
+  const safeChatId = String(chatId || '').trim().slice(0, 200);
+  if (!safeChatId) throw new Error('Chat-ID fehlt.');
+  try {
+    return taskTicketStore.archiveWorkflow(safeChatId);
+  } catch (error) {
+    if (/kein Projektordner/i.test(error.message)) return { ok: false, unavailable: true, error: error.message };
+    throw error;
+  }
+});
+handleIpc('task-ticket-requests-sync', (_, { requests } = {}) => taskTicketStore.syncRequests(requests));
 
 handleIpc('provider-credentials-status', () => credentialStore.status());
 handleIpc('provider-credentials-update', (_, updates = {}) => {
@@ -1147,6 +1206,7 @@ handleIpc('user-data-delete-all', async (event) => {
 const memoryFileQueues = new Map();
 
 handleIpc('memory-local-operation', (_, params = {}) => queueLocalMemoryOperation(params));
+handleIpc('learning-harness', (_, params = {}) => operateLearning(store, params));
 
 function queueMemoryFileOperation(filePath, operation) {
   const key = validateMemoryFilePath(filePath).toLowerCase();

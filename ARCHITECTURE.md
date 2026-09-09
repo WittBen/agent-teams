@@ -128,6 +128,41 @@ after the current run step finishes. PM plans are distributed across agents in
 the same role pool; independent tasks may run in parallel only after dependency,
 agent-capacity, and file-conflict checks succeed.
 
+All desktop model routes publish progress through the same `llm-progress` IPC
+contract. OpenAI-compatible Chat Completions, Anthropic Messages and Gemini use
+their native event-stream formats; Claude Code uses `stream-json`, while Codex
+uses one long-lived local App Server and maps `item/agentMessage/delta` plus
+tool notifications into the same bounded text/progress shape. If the App Server
+cannot initialize before a turn starts, Codex falls back to `exec --json`. The
+renderer keeps only a limited live preview and replaces it with the validated
+final response when the call completes. Legacy CLI-specific progress events are
+retained for compatibility, but do not drive the chat UI.
+
+Claude Code and Codex continuations carry task-scoped session identifiers. A
+continuation resumes only for the same task and model; quality escalation or a
+model change starts a fresh isolated session. If a stored session expired, the
+main process retries once with the complete task capsule. Codex receives an
+explicit task-derived reasoning effort: low for planning, preparation and simple
+work, medium for normal-complexity execution, and high for difficult, recovery or
+quality-escalated runs. Its authentication status is cached for a bounded period,
+and workflow tickets retain runtime, first-event/first-text latency, prompt size
+and resume state. Project access is also selected per task: planning, out-of-band and
+non-project objectives omit the CLI working directory and project inventory,
+whereas implementation, review and recovery tasks retain the configured access.
+Group PM context is capped at eight messages and 12,000 characters, with the
+current objective de-duplicated against the task capsule. This keeps prompts and
+CLI startup work bounded without weakening task isolation.
+
+The main chat uses one bounded flex-height chain from `body` through `#root`,
+`.app-layout` and `.chat-area`. Only `.messages-container` owns the primary
+vertical scroll; headers, runtime controls and `.composer-area` remain flex
+siblings. Every horizontal flex boundary has `min-width: 0`, and the message
+textarea grows from 40 to 120 pixels before switching to its own vertical scroll.
+At narrow viewports the sidebar and header reflow, the quality selector moves
+above the message row, and `100dvh` follows the visual viewport. A combined
+small-width/small-height rule limits secondary planning information so an
+on-screen keyboard cannot displace the composer.
+
 ## Cross-group coordination
 
 `crossGroupRequests` is a persistent renderer-state map separate from chat
@@ -187,13 +222,26 @@ but file artifacts are not materialized into the project until the regular task
 consumes the checkpoint. Contract edits invalidate stale preparation metadata.
 
 Timeout, post-escalation quality and ordinary execution-problem recovery nodes
-retain `runtimeRecovery` and `recovery.originalGraphNodeId`. Delegation edges
-place PM analysis and each small recovery/review step beneath the affected node
-in the graph. The PM must emit an explicit resolved signal; otherwise the
-original task enters `waiting_user` and exposes the PM diagnosis plus decision
-options. A user answer resumes the same recovery chain. Runtime status, actual
-model and ordered recovery history are presentation metadata, not additions to
-`approvedPlan`.
+retain `runtimeRecovery` and `recovery.originalGraphNodeId`. The PM emits a
+bounded `RECOVERY_PLAN` DAG. Its persisted runtime tickets may be assigned to any
+suitable local group agent; dependency edges serialize only steps that truly need
+one another, so independent recovery branches use the normal work-conserving
+scheduler. A controller dependency keeps the steps blocked while the PM waits on
+a permitted cross-group information request. The PM must emit an explicit
+resolved signal and acceptance evidence after the batch. A maximum of two PM
+recovery rounds is automatic; after that the original task enters `waiting_user`.
+User context is appended to the ticket and may explicitly start a fresh bounded
+cycle.
+
+Starting recovery invalidates only the transitive downstream branch: affected
+nodes become `stale_dependency`, retain their old evidence for audit, reopen
+non-user acceptance decisions and become ready after the recovered predecessor
+finishes. Unrelated successful nodes remain unchanged. A separate structural
+failure path uses `beginPMPlanRevision`: it retains the approved snapshot, marks
+the draft `revision_required`, and lets the PM propose a complete replacement
+plan. That draft cannot execute until the user approves the new version. Runtime
+status, recovery DAGs, notes, actual models and ordered history never alter the
+current `approvedPlan` contract.
 
 Context is assembled per task rather than per run. Knowledge-base retrieval uses
 the task objective, project inventories are reduced to matching filenames for
@@ -259,12 +307,43 @@ synthesis in free-running mode.
 
 Planned specialist tasks use a domain-neutral acceptance contract. Each
 criterion records whether it is required, how it must be verified, submitted
-evidence, and its review state. Specialist evidence is data, not approval. The
-PM may pass, reject or explicitly waive reviewer/automatic criteria; criteria
-that require user approval can only be decided through the user-facing task
-window. The completion gate evaluates persisted graph state and refuses
+evidence, and its review state. Specialist evidence is data, not approval. A
+planned review node assigned to a different agent may pass, reject or explicitly
+waive reviewer/automatic criteria; the PM only checks completeness and missing
+evidence. Rejected criteria put the existing implementation ticket into
+`retryable` and reset the same review node for the next pass, so no hidden task or
+plan mutation is required. Criteria that require user approval can only be decided
+through the user-facing task window and require a written audit note. Tickets
+without criteria receive a synthetic user criterion after agent completion; they
+no longer pass through the empty-set case automatically. The detached task window
+projects all criteria into a parallel `Prüfungen` tab. `automatic` criteria use only
+the fixed, user-trusted group test command—natural-language ticket content can never
+inject a command. One suite result is applied to the selected tickets and each
+ticket stores a bounded test-run history. A justified user override is recorded as
+`user-override` evidence. The completion gate evaluates persisted graph state and refuses
 `PROJECT_DONE` until every required criterion in the active plan is passed or
 waived. Graphs created by older versions without criteria remain compatible.
+
+### Project-local task tickets
+
+`task-ticket-store.js` mirrors each graph into the configured project at
+`.agent-teams/tickets/<group-id>/`. `workflow.json` is the restart source, every
+non-request node has a standalone ticket JSON file, and `history.jsonl` is an
+append-only revision journal. Ticket files include title, description, priority,
+assignment, dependencies, acceptance state/evidence, bounded automatic test runs,
+manual-approval requests, resumable checkpoint,
+recovery notes/DAG metadata, stale-dependency provenance and a bounded
+status-transition list. Writes are bounded and use a same-directory
+temporary file followed by replacement. The renderer supplies only the group ID;
+the main process resolves its already trusted project path.
+
+At startup, the filesystem copy is reconciled with the legacy electron-store
+graph by `updatedAt`; newer project state wins, while a graph with no ticket copy
+is migrated once. Runtime group requests are persisted under
+`.agent-teams/requests/`. Workflow deletion first moves the ticket directory and
+all related request files to `.agent-teams/archive/<group-id>-<timestamp>/`, then
+clears the UI state. The workflow canvas remains a projection of this canonical
+ticket state rather than a second task model.
 
 ## Project review flow
 
@@ -301,3 +380,85 @@ responsibility of Word or another compatible Office application.
 
 See `THREAT_MODEL.md`, `PRIVACY.md`, and `SECURITY.md` for security and disclosure
 details.
+
+
+### Adaptive experience harness
+
+`electron/learning-harness.mjs` defines the fixed error-to-hint catalog,
+normalization and selection. `electron/learning-store.js` serializes operations
+per store across renderer and HTTP API callers. The dedicated `learning-harness`
+IPC uses the existing trusted-sender validation and exposes select, record, stats
+and clear operations through the preload bridge. The ordinary renderer state-key
+allowlist does not expose `learningHarness` directly.
+
+`runQualityCascade` retrieves hints before calling the model, prepends them to
+its scoped history and records an observation after evaluation. Desktop tasks
+and cross-group calls use the preload bridge; the local API calls the same store
+operation directly. `qualityRouting.learningEnabled` defaults to true and gates
+both retrieval and recording independently of model escalation. A run that throws
+before recording produces no observation. Storage errors are returned through
+`result.harness.error` without failing an otherwise completed task.
+
+Selection uses the latest 120 eligible observations at the current complexity:
+
+- A rule needs two failures in the current project area, or four failures across
+  at least two project areas for general use.
+- Ranking is twice the local failure count plus the total failure count.
+- The latest 12 applications of each hint determine exclusion: after at least
+  six applications, the same error recurring in more than half excludes the hint.
+- At most three hints are included. Exclusion is recomputed from recent evidence,
+  not saved as permanent deletion of a rule.
+
+Observations store recognized first-attempt error codes, selected rule IDs,
+complexity, final acceptance after any escalation, input/harness token estimates,
+timestamp and a SHA-256 project identifier. Execution project paths are preferred;
+chat/group IDs are the fallback. Paths are not canonicalized before hashing, so
+different spellings can form different areas. Raw objectives, output, paths and
+model-authored instructions are not retained in this register. Later ticket
+acceptance, reviewer feedback and test outcomes are not currently ingested.
+
+The app-local `learningHarness` store keeps at most 1,000 observations after each
+write. Reads exclude observations aged 90 days or more; the next record write
+persists that pruning. Clear empties the register, but in-flight tasks may add
+new observations. Group deletion does not clear this global store.
+`src/LearningHarnessPanel.jsx` exposes controls and counters in settings.
+
+Learning uses no additional LLM request and does not change model routing,
+permissions, task requirements or acceptance gates. Hints add prompt context;
+character-based token estimates do not establish net savings or causal quality
+improvement. This implements selection from a fixed catalog, not model training
+or autonomous harness-code generation. Run `node --test
+scripts/learning-harness-test.mjs` for its dedicated regression suite.
+
+### Shared quality policy and task context
+
+`electron/quality-cascade.mjs` is the single quality-policy/runner implementation used by ChatView, CrossGroupCoordinator and the local HTTP API. `src/quality-cascade.js` only re-exports it. Callers supply task-specific validation and transport callbacks; model selection, the one-step escalation limit, error propagation and result classification belong to the runner. Custom-provider model lists are not strength rankings: an escalation model must be explicitly configured. Rejected output remains unresolved even if escalation is disabled or unavailable. Native CLI project work is not automatically replayed for quality; workflow recovery handles it. MCP quality retries use the captured response without repeating tools.
+
+`electron/agent-context.mjs` contains explicit history/attachment selection and bounded handoff helpers. Group specialists get an assignment capsule, PM-selected findings/references, their ticket and direct dependency evidence. They do not automatically receive group history, shared-memory/KB search results or every user attachment. Attachments must be named in the assignment. PMs retain coordination history and retrieval access; direct chats retain their own two-party history. Cross-group specialists receive the PM's subtask, not an appended copy of the source group's full request. The HTTP API supplies specialists only the current API assignment, not preceding group turns.
+
+These rules minimize prompt disclosure; they are not an OS-level access-control boundary. Native CLI project permissions and approved MCP tools remain separate controls. Deterministic quality gates detect structural failures and missing artifacts; passing them does not prove factual correctness. Acceptance evidence and PM/user review remain necessary.
+
+Regression checks: `npm run test:context-quality`, plus the existing smoke/security suites.
+
+Shared-memory context uses one consistent namespace snapshot, relevance ranking and at most 8,000 characters of excerpts (2,000 per entry). Handoffs also match the active task and recipient. Excerpts retain record IDs and explicitly mark truncation; the task objective and acceptance criteria are not cut to fit this optional-memory budget. The PM can supply missing details through another scoped handoff. These are character budgets, not model-token limits or a proof that the supplied context is sufficient for every task.
+
+Local and file-backed `writeOnce` operations check deduplication within the existing storage operation queue, preventing duplicate cross-group findings under concurrent delivery. Context retrieval overlaps independent KB lookup. Network streaming emits the first available text immediately, batches subsequent UI updates, decodes UTF-8 across packet boundaries and rejects interrupted response streams. Quality gates may be asynchronous; provider overrides cannot inherit a model configured for another escalation provider.
+
+### Module boundaries and runtime controls
+
+- `ChatView.jsx` owns chat UI state and window actions. `useConversationRunner.js` owns orchestration and accepts explicit state/services; `chat-view-ui.jsx` owns rendering components and `chat-workflow-helpers.mjs` owns pure workflow helpers.
+- `Modals.jsx` is a compatibility export entry point. `AgentModal.jsx`, `GroupModal.jsx` and `SettingsPanel.jsx` own separate dialogs.
+- `workflow-topology.mjs` owns graph traversal; `workflow-scheduling.mjs` owns readiness, parallel selection and DAG validation; `workflow-recovery.mjs` owns descendant invalidation; `workflow-acceptance.mjs` owns acceptance normalization. `task-graph.js` owns plan contracts and mutations and re-exports the public API. These modules do not import React.
+- `workflow-execution.mjs` runs available agent lanes, drains active work on errors and asks the caller for authorized ready tasks. `workflow-task-pause.mjs` owns persistent pause transitions; `pausing` becomes `paused` at startup or once the active operation settles. A paused predecessor never counts as finished.
+- `cross-group-coordination.mjs` owns route/path/context helpers independently of React. `CrossGroupCoordinator.jsx` handles store effects and execution.
+- `streaming-plan.mjs` reads closed task objects independently of JSON metadata order. The planner emits ticket objects successively; drafts are not execution authorization.
+
+`npm run test:workflow` covers generated DAGs, agent-lane reuse, pause persistence, recovery rounds, group routes, incremental JSON and language-independent gate contracts. Model defaults live in `electron/quality-model-catalog.mjs`, separately from the quality runner.
+
+### Task-scoped expert loans
+
+`src/expertise-help.mjs` provides bounded skill extraction, allowed discovery routes, validated PM answers and explicit home-group placement. Missing expertise appears in the workflow collaboration tab. Discovery asks only approved target groups and sends required skills, not source conversation history or attachments. The receiving PM chooses from its existing member directory; unknown member IDs are rejected.
+
+Selecting an expert records a task-specific loan policy and UI approval tied to that member and home group. The revised plan must be approved before execution. The source group retains its own task owner and membership; the receiving PM coordinates the selected specialist. If the selected member disappears, execution fails instead of silently substituting someone else. PM plan contract changes invalidate the loan approval.
+
+Creating a suggested expert adds it only to the explicitly selected other home group (or a new expert group). The creation dialog discloses the outbound route it enables. A suggested-agent reference is only a UI suggestion, not permission to execute. Regression coverage is in `scripts/ui-behavior-test.cjs`.

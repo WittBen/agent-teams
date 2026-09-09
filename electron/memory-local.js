@@ -1,4 +1,4 @@
-const ALLOWED_ACTIONS = new Set(['search', 'read', 'write', 'update', 'delete', 'list', 'clear']);
+const ALLOWED_ACTIONS = new Set(['search', 'read', 'write', 'writeOnce', 'update', 'delete', 'list', 'clear']);
 const NAMESPACE_PATTERN = /^[a-zA-Z0-9äöüÄÖÜß_.:-]{1,120}$/;
 const MAX_ENTRY_BYTES = 1024 * 1024;
 
@@ -56,10 +56,14 @@ function operateLocalMemory(store, { action, namespace, query = '', limit = 5, i
   if (action === 'read') return entries.find(item => item?.id === id) || null;
   if (action === 'list') return entries;
 
-  if (action === 'write') {
+  if (action === 'write' || action === 'writeOnce') {
     const normalizedEntry = validateEntry(entry, normalizedNamespace);
+    if (action === 'writeOnce') {
+      const existing = entries.find(item => item.id === normalizedEntry.id || (normalizedEntry.dedupeKey && item.dedupeKey === normalizedEntry.dedupeKey));
+      if (existing) return { created: false, entry: existing };
+    }
     saveEntries(store, normalizedNamespace, [...entries, normalizedEntry]);
-    return normalizedEntry;
+    return action === 'writeOnce' ? { created: true, entry: normalizedEntry } : normalizedEntry;
   }
   if (action === 'update') {
     const index = entries.findIndex(item => item?.id === id);

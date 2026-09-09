@@ -12,6 +12,7 @@ Before tagging, use a supported Node.js and npm version locally:
 ```powershell
 npm ci
 npm test
+node --test scripts/learning-harness-test.mjs
 npm run audit
 npm run build
 ```
@@ -37,8 +38,8 @@ cannot be reached, the release stops before commit, push, or publication.
 ```powershell
 git switch main
 git pull --ff-only origin main
-git tag -a v1.1.0-beta.10 -m "Agent Teams v1.1.0-beta.10"
-git push origin v1.1.0-beta.10
+git tag -a v1.1.0-beta.11 -m "Agent Teams v1.1.0-beta.11"
+git push origin v1.1.0-beta.11
 ```
 
 The tag must equal `v` followed by the version in `package.json`. Beta versions
@@ -57,6 +58,11 @@ Before publishing a release:
 1. Review `CHANGELOG.md`, the version in `package.json`, and the lockfile.
 2. Run the complete verification commands above.
 3. Smoke-test the application with each supported provider.
+   Check experience learning in desktop and local API runs, saved enable/disable
+   settings, counter refresh and explicit deletion. Verify stored experiences
+   survive restart and contain no raw prompts or project paths. Confirm hints
+   leave current acceptance requirements intact. Treat displayed harness tokens
+   as estimated overhead; release notes must not claim unmeasured savings.
 4. Replace the default Electron icon with an original, project-owned icon.
 5. Prefer signing the installer and executable with a trusted Windows
    code-signing certificate. Never commit signing secrets.

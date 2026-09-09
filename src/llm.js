@@ -36,6 +36,9 @@ function classifyError(err, provider) {
   if (provider === 'codex' && msg.includes('getrennt')) {
     return '🔌 Codex CLI ist von der App getrennt. Bitte in Einstellungen → API-Zugang erneut verbinden.';
   }
+  if (provider === 'codex' && (err?.networkUnavailable || msg.includes('openai-dienst nicht erreichen') || msg.includes('firewall oder proxy'))) {
+    return '🌐 Codex kann den OpenAI-Dienst nicht erreichen. Bitte Internetverbindung, Firewall, Proxy und Zertifikate prüfen.';
+  }
   if (status === 401 || msg.includes('401') || msg.includes('incorrect api key') || msg.includes('invalid_api_key') || msg.includes('authentication') || msg.includes('unauthenticated')) {
     return provider === 'codex'
       ? '🔑 Codex ist nicht angemeldet. Bitte in Einstellungen → API-Zugang die Codex-Anmeldung starten.'
@@ -166,7 +169,26 @@ export function prepareBrowserAttachmentMessages(messages, attachments, provider
 
 // ── Main LLM caller ───────────────────────────────────────────────────────────
 
-export async function callLLM({ apiKeys, providerConnections = [], agent, history, userMessage, groupContext, kbContext, isolatedSession = null, projectPath = '', requestId = '', language = 'de' }) {
+export async function callLLM({
+  apiKeys,
+  providerConnections = [],
+  agent,
+  history,
+  userMessage,
+  groupContext,
+  kbContext,
+  isolatedSession = null,
+  projectPath = '',
+  requestId = '',
+  language = 'de',
+  cliSessionId = '',
+  resumeCliSession = false,
+  codexSessionId = '',
+  resumeCodexSession = false,
+  persistCodexSession = false,
+  reasoningEffort = 'medium',
+  onRunMetadata = null,
+}) {
   const provider = agent.provider || 'openai';
   const model = agent.model || (provider === 'anthropic' ? 'claude-haiku-4-5' : provider === 'codex' ? 'codex-default' : 'gpt-4o-mini');
 
@@ -198,19 +220,40 @@ export async function callLLM({ apiKeys, providerConnections = [], agent, histor
     }
     try {
       const call = window.electronAPI.codexCall || window.electronAPI.llmCall;
-      const result = await call({ provider: 'codex', model, systemContent, merged, attachments, cwd: projectPath || undefined, requestId });
+      const result = await call({
+        provider: 'codex',
+        model,
+        systemContent,
+        merged,
+        attachments,
+        cwd: projectPath || undefined,
+        requestId,
+        sessionId: codexSessionId,
+        resumeSession: resumeCodexSession,
+        persistSession: persistCodexSession,
+        reasoningEffort,
+      });
       if (result?.error) throw Object.assign(new Error(result.error), {
         status: result.status,
         isAgentTimeout: !!result.timedOut,
         timeoutKind: result.timeoutKind,
         cancelled: !!result.cancelled,
+        networkUnavailable: !!result.networkUnavailable,
       });
       if (!result?.text?.trim()) throw new Error('Leere Antwort von Codex.');
+      onRunMetadata?.({
+        provider: 'codex',
+        sessionId: result.sessionId || codexSessionId || '',
+        metrics: result.metrics || null,
+      });
       return result.text;
     } catch (err) {
       if (err.isAgentTimeout || err.cancelled) throw err;
       if (err.message?.startsWith('❌') || err.message?.startsWith('Leere')) throw err;
-      throw new Error(classifyError(err, 'codex'));
+      throw Object.assign(new Error(classifyError(err, 'codex')), {
+        status: err.status,
+        networkUnavailable: !!err.networkUnavailable,
+      });
     }
   }
 
@@ -234,7 +277,7 @@ export async function callLLM({ apiKeys, providerConnections = [], agent, histor
     if (!messages.length) messages.push({ role: 'user', content: '(start)' });
     try {
       const result = await window.electronAPI.llmCall({
-        provider, model, systemContent, merged: messages, attachments,
+        provider, model, systemContent, merged: messages, attachments, requestId,
       });
       if (result?.error) throw Object.assign(new Error(result.error), {
         status: result.status,
@@ -301,10 +344,12 @@ export async function callLLM({ apiKeys, providerConnections = [], agent, histor
           attachments,
           cwd: projectPath || undefined,
           requestId,
+          sessionId: cliSessionId,
+          resumeSession: resumeCliSession,
         });
       } else if (window.electronAPI?.llmCall) {
         // API keys use the Messages API through Electron main to avoid CORS.
-        result = await window.electronAPI.llmCall({ provider: 'anthropic', model, systemContent, merged, attachments });
+        result = await window.electronAPI.llmCall({ provider: 'anthropic', model, systemContent, merged, attachments, requestId });
       } else {
         // Browser fallback is available only for real Anthropic API keys.
         const preparedMessages = prepareBrowserAttachmentMessages(merged, attachments, 'anthropic');
@@ -367,7 +412,7 @@ export async function callLLM({ apiKeys, providerConnections = [], agent, histor
     try {
       let result;
       if (window.electronAPI?.llmCall) {
-        result = await window.electronAPI.llmCall({ provider: 'openai', model, systemContent, merged: messages, attachments });
+        result = await window.electronAPI.llmCall({ provider: 'openai', model, systemContent, merged: messages, attachments, requestId });
       } else {
         const preparedMessages = prepareBrowserAttachmentMessages(messages, attachments, 'openai');
         const res = await withTimeout(fetch('https://api.openai.com/v1/chat/completions', {

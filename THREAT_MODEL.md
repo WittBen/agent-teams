@@ -7,6 +7,7 @@
 - Project files writable by agent workflows
 - MCP credentials and tool permissions
 - Optional REST API bearer token
+- Local quality observations and stable hashed project identifiers
 
 ## Trust boundaries
 
@@ -30,6 +31,8 @@ AI providers and MCP servers are external trust domains. Model output is untrust
 | Project edit damages a file | pre-edit snapshots with SHA-256 integrity checks, stale-write detection and conservative DOCX replacement |
 | Oversized requests or tool data | request, attachment, argument and result limits |
 | Accidental data retention | cascading group deletion and documented storage locations |
+| Project content becomes persistent global instructions | harness retains only recognized error/rule codes and selects application-owned hints; no raw model-authored rules |
+| Unbounded experience accumulation | serialized writes capped at 1,000 observations, 90-day selection window, explicit global clear action |
 
 ## Residual risks
 
@@ -42,3 +45,10 @@ AI providers and MCP servers are external trust domains. Model output is untrust
 - A user-approved project directory is writable and should be version-controlled or backed up.
 - Local malware running as the same operating-system user remains outside the app's security boundary.
 - AI-generated content can be incorrect or unsafe and requires review.
+- Harness evidence comes from structural gates and can be biased by misleading
+  outputs or repeated failures. Promotion thresholds do not prove usefulness;
+  hints cannot grant permissions or replace task acceptance. A compromised trusted
+  renderer can still submit recognized observation codes through its IPC bridge.
+- Project hashes are stable and unsalted, not anonymization. Global observations
+  survive group deletion, and expired records remain on disk until another
+  experience write or explicit clear.

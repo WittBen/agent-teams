@@ -1,851 +1,32 @@
-import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { useStore } from './store';
-import { callLLM, PROVIDER_MODELS } from './llm';
-import { callLLMWithMcp, createMcpToolSignature, getEffectiveMcpServers, getMcpToolPermissionDecision } from './mcp';
-import {
-  assessTaskComplexity,
-  buildEscalationHistory,
-  estimateTokens,
-  evaluateResponseQuality,
-  resolveQualityPolicy,
-} from './quality-cascade';
-import {
-  addPlanningTask,
-  addWorkflowConnection,
-  addWorkflowPoint,
-  addTaskEdge,
-  applyAcceptanceDecisions,
-  approveAgentDoneTasks,
-  beginUserPlanEdit,
-  createTaskGraph,
-  findDependencyPreparationCandidateIds,
-  findSafeAutoParallelTaskIds,
-  inferHandoffDependency,
-  inferTaskNodeType,
-  isTaskNodeReady,
-  lockTaskGraphPlan,
-  markTaskGraphUserOwned,
-  materializeTaskPlan,
-  movePlanningTask,
-  normalizeAcceptanceCriteria,
-  orderTasksForParallelSelection,
-  recordTaskExecutionEvent,
-  resetWorkflowViewState,
-  retryTaskNode,
-  restoreTaskGraphSnapshot,
-  removePlanningTask,
-  removeWorkflowConnection,
-  removeWorkflowPoint,
-  removeTaskDependency,
-  runTaskBatch,
-  submitTaskEvidence,
-  summarizeAcceptance,
-  splitPlanningTask,
-  updateTaskNodeStatus,
-  updatePlanningTask,
-  updateWorkflowViewPosition,
-  upsertTaskNode,
-  validateParallelSelection,
-  validateApprovedTaskExecution,
-  validateWorkflowConnection,
-  validateWorkflowPlan,
-  workflowDependencyAncestorIds,
-} from './task-graph';
-import {
-  extractKnowledgeFromReply,
-  extractMemoryCommands,
-  isMemoryCommandOnly,
-} from './memory';
-import { createEntry, getMemoryAPI } from './memory-provider';
-import { createExcalidrawDocument, excalidrawElementBounds, parseExcalidrawElements } from './excalidraw';
-import { useI18n } from './i18n';
-import { buildQueuedRequestHistory } from './user-request-queue';
-import { getProviderEmoji, getProviderModels } from './provider-catalog';
-import { acquireAgentLease } from './agent-runtime';
-import {
-  createCrossGroupRequest,
-  extractGroupMentions,
-  finishRequestRuntimePlan,
-  isCrossGroupRequestTerminal,
-  requestsForChat,
-} from './cross-group';
-import { evaluateTaskDelegation, normalizeCrossGroupTargetIds, normalizeDelegationPolicy } from './delegation';
-import WorkflowProblemDialog from './WorkflowProblemDialog';
-import {
-  createImportedTaskGraph,
-  createWorkflowExportDocument,
-  suggestWorkflowAgentMappings,
-} from './workflow-portability';
-import {
-  AgentTaskQueue,
-  buildAgentSession,
-  buildIsolatedSystemPrompt,
-  buildProjectReviewEvidence,
-  buildRelevantConversationHistory,
-  buildRelevantProjectInventoryContext,
-  buildTaskCapsule,
-  buildTurnLimitReviewTask,
-  buildTimeoutRecoveryReviewTask,
-  buildTimeoutRecoveryTask,
-  buildUserAnswerTask,
-  cleanAgentReply,
-  createHandoff,
-  distributeTaskPlanAcrossAgentPools,
-  extractAcceptanceReview,
-  extractHandoffsFromReply,
-  extractProjectFiles,
-  extractTaskPlan,
-  extractTaskEvidence,
-  extractUserQuestions,
-  getGroupPMAgent,
-  hasDirectedMention,
-  hasUserDirectedMention,
-  isAgentTimeoutError,
-  normalizeAgentMentionLayout,
-  orchestrate,
-  shouldCompleteProject,
-  shouldDeferHandoffToPM,
-  shouldMaterializeTaskPlan,
-  shouldRequestPMFinalReview,
-  shouldRunAsWorkflowSideConversation,
-  summarizeTaskActivity,
-} from './orchestrator';
+import { EXPERTISE_DISCOVERY, expertiseSkills, expertiseTargets, expertiseRequests, terminalSearch, parseExpertiseAnswer, expertDraft } from './expertise-help.mjs';
+import { needsAutomaticAcceptance, taskCompletionKey } from './acceptance-scheduling.mjs';
+import EntityIcon from './EntityIcon.jsx';
+import Icon from './Icon.jsx';
+import ChatOptionsMenu from './ChatOptionsMenu.jsx';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { useStore } from './store.jsx';
+import { createMcpToolSignature, getEffectiveMcpServers, getMcpToolPermissionDecision } from './mcp.js';
+import { resolveGroupAgent } from './quality-cascade.js';
+import { addPlanningTask, addWorkflowConnection, addWorkflowPoint, addTaskEdge, applyAcceptanceDecisions, appendTaskRecoveryNote, beginPMPlanRevision, beginUserPlanEdit, createTaskGraph, ensureManualAcceptanceCriterion, findSafeAutoParallelTaskIds, inferTaskNodeType, lockTaskGraphPlan, markTaskGraphUserOwned, movePlanningTask, normalizeAcceptanceCriteria, resetWorkflowViewState, retryTaskNode, restoreTaskGraphSnapshot, removePlanningTask, removeWorkflowConnection, removeWorkflowPoint, removeTaskDependency, splitPlanningTask, invalidateTaskRecoveryBranch, updateTaskNodeStatus, updateAcceptanceTestRun, updatePlanningTask, updateWorkflowViewPosition, upsertTaskNode, validateParallelSelection, validateWorkflowConnection, validateWorkflowPlan } from './task-graph.js';
+import { extractMemoryCommands, isMemoryCommandOnly } from './memory.js';
+import { createEntry, getMemoryAPI } from './memory-provider.js';
+import { parseExcalidrawElements } from './excalidraw.js';
+import { useI18n } from './i18n.jsx';
+import MarkdownMessage from './MarkdownMessage.jsx';
+import { rewindDraft } from './chat-rewind.mjs';
+import { buildQueuedRequestHistory } from './user-request-queue.js';
+import { getProviderEmoji } from './provider-catalog.js';
+import { createCrossGroupRequest, extractGroupMentions, finishRequestRuntimePlan, isCrossGroupRequestTerminal, requestsForChat } from './cross-group.js';
+import { agentCoversCapabilities, evaluateTaskDelegation, normalizeCrossGroupTargetIds, normalizeDelegationPolicy } from './delegation.js';
+import WorkflowProblemDialog from './WorkflowProblemDialog.jsx';
+import { createImportedTaskGraph, createWorkflowExportDocument, suggestWorkflowAgentMappings } from './workflow-portability.js';
+import { buildTimeoutRecoveryTask, extractUserQuestions, getGroupPMAgent, MAX_PM_RECOVERY_ATTEMPTS, summarizeTaskActivity } from './orchestrator.js';
+import { conversationContinuations, RESUMABLE_CHECKPOINT_STATUSES, CLEARED_PREPARATION_STATE, buildDelegatedTaskQuestion, buildWorkflowModelOptions, isAgentProviderConfigured, collectWorkflowProblems, buildPlanningPendingTasks } from './chat-workflow-helpers.mjs';
+import { MentionDropdown, formatTime, Avatar, formatFileSize, attachmentIcon, AttachmentImage, MessageAttachments, copyText, MessageCopyButton, classifyBrowserFile, readBrowserFile, TypingBubble, ErrorBubble, ExcalidrawDiagram, McpPermissionPrompt, MemoryBadge, MemoryViewer } from './chat-view-ui.jsx';
+import { useConversationRunner } from './useConversationRunner.js';
+import { canPauseTask, setTaskPaused } from './workflow-task-pause.mjs';
 
-// In-flight conversations are intentionally short-lived runtime state. Keeping
-// them by chat id lets users switch chats while an @user pause is active.
-const conversationContinuations = new Map();
-const FINISHED_PLAN_STATUSES = new Set(['agent_done', 'completed']);
-const CLAIMABLE_PLAN_STATUSES = new Set(['planned', 'queued', 'prepared', 'interrupted', 'retryable']);
-const RESUMABLE_CHECKPOINT_STATUSES = new Set(['running', 'interrupted', 'provider-limited', 'limit-reached']);
-const CLEARED_PREPARATION_STATE = {
-  preparationAttemptedAt: undefined,
-  preparationCompletedAt: undefined,
-  preparationFailedAt: undefined,
-  preparationError: undefined,
-  interimResult: undefined,
-  interimSavedAt: undefined,
-  interimConsumedAt: undefined,
-  preparedFiles: undefined,
-};
-
-function buildRecoveryUserQuestion({ recovery, errorMessage = '', pmReply = '' } = {}) {
-  const trigger = recovery?.trigger === 'quality'
-    ? 'Qualitätsproblem'
-    : recovery?.trigger === 'error' ? 'Ausführungsproblem' : 'Timeout';
-  const originalTask = String(recovery?.originalObjective || 'Die ursprüngliche Aufgabe').slice(0, 1200);
-  const diagnosis = String(errorMessage || pmReply || 'Der PM konnte innerhalb des freigegebenen Plans keine sichere Lösung bestätigen.')
-    .replace(/\s+/g, ' ').trim().slice(0, 1200);
-  return [
-    `Der PM konnte das ${trigger} nicht sicher innerhalb des freigegebenen Plans lösen.`,
-    `Aufgabe: ${originalTask}`,
-    `Diagnose: ${diagnosis}`,
-    'Wie soll weitergegangen werden?',
-    '1. Dieselbe Aufgabe mit dem vorhandenen Plan erneut versuchen.',
-    '2. Den Planungsmodus öffnen und die Aufgabe, Abhängigkeiten oder Agentenzuordnung anpassen.',
-    'Du kannst auch eine eigene Entscheidung oder zusätzliche Information eingeben.',
-  ].join('\n');
-}
-
-function buildDelegatedTaskQuestion(node, policy) {
-  const criteria = (node?.acceptanceCriteria || [])
-    .filter(criterion => criterion?.text)
-    .map(criterion => `- ${criterion.text}`)
-    .join('\n');
-  return [
-    `Aufgabe: ${node?.objective || node?.title || 'Delegierte Aufgabe'}`,
-    `Benötigte Fähigkeiten: ${policy.requiredCapabilities.join(', ')}`,
-    criteria ? `Abnahmekriterien:\n${criteria}` : '',
-    'Liefere ein eigenständiges Ergebnis und nenne die konkrete Evidenz, anhand derer die Ursprungsgruppe es prüfen kann.',
-  ].filter(Boolean).join('\n\n');
-}
-
-function buildWorkflowModelOptions(graph, agents, providerConnections) {
-  return Object.fromEntries((graph?.nodes || []).flatMap(node => {
-    const agent = agents.find(candidate => candidate.id === node.agentId);
-    if (!agent?.provider || !agent?.model) return [];
-    const models = getProviderModels(
-      agent.provider,
-      providerConnections,
-      PROVIDER_MODELS,
-      node.modelOverride || agent.model,
-    );
-    return [[node.id, {
-      provider: agent.provider,
-      defaultModel: agent.model,
-      currentModel: node.modelOverride || agent.model,
-      models,
-    }]];
-  }));
-}
-
-function isAgentProviderConfigured(agent, apiKeys, providerConnections) {
-  const provider = agent?.provider || 'openai';
-  if (provider === 'codex') return apiKeys?.codexCli !== false;
-  if (provider === 'anthropic') return Boolean(
-    apiKeys?.anthropic?.trim() || apiKeys?.anthropicConfigured || apiKeys?.claudeCli ||
-    (typeof process !== 'undefined' && process.env?.ANTHROPIC_API_KEY)
-  );
-  if (provider === 'openai') return Boolean(
-    apiKeys?.openai?.trim() || apiKeys?.openaiConfigured ||
-    (typeof process !== 'undefined' && process.env?.OPENAI_API_KEY)
-  );
-  const connection = providerConnections.find(item => item.id === provider);
-  return Boolean(connection && (connection.requiresApiKey === false || apiKeys?.providerConfigured?.[provider]));
-}
-
-/** Create task-specific, actionable preflight problems for workflow and chat UIs. */
-function collectWorkflowProblems({ graph, sourceGroup, groups, agents, chatAgents, apiKeys, providerConnections, t }) {
-  const nodes = graph?.nodes || [];
-  const problems = new Map();
-  const addProblem = problem => {
-    if (!problem?.taskId || problems.has(problem.taskId)) return;
-    problems.set(problem.taskId, problem);
-  };
-  const validation = validateWorkflowPlan(graph);
-  if (!validation.ok) {
-    for (const taskId of validation.taskIds || []) {
-      const node = nodes.find(candidate => candidate.id === taskId);
-      addProblem({
-        taskId,
-        taskTitle: node?.title || taskId,
-        kind: 'validation',
-        message: t(validation.messageKey || validation.reason, validation.messageValues),
-        suggestion: t('Prüfe die markierte Aufgabenangabe und ihre Verbindungen. Der PM kann den Plan anhand deiner Vorgabe korrigieren.'),
-      });
-    }
-  }
-  for (const node of nodes.filter(candidate => inferTaskNodeType(candidate) !== 'request')) {
-    const agent = chatAgents.find(candidate => candidate.id === node.agentId);
-    if (!agent || isAgentProviderConfigured(agent, apiKeys, providerConnections)) continue;
-    addProblem({
-      taskId: node.id,
-      taskTitle: node.title,
-      kind: 'provider',
-      message: t('Der Provider für {agent} ist nicht verbunden.', { agent: agent.name }),
-      suggestion: t('Verbinde den Provider oder weise die Aufgabe einem verfügbaren Agenten zu.'),
-    });
-  }
-  for (const node of nodes.filter(candidate => inferTaskNodeType(candidate) === 'task')) {
-    const decision = evaluateTaskDelegation({ taskNode: node, sourceGroup, groups, agents });
-    if (decision.action !== 'unavailable') continue;
-    const requiredCapabilities = decision.policy.requiredCapabilities.join(', ');
-    addProblem({
-      taskId: node.id,
-      taskTitle: node.title,
-      kind: 'delegation',
-      message: t('Für „{task}“ ist keine erreichbare Gruppe mit ausreichender Kompetenzabdeckung verfügbar.', { task: node.title }),
-      suggestion: t('Ergänze die fehlenden Agentenfähigkeiten oder passe die benötigten Fähigkeiten der Aufgabe an: {capabilities}', { capabilities: requiredCapabilities }),
-      requiredCapabilities: decision.policy.requiredCapabilities,
-    });
-  }
-  return [...problems.values()];
-}
-
-function buildPlanningPendingTasks(graph, checkpoint, agents) {
-  const existingByNodeId = new Map((checkpoint?.pendingTasks || [])
-    .filter(task => task?.graphNodeId)
-    .map(task => [task.graphNodeId, task]));
-  const planRootId = checkpoint?.planRootGraphNodeId;
-  if (!planRootId) return checkpoint?.pendingTasks || [];
-
-  // Rebuild pending work from the graph instead of trusting a stale
-  // checkpoint. Finished or dependency-blocked tasks must never be replayed.
-  return (graph?.nodes || [])
-    .filter(node =>
-      node.planRootId === planRootId &&
-      inferTaskNodeType(node) !== 'request' &&
-      CLAIMABLE_PLAN_STATUSES.has(node.status) &&
-      isTaskNodeReady(graph, node.id)
-    )
-    .sort((left, right) => (left.planOrder || 0) - (right.planOrder || 0))
-    .flatMap(node => {
-      const agent = agents.find(candidate => candidate.id === node.agentId);
-      if (!agent) return [];
-      const existing = existingByNodeId.get(node.id);
-      return [{
-        ...existing,
-        agent,
-        objective: node.objective || node.title,
-        source: existing?.source || node.source || 'PM-Plan',
-        runtimeRecovery: existing?.runtimeRecovery || node.runtimeRecovery || false,
-        recovery: existing?.recovery || node.recovery,
-        graphNodeId: node.id,
-        planRootId: node.planRootId,
-        planTaskId: node.planTaskId,
-        modelOverride: node.modelOverride,
-      }];
-    });
-}
-
-function planTaskMatchScore(node, summary) {
-  const tokens = value => new Set(String(value || '').toLowerCase().match(/[a-zäöüß0-9_.-]{3,}/g) || []);
-  const nodeTokens = tokens(`${node.title} ${node.objective}`);
-  const summaryTokens = tokens(summary);
-  return [...summaryTokens].filter(token => nodeTokens.has(token)).length;
-}
-
-function rewritePlanHandoffAssignments(reply, planTasks) {
-  if (!planTasks.length) return reply;
-  const usedPlanTaskIds = new Set();
-  return String(reply || '').split(/\r?\n/).map(line => {
-    const match = line.match(/^@([^:]+):\s*(.*)$/);
-    if (!match) return line;
-    const requestedName = match[1].trim().toLowerCase();
-    const candidates = planTasks
-      .filter(planTask =>
-        planTask.type !== 'review' &&
-        String(planTask.requestedAgentName || planTask.agentName || planTask.agent).toLowerCase() === requestedName &&
-        !usedPlanTaskIds.has(planTask.id)
-      )
-      .map(planTask => ({ planTask, score: planTaskMatchScore(planTask, match[2]) }))
-      .sort((left, right) => right.score - left.score || left.planTask.order - right.planTask.order);
-    const selected = candidates[0]?.planTask;
-    if (!selected) return line;
-    usedPlanTaskIds.add(selected.id);
-    return `@${selected.agentName || selected.agent}: ${match[2].trim()}`;
-  }).join('\n');
-}
-
-function formatAcceptanceContext(nodes = []) {
-  const lines = [];
-  for (const node of nodes) {
-    for (const criterion of node.acceptanceCriteria || []) {
-      const evidence = (criterion.evidence || []).at(-1);
-      lines.push(
-        `  - Kriterium ${criterion.id}: ${criterion.text} | erforderlich: ${criterion.required !== false ? 'ja' : 'nein'} | Prüfung: ${criterion.verification || 'reviewer'} | Status: ${criterion.status || 'open'}${evidence ? ` | Letzter Nachweis von ${evidence.author || 'Agent'}: ${evidence.summary}` : ''}`,
-      );
-    }
-  }
-  return lines.length ? `\nAbnahmestand:\n${lines.join('\n')}` : '';
-}
-
-// ── @-mention autocomplete ────────────────────────────────────────────────────
-function MentionDropdown({ items, onSelect, filterText }) {
-  const filtered = items.filter(i =>
-    i.label.toLowerCase().includes(filterText.toLowerCase())
-  );
-  if (!filtered.length) return null;
-  return (
-    <div style={{
-      position: 'absolute', bottom: '100%', left: 0, right: 0,
-      background: 'var(--bg-secondary)', border: '1px solid var(--border)',
-      borderRadius: 8, overflow: 'hidden', zIndex: 100,
-      boxShadow: '0 -4px 20px rgba(0,0,0,0.4)', maxHeight: 220, overflowY: 'auto',
-      marginBottom: 4,
-    }}>
-      {filtered.map((item, idx) => (
-        <div key={item.id || idx}
-          onMouseDown={e => { e.preventDefault(); onSelect(item); }}
-          style={{
-            padding: '8px 14px', cursor: 'pointer', display: 'flex',
-            alignItems: 'center', gap: 10, fontSize: 14,
-          }}
-          onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-hover)'}
-          onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
-        >
-          <span style={{ fontSize: 16 }}>{item.emoji}</span>
-          <span style={{ fontWeight: 500 }}>{item.label}</span>
-          {item.role && <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 'auto' }}>{item.role}</span>}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function formatTime(ts, language) {
-  return new Date(ts).toLocaleTimeString(language === 'en' ? 'en-US' : 'de-DE', { hour: '2-digit', minute: '2-digit' });
-}
-
-function Avatar({ agent, size = 46 }) {
-  if (!agent) return <div className="avatar color-0" style={{ width: size, height: size, fontSize: size * 0.42 }}>?</div>;
-  return (
-    <div className={`avatar color-${agent.color ?? 0}`} style={{ width: size, height: size, fontSize: size * 0.42 }}>
-      {agent.emoji || agent.name?.[0] || '?'}
-    </div>
-  );
-}
-
-function formatFileSize(bytes = 0) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(bytes >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
-}
-
-function attachmentIcon(attachment) {
-  if (attachment?.kind === 'image') return '🖼️';
-  if (attachment?.kind === 'markdown') return 'Ⓜ️';
-  if (attachment?.kind === 'text') return '📄';
-  if (attachment?.kind === 'pdf') return '📕';
-  if (attachment?.mimeType?.startsWith('audio/')) return '🎵';
-  if (attachment?.mimeType?.startsWith('video/')) return '🎬';
-  if (/zip|rar|7z|gzip/.test(attachment?.mimeType || '')) return '🗜️';
-  return '📎';
-}
-
-function AttachmentImage({ attachment, compact = false }) {
-  const { t } = useI18n();
-  const [source, setSource] = useState(attachment?.dataUrl || '');
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    let active = true;
-    setSource(attachment?.dataUrl || '');
-    setFailed(false);
-    if (!attachment?.dataUrl && attachment?.path && window.electronAPI?.chatAttachmentData) {
-      window.electronAPI.chatAttachmentData(attachment).then(result => {
-        if (!active) return;
-        if (result?.dataUrl) setSource(result.dataUrl);
-        else setFailed(true);
-      }).catch(() => active && setFailed(true));
-    }
-    return () => { active = false; };
-  }, [attachment?.id, attachment?.path, attachment?.dataUrl]);
-
-  if (!source || failed) {
-    return <span className={`attachment-image-placeholder ${compact ? 'compact' : ''}`} title={t('Bildvorschau konnte nicht geladen werden.')}>🖼️</span>;
-  }
-  return <img className={compact ? 'attachment-thumbnail' : 'message-attachment-image'} src={source} alt={attachment?.name || t('Bildanhang')} />;
-}
-
-function openAttachment(attachment) {
-  if (attachment?.path && window.electronAPI?.openChatAttachment) {
-    return window.electronAPI.openChatAttachment(attachment);
-  }
-  if (attachment?.dataUrl) {
-    const link = document.createElement('a');
-    link.href = attachment.dataUrl;
-    link.download = attachment.name || 'attachment';
-    link.click();
-  }
-  return Promise.resolve({ ok: true });
-}
-
-function MessageAttachments({ attachments = [] }) {
-  if (!attachments.length) return null;
-  return (
-    <div className="message-attachments">
-      {attachments.map(attachment => (
-        <button
-          key={attachment.id || attachment.name}
-          type="button"
-          className="message-attachment"
-          title={attachment.name}
-          aria-label={attachment.name}
-          onClick={() => openAttachment(attachment)}
-        >
-          <span className="message-attachment-icon">{attachmentIcon(attachment)}</span>
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function fallbackCopyText(text) {
-  const textarea = document.createElement('textarea');
-  textarea.value = text;
-  textarea.setAttribute('readonly', '');
-  textarea.style.position = 'fixed';
-  textarea.style.opacity = '0';
-  textarea.style.pointerEvents = 'none';
-  document.body.appendChild(textarea);
-  textarea.select();
-  const copied = document.execCommand('copy');
-  textarea.remove();
-  return copied;
-}
-
-async function copyText(text) {
-  const value = String(text || '');
-  if (!value) return false;
-  if (navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(value);
-      return true;
-    } catch {
-      // Electron/file pages can deny the asynchronous clipboard API. The
-      // selection-based fallback still works for a user-initiated click.
-    }
-  }
-  try {
-    return fallbackCopyText(value);
-  } catch {
-    return false;
-  }
-}
-
-function MessageCopyButton({ text }) {
-  const { t } = useI18n();
-  const [copyState, setCopyState] = useState('idle');
-  const resetTimerRef = useRef(null);
-
-  useEffect(() => () => window.clearTimeout(resetTimerRef.current), []);
-
-  const handleCopy = async event => {
-    event.stopPropagation();
-    const copied = await copyText(text);
-    setCopyState(copied ? 'copied' : 'failed');
-    window.clearTimeout(resetTimerRef.current);
-    resetTimerRef.current = window.setTimeout(() => setCopyState('idle'), 1800);
-  };
-
-  const label = copyState === 'copied'
-    ? t('Nachricht kopiert')
-    : copyState === 'failed'
-      ? t('Kopieren fehlgeschlagen')
-      : t('Nachricht kopieren');
-
-  return (
-    <button
-      type="button"
-      className={`message-copy-button ${copyState}`}
-      onClick={handleCopy}
-      title={label}
-      aria-label={label}
-    >
-      {copyState === 'copied' ? '✓' : copyState === 'failed' ? '!' : '📋'}
-    </button>
-  );
-}
-
-const BROWSER_IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp']);
-const BROWSER_TEXT_EXTENSIONS = new Set([
-  'md', 'markdown', 'txt', 'text', 'log', 'csv', 'tsv', 'json', 'jsonl', 'xml', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf',
-  'js', 'jsx', 'mjs', 'cjs', 'ts', 'tsx', 'css', 'scss', 'html', 'htm', 'svg', 'py', 'java', 'kt', 'c', 'h', 'cpp', 'hpp',
-  'cs', 'go', 'rs', 'rb', 'php', 'sh', 'ps1', 'bat', 'cmd', 'sql', 'graphql', 'vue', 'svelte', 'rst', 'tex',
-]);
-
-function classifyBrowserFile(file) {
-  const extension = String(file?.name || '').split('.').pop()?.toLowerCase() || '';
-  if (file?.type?.startsWith('image/') && BROWSER_IMAGE_EXTENSIONS.has(extension)) return 'image';
-  if (extension === 'md' || extension === 'markdown') return 'markdown';
-  if (file?.type === 'application/pdf' || extension === 'pdf') return 'pdf';
-  if (file?.type?.startsWith('text/') || BROWSER_TEXT_EXTENSIONS.has(extension)) return 'text';
-  return 'file';
-}
-
-function readBrowserFile(file, mode = 'data-url') {
-  if (mode === 'text') return file.text();
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ''));
-    reader.onerror = () => reject(reader.error || new Error('Datei konnte nicht gelesen werden.'));
-    reader.readAsDataURL(file);
-  });
-}
-
-function TypingBubble({ agent }) {
-  return (
-    <div className="message-wrapper">
-      <div className="message-avatar" style={{ width: 28, height: 28 }}>
-        <Avatar agent={agent} size={28} />
-      </div>
-      <div className="typing-agent-block">
-        <div className="typing-agent-heading">
-          <span className="typing-agent-name">{agent?.name || 'Agent'}</span>
-          <span className="typing-agent-role">{agent?.role || 'Agent'}</span>
-        </div>
-        <div className="typing-indicator" aria-label={agent?.name || 'Agent'}>
-          <span className="typing-dot" />
-          <span className="typing-dot" />
-          <span className="typing-dot" />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// Inline system bubble with optional contextual action such as retry or approval.
-function ErrorBubble({ text, onRetry, action = null, isError = true }) {
-  return (
-    <div className="system-message-bubble" style={{
-      display: 'flex', alignItems: 'flex-start', gap: 8,
-      background: isError ? 'rgba(192,57,43,0.15)' : 'rgba(0,168,132,0.12)',
-      border: isError ? '1px solid rgba(192,57,43,0.4)' : '1px solid rgba(0,168,132,0.35)',
-      borderRadius: 8, padding: '8px 40px 8px 12px', margin: '4px 0',
-      fontSize: 13, color: isError ? '#e88' : 'var(--text-primary)',
-    }}>
-      <span className="system-message-text" style={{ flex: 1, lineHeight: 1.5 }}>{text}</span>
-      {onRetry && (
-        <button onClick={onRetry} style={{
-          background: 'rgba(192,57,43,0.3)', border: '1px solid rgba(192,57,43,0.5)',
-          borderRadius: 6, color: '#faa', padding: '3px 10px', cursor: 'pointer',
-          fontSize: 12, flexShrink: 0, whiteSpace: 'nowrap',
-        }}>↺ Retry</button>
-      )}
-      {action && (
-        <button
-          type="button"
-          className={`system-message-action ${action.tone || ''}`}
-          onClick={action.onClick}
-          disabled={action.disabled}
-          title={action.title}
-          aria-label={action.title || action.label}
-        >{action.icon || '✓'} {action.label}</button>
-      )}
-      <MessageCopyButton text={text} />
-    </div>
-  );
-}
-
-function downloadExcalidrawDiagram(diagram) {
-  const documentContent = createExcalidrawDocument(diagram?.elements || []);
-  const blob = new Blob([JSON.stringify(documentContent, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = diagram?.name || 'diagram.excalidraw';
-  link.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-function ExcalidrawDiagram({ diagram }) {
-  const { t } = useI18n();
-  const elements = Array.isArray(diagram?.elements) ? diagram.elements : [];
-  if (!elements.length) return null;
-  const bounds = excalidrawElementBounds(elements);
-  const markerId = `excalidraw-arrow-${String(diagram.id || 'diagram').replace(/[^a-zA-Z0-9_-]/g, '')}`;
-  const renderElement = (element, index) => {
-    const key = element.id || `${element.type}-${index}`;
-    const x = Number(element.x) || 0;
-    const y = Number(element.y) || 0;
-    const width = Math.max(0, Number(element.width) || 0);
-    const height = Math.max(0, Number(element.height) || 0);
-    const stroke = element.strokeColor || '#1e1e1e';
-    const fill = !element.backgroundColor || element.backgroundColor === 'transparent'
-      ? 'transparent'
-      : element.backgroundColor;
-    const opacity = Math.max(0, Math.min(1, (Number(element.opacity) || 100) / 100));
-    const common = { stroke, strokeWidth: Number(element.strokeWidth) || 2, opacity };
-
-    if (element.type === 'rectangle') {
-      return <rect key={key} x={x} y={y} width={width} height={height} rx={element.roundness ? 10 : 0} fill={fill} {...common} />;
-    }
-    if (element.type === 'ellipse') {
-      return <ellipse key={key} cx={x + width / 2} cy={y + height / 2} rx={width / 2} ry={height / 2} fill={fill} {...common} />;
-    }
-    if (element.type === 'diamond') {
-      return <polygon key={key} points={`${x + width / 2},${y} ${x + width},${y + height / 2} ${x + width / 2},${y + height} ${x},${y + height / 2}`} fill={fill} {...common} />;
-    }
-    if (['line', 'arrow', 'freedraw'].includes(element.type) && Array.isArray(element.points)) {
-      const points = element.points.map(point => `${x + (Number(point?.[0]) || 0)},${y + (Number(point?.[1]) || 0)}`).join(' ');
-      return <polyline key={key} points={points} fill="none" markerEnd={element.type === 'arrow' ? `url(#${markerId})` : undefined} {...common} />;
-    }
-    if (element.type === 'text') {
-      const fontSize = Number(element.fontSize) || 20;
-      const lines = String(element.text || element.originalText || '').split('\n');
-      const anchor = element.textAlign === 'center' ? 'middle' : element.textAlign === 'right' ? 'end' : 'start';
-      const textX = anchor === 'middle' ? x + width / 2 : anchor === 'end' ? x + width : x;
-      return (
-        <text key={key} x={textX} y={y + fontSize} fill={stroke} fontSize={fontSize} textAnchor={anchor} opacity={opacity} fontFamily="Segoe UI, sans-serif">
-          {lines.map((line, lineIndex) => <tspan key={lineIndex} x={textX} dy={lineIndex === 0 ? 0 : fontSize * 1.25}>{line}</tspan>)}
-        </text>
-      );
-    }
-    return null;
-  };
-
-  return (
-    <div className="excalidraw-diagram">
-      <div className="excalidraw-diagram-head">
-        <span>🎨 {t('Excalidraw-Diagramm')}</span>
-        <button type="button" onClick={() => downloadExcalidrawDiagram(diagram)}>{t('Herunterladen')}</button>
-      </div>
-      <svg viewBox={`${bounds.x} ${bounds.y} ${bounds.width} ${bounds.height}`} role="img" aria-label={t('Von einem Agenten erstelltes Excalidraw-Diagramm')}>
-        <defs>
-          <marker id={markerId} markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
-            <path d="M0,0 L0,6 L9,3 z" fill="#1e1e1e" />
-          </marker>
-        </defs>
-        {elements.map(renderElement)}
-      </svg>
-    </div>
-  );
-}
-
-function mcpArgumentPreview(value) {
-  const redacted = JSON.stringify(value || {}, (key, item) => (
-    /(?:token|secret|password|authorization|api.?key)/i.test(key) ? '••••' : item
-  ), 2);
-  return redacted.length > 5000 ? `${redacted.slice(0, 5000)}\n…` : redacted;
-}
-
-function createMcpPlannerAgent(agent) {
-  if (agent?.provider === 'anthropic' && /opus/i.test(String(agent.model || ''))) {
-    return { ...agent, model: 'claude-sonnet-4-5' };
-  }
-  return agent;
-}
-
-function McpPermissionPrompt({ request, onDecision }) {
-  const { t } = useI18n();
-  const riskLabels = {
-    'read-only': t('Nur lesend'),
-    write: t('Kann Daten verändern'),
-    destructive: t('Kann Daten löschen oder überschreiben'),
-    external: t('Greift auf externe Dienste zu'),
-  };
-  return (
-    <div className="mcp-inline-permission" role="alert" aria-label={t('Werkzeug-Erlaubnis erforderlich')}>
-      <div className="mcp-inline-permission-icon" aria-hidden="true">🔐</div>
-      <div className="mcp-inline-permission-content">
-        <strong>{t('{agent} benötigt deine Erlaubnis für „{tool}“.', {
-          agent: request.agent?.name || t('Ein Agent'),
-          tool: request.tool?.name || t('Werkzeug'),
-        })}</strong>
-        <span className="mcp-inline-permission-meta">
-          {request.server?.name || 'MCP'} · <span className={`mcp-risk ${request.risk}`}>{riskLabels[request.risk] || request.risk}</span>
-        </span>
-        {request.tool?.description && <span className="mcp-inline-permission-description">{request.tool.description}</span>}
-        {request.pendingArguments ? (
-          <span className="mcp-inline-permission-description">{t('Die konkreten Werkzeugparameter werden nach deiner Freigabe erzeugt.')}</span>
-        ) : (
-          <details className="mcp-permission-arguments">
-            <summary>{t('Übergebene Parameter anzeigen')}</summary>
-            <pre>{mcpArgumentPreview(request.arguments)}</pre>
-          </details>
-        )}
-        <span className="mcp-inline-permission-note">
-          {request.server?.transport === 'http'
-            ? t('Die Daten werden an {url} übertragen.', { url: request.server.url })
-            : t('Das Werkzeug läuft über den lokalen Prozess „{command}“.', { command: request.server?.command })}
-        </span>
-      </div>
-      <div className="mcp-inline-permission-actions">
-        <button className="btn btn-secondary" type="button" onClick={() => onDecision('deny')}>{t('Verweigern')}</button>
-        <button className="btn btn-primary" type="button" onClick={() => onDecision('allow-once')} title={t('Nur diesen Werkzeugaufruf zulassen')}>{t('Zulassen')}</button>
-      </div>
-    </div>
-  );
-}
-
-function MemoryBadge({ count, onOpen }) {
-  const { t } = useI18n();
-  return (
-    <button
-      className="icon-btn memory-open-btn"
-      data-memory-count={count}
-      title={t('Gruppen-Memory öffnen ({count} Einträge)', { count })}
-      aria-label={t('Gruppen-Memory öffnen ({count} Einträge)', { count })}
-      aria-live="polite"
-      onClick={onOpen}
-    >
-      🧠{count > 0 ? ` ${count}` : ''}
-    </button>
-  );
-}
-
-function MemoryViewer({ entries, error, loading, busy, namespace, provider, filePath, language, onClose, onCreateEntry, onDeleteEntry, onClearAll }) {
-  const { t } = useI18n();
-  const [draft, setDraft] = useState('');
-  const [entryType, setEntryType] = useState('fact');
-
-  useEffect(() => {
-    const handleKeyDown = event => {
-      if (event.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onClose]);
-
-  const formatContent = entry => typeof entry.content === 'string'
-    ? entry.content
-    : JSON.stringify(entry.content, null, 2);
-  const sortedEntries = [...entries].sort((left, right) => {
-    const leftDate = new Date(left.created || left.ts || 0).getTime();
-    const rightDate = new Date(right.created || right.ts || 0).getTime();
-    return rightDate - leftDate;
-  });
-  const handleCreate = async event => {
-    event.preventDefault();
-    const content = draft.trim();
-    if (!content || busy) return;
-    const created = await onCreateEntry({ content, type: entryType });
-    if (created) setDraft('');
-  };
-
-  return (
-    <div className="modal-overlay" onClick={event => event.target === event.currentTarget && onClose()}>
-      <div className="modal memory-viewer-modal" role="dialog" aria-modal="true" aria-label={t('Shared Memory anzeigen')}>
-        <div className="modal-body">
-          <div className="memory-viewer-title-row">
-            <div>
-              <div className="modal-title">🧠 {t('Shared Memory anzeigen')}</div>
-              <div className="memory-viewer-meta">
-                <code>memory://{namespace}</code>
-                <span>·</span>
-                <span>{provider === 'file' ? t('JSON-Datei') : t('App-Speicher')}</span>
-              </div>
-              {provider === 'file' && filePath && <div className="memory-viewer-path" title={filePath}>{filePath}</div>}
-            </div>
-            <span className="memory-entry-count">{t('{count} Einträge', { count: entries.length })}</span>
-          </div>
-
-          <form className="memory-entry-compose" onSubmit={handleCreate}>
-            <select className="form-select" value={entryType} onChange={event => setEntryType(event.target.value)} aria-label={t('Memory-Typ')}>
-              <option value="fact">{t('Fakt')}</option>
-              <option value="decision">{t('Entscheidung')}</option>
-              <option value="constraint">{t('Vorgabe')}</option>
-              <option value="finding">{t('Erkenntnis')}</option>
-              <option value="task_state">{t('Aufgabenstand')}</option>
-            </select>
-            <textarea
-              className="form-textarea"
-              value={draft}
-              onChange={event => setDraft(event.target.value)}
-              placeholder={t('Wissen manuell zum Gruppen-Memory hinzufügen…')}
-              rows={2}
-            />
-            <button className="btn btn-primary" type="submit" disabled={!draft.trim() || !!busy}>{t('Speichern')}</button>
-          </form>
-
-          {loading && <div className="memory-viewer-state">{t('Memory wird geladen…')}</div>}
-          {!loading && error && <div className="memory-viewer-state error">{error}</div>}
-          {!loading && !error && sortedEntries.length === 0 && (
-            <div className="memory-viewer-state">{t('Noch keine Memory-Einträge vorhanden.')}</div>
-          )}
-          {!loading && !error && sortedEntries.length > 0 && (
-            <div className="memory-entry-list">
-              {sortedEntries.map(entry => {
-                const rawDate = entry.created || entry.ts;
-                const date = rawDate ? new Date(rawDate) : null;
-                const validDate = date && !Number.isNaN(date.getTime());
-                return (
-                  <article className="memory-entry-card" key={entry.id}>
-                    <div className="memory-entry-head">
-                      <span className="memory-entry-type">{entry.type || t('Eintrag')}</span>
-                      <span>{entry.author || entry.authorName || t('Unbekannt')}</span>
-                      {validDate && <time>{date.toLocaleString(language === 'en' ? 'en-US' : 'de-DE')}</time>}
-                      <button
-                        type="button"
-                        className="memory-entry-delete"
-                        title={t('Memory-Eintrag löschen')}
-                        aria-label={t('Memory-Eintrag löschen')}
-                        disabled={!!busy}
-                        onClick={() => onDeleteEntry(entry)}
-                      >🗑️</button>
-                    </div>
-                    <div className="memory-entry-content">{formatContent(entry)}</div>
-                    {!!entry.tags?.length && (
-                      <div className="memory-entry-tags">{entry.tags.map(tag => <span key={tag}>#{tag}</span>)}</div>
-                    )}
-                  </article>
-                );
-              })}
-            </div>
-          )}
-        </div>
-        <div className="modal-actions">
-          <button className="btn memory-delete-all-btn" onClick={onClearAll} disabled={entries.length === 0 || !!busy}>
-            {t('Alle Memory-Einträge löschen')}
-          </button>
-          <button className="btn btn-secondary" onClick={onClose}>{t('Schließen')}</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-export default function ChatView({ chat, onEditGroup, active = true }) {
+export default function ChatView({ chat, onEditGroup, onCreateExpert, active = true }) {
   const { language, t } = useI18n();
   const {
     agents,
@@ -855,7 +36,8 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
     userRequestQueues,
     taskGraphs,
     crossGroupRequests,
-    addMessage,
+    addMessage: storeAddMessage,
+    rewindMessages,
     apiKeys,
     providerConnections,
     kbPath,
@@ -883,7 +65,7 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
   // Use group-specific projectPath, fall back to nothing
   const projectPath = chat.projectPath || '';
   const chatAgents = chat.type === 'group'
-    ? agents.filter(agent => chat.agentIds?.includes(agent.id))
+    ? agents.filter(agent => chat.agentIds?.includes(agent.id)).map(agent => resolveGroupAgent(agent, chat))
     : agents.filter(agent => agent.id === chat.id);
   const [input, setInput] = useState('');
   const [messageQualityMode, setMessageQualityMode] = useState('auto');
@@ -897,12 +79,16 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
   const [memoryViewer, setMemoryViewer] = useState({ open: false, loading: false, busy: false, entries: [], error: '' });
   const [mcpApproval, setMcpApproval] = useState(null);
   const [agentProgress, setAgentProgress] = useState({});
+  const claudeConversationSessionsRef = useRef(new Map());
+  const codexConversationSessionsRef = useRef(new Map());
   const [retryClock, setRetryClock] = useState(Date.now());
   const [queuePump, setQueuePump] = useState(0);
   const [workflowImportDraft, setWorkflowImportDraft] = useState(null);
   const [workflowFileStatus, setWorkflowFileStatus] = useState({ busy: '', message: '', error: '' });
   const [openWorkflowProblem, setOpenWorkflowProblem] = useState(null);
   const messagesEndRef = useRef(null);
+  const messagesContainerRef = useRef(null);
+  const messagesContentRef = useRef(null);
   const autoRunRef = useRef(chat.type === 'group');
   const textareaRef = useRef(null);
   const browserFileInputRef = useRef(null);
@@ -913,11 +99,18 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
   const runIdRef = useRef(0); // cancellation token — incremented on each new run
   const activeAgentRunRef = useRef(new Map());
   const taskGraphRef = useRef(taskGraphs?.[chat.id] || createTaskGraph(chat.id, chat.name));
+  const addMessage = useCallback((chatId, message) => {
+    storeAddMessage(chatId, chatId === chat.id ? {
+      ...message, rewindSnapshot: { version: 1, graph: structuredClone(taskGraphRef.current) },
+    } : message);
+  }, [chat.id, storeAddMessage]);
   const workflowUndoStackRef = useRef([]);
   const workflowQuestionAnswerPendingRef = useRef(false);
   const workflowProblemAnswerPendingRef = useRef(false);
   const announcedWorkflowProblemKeysRef = useRef(new Set());
   const workflowDeletePendingRef = useRef(false);
+  const acceptanceTestRunRef = useRef(null);
+  const [acceptanceQueueVersion, setAcceptanceQueueVersion] = useState(0);
   const mcpApprovalQueueRef = useRef([]);
   const activeMcpApprovalRef = useRef(null);
   const excalidrawCheckpointsRef = useRef(new Map());
@@ -1155,6 +348,7 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
       pendingQuestions: getPendingWorkflowQuestions(checkpoint),
       workflowProblems,
       groupRequests: windowGroupRequests,
+      testConfigured: Boolean(chat.reviewEnvironment?.test?.command),
       resumeMode,
       canResumeWorkflow: resumeMode && resumeRemainingMs === 0,
       resumeRetrySeconds: Math.ceil(resumeRemainingMs / 1000),
@@ -1228,7 +422,59 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
     ...chatAgents.map(a => ({ id: a.id, label: a.name, emoji: a.emoji || '🤖', role: a.role })),
   ] : [];
 
-  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [chatMessages, typingAgents, agentProgress, mcpApproval]);
+  useEffect(() => {
+    if (!active) return undefined;
+    let frame;
+    const container = messagesContainerRef.current;
+    if (!container) return undefined;
+    let followLatest = true;
+    let lastScrollTop = container.scrollTop;
+    const onScroll = () => {
+      const top = container.scrollTop;
+      if (top < lastScrollTop) followLatest = false;
+      else if (container.scrollHeight - container.clientHeight - top <= 2) followLatest = true;
+      lastScrollTop = top;
+    };
+    // Stop before the scroll event, including when a resize frame is queued.
+    const onWheel = event => { if (event.deltaY < 0) followLatest = false; };
+    const onKeyDown = event => {
+      if (['ArrowUp', 'PageUp', 'Home'].includes(event.key) || (event.key === ' ' && event.shiftKey)) followLatest = false;
+    };
+    let touchY = null;
+    const onTouchStart = event => { touchY = event.touches[0]?.clientY ?? null; };
+    const onTouchMove = event => {
+      const nextY = event.touches[0]?.clientY;
+      if (touchY !== null && nextY > touchY) followLatest = false;
+      touchY = nextY ?? null;
+    };
+    container.addEventListener('scroll', onScroll, { passive: true });
+    container.addEventListener('wheel', onWheel, { passive: true });
+    container.addEventListener('keydown', onKeyDown);
+    container.addEventListener('touchstart', onTouchStart, { passive: true });
+    container.addEventListener('touchmove', onTouchMove, { passive: true });
+    const scrollToLatest = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        if (followLatest) {
+          container.scrollTop = container.scrollHeight;
+          lastScrollTop = container.scrollTop;
+        }
+      });
+    };
+    const observer = new ResizeObserver(scrollToLatest);
+    if (messagesContentRef.current) observer.observe(messagesContentRef.current);
+    if (messagesContainerRef.current) observer.observe(messagesContainerRef.current);
+    scrollToLatest();
+    return () => {
+      observer.disconnect();
+      window.cancelAnimationFrame(frame);
+      container.removeEventListener('scroll', onScroll);
+      container.removeEventListener('wheel', onWheel);
+      container.removeEventListener('keydown', onKeyDown);
+      container.removeEventListener('touchstart', onTouchStart);
+      container.removeEventListener('touchmove', onTouchMove);
+    };
+  }, [active, chat.id]);
   useEffect(() => { chatMessagesRef.current = chatMessages; }, [chatMessages]);
   useEffect(() => { autoRunRef.current = autoRun; }, [autoRun]);
   useEffect(() => { pendingAttachmentsRef.current = pendingAttachments; }, [pendingAttachments]);
@@ -1245,34 +491,35 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
     taskGraphRef.current = taskGraphs?.[chat.id] || createTaskGraph(chat.id, chat.name);
   }, [chat.id, chat.name, taskGraphs]);
   useEffect(() => {
-    if (!window.electronAPI?.onCodexProgress) return undefined;
-    return window.electronAPI.onCodexProgress((progress) => {
+    if (!window.electronAPI?.onLlmProgress) return undefined;
+    return window.electronAPI.onLlmProgress((progress) => {
       const active = [...activeAgentRunRef.current.values()]
-        .find(candidate => progress?.requestId === candidate.requestId);
+        .find(candidate => progress?.requestId === candidate.requestId || progress?.requestId?.startsWith(`${candidate.requestId}-`));
       if (!active) return;
+      if (progress.provider === 'codex' && progress.sessionId && active.task) {
+        active.task.codexSessionId = progress.sessionId;
+        active.task.codexSessionStarted = true;
+        active.task.codexSessionModel = active.model;
+      }
+      if (active.progressRequestId !== progress.requestId || progress.phase === 'starting') {
+        active.progressRequestId = progress.requestId;
+        active.streamText = '';
+      }
+      if (progress.delta) active.streamText = (active.streamText || '') + progress.delta;
+      else if (!active.streamText && progress.partialText) active.streamText = progress.partialText;
+      active.onPlanProgress?.(active.streamText || '');
       setAgentProgress(previous => ({ ...previous, [active.agentId]: {
+        ...(previous?.[active.agentId] || {}),
         agentId: active.agentId,
         taskSummary: previous?.[active.agentId]?.taskSummary || active.taskSummary || t('Bearbeitet den aktuellen Task.'),
         detail: progress.phase === 'activity'
           ? previous?.[active.agentId]?.detail
           : (progress.message || previous?.[active.agentId]?.detail || ''),
         phase: progress.phase === 'activity' ? (previous?.[active.agentId]?.phase || 'working') : (progress.phase || 'working'),
-        startedAt: previous?.[active.agentId]?.startedAt || active.startedAt,
-        updatedAt: progress.ts || Date.now(),
-      }}));
-    });
-  }, [t]);
-  useEffect(() => {
-    if (!window.electronAPI?.onClaudeProgress) return undefined;
-    return window.electronAPI.onClaudeProgress((progress) => {
-      const active = [...activeAgentRunRef.current.values()]
-        .find(candidate => progress?.requestId === candidate.requestId);
-      if (!active) return;
-      setAgentProgress(previous => ({ ...previous, [active.agentId]: {
-        agentId: active.agentId,
-        taskSummary: previous?.[active.agentId]?.taskSummary || active.taskSummary || t('Bearbeitet den aktuellen Task.'),
-        detail: progress.message || previous?.[active.agentId]?.detail || '',
-        phase: progress.phase || previous?.[active.agentId]?.phase || 'working',
+        partialText: active.streamText || progress.partialText || '',
+        firstTokenMs: progress.firstTokenMs ?? previous?.[active.agentId]?.firstTokenMs ?? 0,
+        elapsedMs: progress.elapsedMs ?? previous?.[active.agentId]?.elapsedMs ?? 0,
+        provider: progress.provider || active.provider,
         startedAt: previous?.[active.agentId]?.startedAt || active.startedAt,
         updatedAt: progress.ts || Date.now(),
       }}));
@@ -1445,8 +692,8 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
       (parentNode?.nodeType === 'request' ? parentNode.id : null);
     const title = summarizeTaskActivity({ objective: task.objective, source: task.source, handoff: task.handoff })
       .replace(/^(?:Arbeitet an|Bearbeitet die Übergabe):\s*/i, '');
-    const acceptanceCriteria = existingNode?.acceptanceCriteria?.length
-      ? existingNode.acceptanceCriteria
+    const acceptanceCriteria = existingNode
+      ? (existingNode.acceptanceCriteria || [])
       : normalizeAcceptanceCriteria(task.acceptanceCriteria, {
         taskId: task.planTaskId || graphNodeId,
         fallbackText: nodeType === 'task' && task.source !== 'user'
@@ -1478,6 +725,7 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
         recovery: task.recovery || existingNode?.recovery,
       } : {}),
     };
+    if (existingNode?.userPausedAt) graphNode.status = existingNode.status;
     if (planRootId) graphNode.planRootId = planRootId;
     if (task.planTaskId) graphNode.planTaskId = task.planTaskId;
     // Do not overwrite a persisted primary parent when an existing task is
@@ -1491,7 +739,17 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
 
   const setGraphTaskStatus = useCallback((task, status, extra = {}) => {
     if (!task?.graphNodeId) return;
-    commitTaskGraph(graph => updateTaskNodeStatus(graph, task.graphNodeId, status, extra));
+    const runtimeMetadata = {
+      ...(task.codexSessionId ? {
+        codexSessionId: task.codexSessionId,
+        codexSessionModel: task.codexSessionModel,
+      } : {}),
+      ...(task.lastRunMetrics ? { lastRunMetrics: task.lastRunMetrics } : {}),
+    };
+    commitTaskGraph(graph => updateTaskNodeStatus(graph, task.graphNodeId, status, {
+      ...runtimeMetadata,
+      ...extra,
+    }));
   }, [commitTaskGraph]);
 
   const reportAttachmentErrors = useCallback((errors = []) => {
@@ -1625,2615 +883,28 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
     return { ...msg, memorySaved };
   }, [chat.id, chat.type, addMessage, memoryAPI, memoryConfig?.namespace, refreshMemoryCount, t]);
 
-  const runAgents = useCallback(async (history, triggerText, options = {}) => {
-    // Validate keys
-    const neededProviders = new Set(chatAgents.map(a => a.provider || 'openai'));
-    const missingProviders = [...neededProviders].filter(p => {
-      if (p === 'codex') return false;
-      if (p === 'anthropic') return (
-        !apiKeys?.anthropic?.trim() &&
-        !apiKeys?.anthropicConfigured &&
-        !apiKeys?.claudeCli &&
-        !(typeof process !== 'undefined' && process.env?.ANTHROPIC_API_KEY)
-      );
-      if (p === 'openai') return (
-        !apiKeys?.openai?.trim() &&
-        !apiKeys?.openaiConfigured &&
-        !(typeof process !== 'undefined' && process.env?.OPENAI_API_KEY)
-      );
-      const connection = providerConnections.find(item => item.id === p);
-      if (!connection) return true;
-      return connection.requiresApiKey !== false && !apiKeys?.providerConfigured?.[p];
-    });
-
-    if (missingProviders.length === neededProviders.size) {
-      addMessage(chat.id, {
-        id: Date.now(), agentId: 'system', senderName: 'System',
-        text: `⚠️|${t('Kein API-Key konfiguriert. Bitte in ⚙️ Einstellungen eintragen.')}`,
-        ts: Date.now(), isError: true,
+  const expertiseSearchGuard = useRef(new Set());
+  const queueExpertSearch = useCallback((node, retry = false) => {
+    const skills = expertiseSkills(node);
+    const targets = expertiseTargets(chat, groups, node);
+    if (!skills.length || !targets.length) return;
+    const previous = expertiseRequests(crossGroupRequests, node.id);
+    if (previous.some(request => !terminalSearch(request)) || (!retry && previous.length)) return;
+    const key = `${chat.id}:${node.id}:${previous.length}`;
+    if (expertiseSearchGuard.current.has(key)) return;
+    expertiseSearchGuard.current.add(key);
+    const batchId = `expertise-${node.id}-${Date.now()}`;
+    for (const targetGroup of targets) {
+      const request = createCrossGroupRequest({
+        sourceGroup: chat, sourceTask: { id: node.id, title: 'Expertensuche' }, targetGroup,
+        question: `Gesuchte Fähigkeiten: ${skills.join(', ')}`, requiredCapabilities: skills,
+        delegationReason: EXPERTISE_DISCOVERY, batchId, origin: 'user', attachments: [],
       });
-      return;
+      if (request) enqueueCrossGroupRequest(request);
     }
+  }, [chat, groups, crossGroupRequests, enqueueCrossGroupRequest]);
 
-    if (chatAgents.length === 0) return;
-
-    const persistedContinuation = conversationContinuations.get(chat.id) || conversationStates?.[chat.id] || null;
-    const explicitMentions = chatAgents.filter(agent =>
-      hasUserDirectedMention(triggerText || '', agent.name)
-    );
-    const sideConversation = shouldRunAsWorkflowSideConversation({
-      chatType: chat.type,
-      triggerText,
-      chatAgents,
-      continuation: persistedContinuation,
-    });
-    const savedContinuation = sideConversation ? null : persistedContinuation;
-    const planningOnly = options.planningOnly === true || savedContinuation?.mode === 'planning';
-    const restartPlanningFromScratch = planningOnly && taskGraphRef.current?.workflowResetRequired === true;
-    const latestUserMessage = [...(history || [])].reverse().find(message => message?.agentId === 'user');
-    const latestUserAttachments = latestUserMessage?.attachments || [];
-    const activeQualityMode = triggerText
-      ? (latestUserMessage?.qualityMode || 'auto')
-      : (savedContinuation?.qualityMode || latestUserMessage?.qualityMode || 'auto');
-    const attachmentKeys = new Set();
-    let retainedGroupWaits = Array.isArray(savedContinuation?.waitingGroupTasks)
-      ? [...savedContinuation.waitingGroupTasks]
-      : [];
-    let retainedDelegationWaits = Array.isArray(savedContinuation?.waitingDelegationTasks)
-      ? [...savedContinuation.waitingDelegationTasks]
-      : [];
-    const activeAttachments = [...latestUserAttachments, ...(savedContinuation?.attachments || [])]
-      .filter(attachment => {
-        const key = attachment?.id || attachment?.path || attachment?.name;
-        if (!key || attachmentKeys.has(key)) return false;
-        attachmentKeys.add(key);
-        return true;
-      })
-      .slice(0, 8);
-    const persistRunCheckpoint = state => {
-      if (sideConversation) return;
-      persistConversationCheckpoint({
-        ...state,
-        ...(retainedGroupWaits.length > 0 ? { waitingGroupTasks: retainedGroupWaits } : { waitingGroupTasks: undefined }),
-        ...(retainedDelegationWaits.length > 0
-          ? { waitingDelegationTasks: retainedDelegationWaits }
-          : { waitingDelegationTasks: undefined }),
-        ...(planningOnly ? { mode: 'planning' } : {}),
-        attachments: activeAttachments,
-        qualityMode: activeQualityMode,
-      });
-    };
-    const finishRunCheckpoint = () => {
-      if (!sideConversation) discardConversationCheckpoint();
-    };
-    if (savedContinuation?.status === 'provider-limited' && savedContinuation.retryNotBefore > Date.now()) {
-      const retrySeconds = Math.max(1, Math.ceil((savedContinuation.retryNotBefore - Date.now()) / 1000));
-      if (triggerText && savedContinuation.pendingTasks?.length) {
-        const pendingTasks = savedContinuation.pendingTasks.map((pendingTask, index) => index === 0
-          ? {
-            ...pendingTask,
-            objective: `${pendingTask.objective || 'Setze die offene Aufgabe fort.'}\n\nZusätzliche Nachricht des Users: ${triggerText}`,
-          }
-          : pendingTask);
-        persistRunCheckpoint({ ...savedContinuation, pendingTasks });
-      }
-      addMessage(chat.id, {
-        id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-        text: `⏳|${t('Claude ist noch begrenzt. Deine Nachricht wurde gespeichert; Fortsetzen ist in etwa {seconds}s möglich.', { seconds: retrySeconds })}`,
-        ts: Date.now(), isError: false,
-      });
-      return;
-    }
-
-    setLastRunContext({ history, triggerText });
-    setStoppedForUser(false);
-    setRunning(true);
-
-    // Cancel token: if a new run starts, the old one aborts after its current LLM call
-    runIdRef.current += 1;
-    const myRunId = runIdRef.current;
-
-    // PM orchestration is a group-only concern. In direct chats even the PM
-    // agent behaves like a normal one-to-one conversation partner.
-    const isDirectChat = chat.type !== 'group';
-    const pm = getGroupPMAgent(chat.type, chatAgents);
-
-    // Helper: all explicitly mentioned group agents. The queue de-duplicates
-    // them, so the orchestrator can activate exactly the needed specialists.
-    const getMentionedAgents = (text) => {
-      if (!text) return [];
-      return chatAgents.filter(agent => hasDirectedMention(text, agent.name));
-    };
-
-    // Keep only a lightweight inventory here. KB and project context are
-    // selected separately for each task, including parallel agent runs.
-    let projectInventory = [];
-    if (projectPath && window.electronAPI?.projectList) {
-      const projectResult = await window.electronAPI.projectList({ projectPath });
-      projectInventory = Array.isArray(projectResult?.files) ? projectResult.files : [];
-    }
-
-    // Load shared memory for this group (lazy — only top-N relevant entries)
-    const memoryNamespace = memoryEnabled ? memoryConfig.namespace : null;
-    const memAPI = memoryEnabled ? memoryAPI : null;
-
-    // ── Chain-conversation engine ──────────────────────────────────────────
-    const isEveryoneCall = hasUserDirectedMention(triggerText || '', 'everyone');
-    let pendingAgents = [];
-
-    const route = chat.type === 'group'
-      ? orchestrate({ request: triggerText || '', chatAgents, isEveryone: isEveryoneCall, explicitMentions })
-      : { agents: chatAgents.slice(0, 1), mode: 'direct-chat' };
-    pendingAgents = route.agents;
-
-    if (chat.type === 'group' && !isEveryoneCall && explicitMentions.length === 0 && pm) {
-      // No mention → PM responds (but only if PM hasn't responded since last user message)
-      const lastUserMsgIdx = [...history].reverse().findIndex(m => m.agentId === 'user');
-      const msgsSinceUser = lastUserMsgIdx >= 0 ? history.slice(history.length - lastUserMsgIdx) : [];
-      const pmAlreadyResponded = msgsSinceUser.some(m => m.agentId === pm.id);
-      if (!pmAlreadyResponded) {
-        pendingAgents = [pm];
-      }
-      // If PM already responded, check if there's a pending agent from last PM message
-      else {
-        const lastPMMsg = [...msgsSinceUser].reverse().find(m => m.agentId === pm.id);
-        if (lastPMMsg?.text) {
-          const pendingFromPM = getMentionedAgents(lastPMMsg.text).filter(a => {
-            // Only trigger agents that haven't responded since last user message
-            return !msgsSinceUser.some(m => m.agentId === a.id);
-          });
-          if (pendingFromPM.length) pendingAgents = pendingFromPM;
-        }
-      }
-    }
-
-    if (planningOnly && pm) pendingAgents = [pm];
-
-    const initialObjective = savedContinuation?.initialObjective || triggerText ||
-      [...history].reverse().find(message => message.agentId === 'user')?.text ||
-      'Bearbeite die aktuelle Aufgabe.';
-    const initialRunComplexity = assessTaskComplexity({
-      objective: initialObjective,
-      attachmentCount: activeAttachments.length,
-    });
-    const useLeanFastPath = chat.type === 'group' &&
-      activeQualityMode === 'fast' &&
-      initialRunComplexity.level === 'low' &&
-      activeAttachments.length === 0 &&
-      !projectPath &&
-      activeMcpServers.length === 0 &&
-      pendingAgents.length <= 1;
-    const taskQueue = new AgentTaskQueue({
-      maxTurns: conversationLimits.maxTurns,
-      maxTurnsPerAgent: conversationLimits.maxTurnsPerAgent,
-      guardState: savedContinuation?.queueGuard,
-    });
-    const requestedParallelTaskIds = new Set(savedContinuation?.parallelTaskIds || []);
-    let needsSynthesis = savedContinuation?.needsSynthesis || false;
-    let synthesisCount = savedContinuation?.synthesisCount || 0;
-    const delegatedResults = [...(savedContinuation?.delegatedResults || [])];
-    const loopGuardRejections = [];
-    let activePlanRootNodeId = savedContinuation?.planRootGraphNodeId || null;
-    let planningDraftTasks = [...(savedContinuation?.pendingTasks || [])];
-
-    if (planningOnly && pm) {
-      const planningTask = registerGraphTask({
-        agent: pm,
-        objective: triggerText || initialObjective || 'Besprich und aktualisiere den Workflow mit dem User.',
-        source: 'user',
-        ...(activePlanRootNodeId ? { graphNodeId: activePlanRootNodeId } : {}),
-      }, { status: 'queued' });
-      activePlanRootNodeId = planningTask.graphNodeId;
-      taskQueue.enqueue(planningTask);
-    } else if (savedContinuation) {
-      const restoreTask = (pendingTask) => {
-        const restoredAgent = chatAgents.find(candidate =>
-          candidate.id === pendingTask?.agent?.id || candidate.name === pendingTask?.agent?.name
-        );
-        return restoredAgent ? {
-          ...pendingTask,
-          agent: pendingTask.modelOverride
-            ? { ...restoredAgent, model: pendingTask.modelOverride }
-            : restoredAgent,
-        } : null;
-      };
-      const restoredPendingTasks = orderTasksForParallelSelection((savedContinuation.pendingTasks || [])
-        .map(restoreTask)
-        .filter(Boolean), requestedParallelTaskIds);
-      const awaitsUserAnswer = savedContinuation.status === 'awaiting-user' ||
-        (!savedContinuation.status && savedContinuation.askingAgent);
-      const awaitsGroupAnswer = Boolean(options.crossGroupBatchId) &&
-        (savedContinuation.waitingGroupTasks || []).some(wait => wait.batchId === options.crossGroupBatchId);
-
-      if (awaitsGroupAnswer) {
-        const waitingGroupTasks = Array.isArray(savedContinuation.waitingGroupTasks)
-          ? savedContinuation.waitingGroupTasks
-          : [];
-        const answeredBatchId = String(options.crossGroupBatchId || '');
-        const answeredWaits = waitingGroupTasks.filter(wait => wait.batchId === answeredBatchId);
-        retainedGroupWaits = waitingGroupTasks.filter(wait => wait.batchId !== answeredBatchId);
-        if (!triggerText || !answeredBatchId || answeredWaits.length === 0) {
-          setRunning(false);
-          return;
-        }
-        for (const wait of answeredWaits) {
-          const waitingTask = restoreTask(wait.task);
-          if (!waitingTask) continue;
-          const delegatedTaskResult = wait.kind === 'task_delegation';
-          const savedInterim = String(wait.interimResult || '').trim();
-          const answerTask = {
-            ...waitingTask,
-            objective: [
-              waitingTask.objective || 'Setze die wartende Aufgabe fort.',
-              savedInterim ? `Zwischengespeicherter Arbeitsstand vor der Rückfrage:\n${savedInterim.slice(0, 12000)}` : '',
-              `${delegatedTaskResult ? 'Ergebnis der delegierten Ausführung' : 'Antwort der angefragten Gruppe(n)'}:\n${triggerText}`,
-              'Setze auf diesem Arbeitsstand auf und wiederhole bereits erledigte Schritte nicht.',
-            ].filter(Boolean).join('\n\n'),
-            source: 'group-answer',
-            approvedContinuation: true,
-            delegatedTaskResult,
-            crossGroupBatchId: answeredBatchId,
-            crossGroupRequestIds: wait.requestIds || [],
-          };
-          registerGraphTask(answerTask, { status: 'queued' });
-          taskQueue.enqueue(answerTask);
-          if (answerTask.graphNodeId) {
-            commitTaskGraph(graph => updateTaskNodeStatus(graph, answerTask.graphNodeId, 'queued', {
-              groupAnsweredAt: Date.now(),
-              waitingGroupNames: [],
-              ...(savedInterim ? { interimResult: savedInterim, interimResumedAt: Date.now() } : {}),
-              ...(delegatedTaskResult ? { delegationCompletedAt: Date.now() } : {}),
-            }));
-          }
-        }
-      } else if (awaitsUserAnswer) {
-        if (!triggerText) {
-          setStoppedForUser(true);
-          setRunning(false);
-          return;
-        }
-        const restoredAskingAgent = chatAgents.find(candidate =>
-          candidate.id === savedContinuation.askingAgent?.id || candidate.name === savedContinuation.askingAgent?.name
-        );
-        if (restoredAskingAgent) {
-          const answerTask = buildUserAnswerTask({
-            askingAgent: restoredAskingAgent,
-            question: savedContinuation.question,
-            answer: triggerText,
-          });
-          const askingNode = savedContinuation.askingGraphNodeId
-            ? taskGraphRef.current?.nodes?.find(node => node.id === savedContinuation.askingGraphNodeId)
-            : null;
-          if (taskGraphRef.current?.approvedPlan && askingNode) {
-            answerTask.graphNodeId = askingNode.id;
-            answerTask.planRootId = askingNode.planRootId;
-            answerTask.planTaskId = askingNode.planTaskId;
-            answerTask.approvedContinuation = true;
-            if (askingNode.modelOverride || askingNode.model) answerTask.modelOverride = askingNode.modelOverride || askingNode.model;
-            if (askingNode.runtimeRecovery && askingNode.recovery) {
-              answerTask.source = 'timeout-recovery';
-              answerTask.runtimeRecovery = true;
-              answerTask.recovery = askingNode.recovery;
-              // Runtime recovery nodes are intentionally outside the approved
-              // contract but remain authorized through their original task.
-              answerTask.modelOverride = undefined;
-            }
-          }
-          registerGraphTask(answerTask, {
-            status: 'queued',
-            parentNodeId: answerTask.graphNodeId === savedContinuation.askingGraphNodeId
-              ? null
-              : savedContinuation.askingGraphNodeId || null,
-          });
-          taskQueue.enqueue(answerTask);
-          if (savedContinuation.askingGraphNodeId) {
-            commitTaskGraph(graph => updateTaskNodeStatus(
-              graph,
-              savedContinuation.askingGraphNodeId,
-              answerTask.graphNodeId === savedContinuation.askingGraphNodeId ? 'queued' : 'agent_done',
-              { answeredAt: Date.now() },
-            ));
-          }
-        }
-      } else if (triggerText && restoredPendingTasks.length > 0) {
-        restoredPendingTasks[0] = {
-          ...restoredPendingTasks[0],
-          objective: `${restoredPendingTasks[0].objective || 'Setze die offene Aufgabe fort.'}\n\nZusätzliche Nachricht des Users beim Fortsetzen: ${triggerText}`,
-        };
-      }
-      for (const pendingTask of restoredPendingTasks) {
-        registerGraphTask(pendingTask, { status: pendingTask.graphNodeId ? undefined : 'queued' });
-        taskQueue.enqueue(pendingTask);
-      }
-    } else {
-      for (const agent of pendingAgents) {
-        const taskDraft = {
-          agent,
-          objective: initialObjective,
-          source: 'user',
-          routeMode: route.mode,
-          explicitMentionCount: explicitMentions.length,
-          explicitlyAddressedAgentId: explicitMentions.length === 1 ? explicitMentions[0].id : null,
-          outOfBand: sideConversation,
-        };
-        const initialTask = sideConversation
-          ? taskDraft
-          : registerGraphTask(taskDraft, { status: 'queued' });
-        if (chat.type === 'group' && agent.id === pm?.id && !activePlanRootNodeId) {
-          activePlanRootNodeId = initialTask.graphNodeId;
-        }
-        taskQueue.enqueue(initialTask);
-      }
-    }
-
-    if (chat.type === 'group' && autoRunRef.current && requestedParallelTaskIds.size === 0) {
-      const safeParallelIds = findSafeAutoParallelTaskIds(taskGraphRef.current, taskQueue.pendingTasks());
-      safeParallelIds.forEach(nodeId => requestedParallelTaskIds.add(nodeId));
-      taskQueue.prioritize(safeParallelIds);
-    }
-
-    let task;
-    let successfulTasks = savedContinuation?.successfulTasks || 0;
-    let projectCompleted = false;
-    let resumableFailure = false;
-
-    const executeAgentTask = async (task) => {
-      if (runIdRef.current !== myRunId) {
-        return null;
-      }
-
-      const { agent } = task;
-      const liveTaskNode = task.graphNodeId
-        ? taskGraphRef.current?.nodes?.find(node => node.id === task.graphNodeId)
-        : null;
-      const mayRouteDelegation = Boolean(
-        chat.type === 'group' &&
-        taskGraphRef.current?.approvedPlan &&
-        liveTaskNode &&
-        inferTaskNodeType(liveTaskNode) === 'task' &&
-        !task.outOfBand &&
-        !task.runtimeRecovery &&
-        !task.preparationOnly &&
-        task.source !== 'group-answer'
-      );
-      if (mayRouteDelegation) {
-        const delegationDecision = evaluateTaskDelegation({
-          taskNode: liveTaskNode,
-          sourceGroup: chat,
-          groups,
-          agents,
-        });
-        if (delegationDecision.action === 'delegate') {
-          const candidate = delegationDecision.candidate;
-          const targetGroup = groups.find(group => group.id === candidate.groupId);
-          const targetAgent = agents.find(candidateAgent => candidateAgent.id === candidate.agentId);
-          const targetAgents = (candidate.agentIds || [candidate.agentId])
-            .map(agentId => agents.find(candidateAgent => candidateAgent.id === agentId))
-            .filter(Boolean);
-          const batchId = `task-delegation-batch-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-          const request = createCrossGroupRequest({
-            sourceGroup: chat,
-            sourceTask: task,
-            sourceAgent: agent,
-            targetGroup,
-            targetAgent,
-            targetAgents,
-            question: buildDelegatedTaskQuestion(liveTaskNode, delegationDecision.policy),
-            attachments: activeAttachments,
-            batchId,
-            origin: 'agent',
-            kind: 'task_delegation',
-            requiredCapabilities: delegationDecision.policy.requiredCapabilities,
-            delegationReason: delegationDecision.reason,
-            qualityMode: activeQualityMode,
-          });
-          if (request) {
-            enqueueCrossGroupRequest(request);
-            setGraphTaskStatus(task, 'waiting_group', {
-              delegationKind: 'task',
-              delegatedToGroupId: request.targetGroupId,
-              delegatedToGroupName: request.targetGroupName,
-              delegatedToAgentId: request.targetAgentId,
-              delegatedToAgentName: request.targetAgentName,
-              waitingGroupRequestIds: [request.id],
-              groupWaitStartedAt: Date.now(),
-            });
-            commitTaskGraph(graph => recordTaskExecutionEvent(graph, task, 'delegated', {
-              requestId: request.id,
-              targetGroupId: request.targetGroupId,
-              targetAgentId: request.targetAgentId,
-            }));
-            addMessage(chat.id, {
-              id: `task-delegation-${request.id}`,
-              agentId: 'system',
-              senderName: 'System',
-              text: `⇄|${t('„{task}“ wird von {agent} in {group} ausgeführt. Unabhängige Aufgaben laufen parallel weiter.', {
-                task: liveTaskNode.title,
-                agent: request.targetAgentName,
-                group: request.targetGroupName,
-              })}`,
-              ts: Date.now(),
-              isError: false,
-            });
-            return {
-              task,
-              agent,
-              groupPauseRequested: true,
-              groupPauseRequests: [request],
-              delegatedTask: true,
-            };
-          }
-        }
-        if (delegationDecision.action === 'ask') {
-          const proposal = {
-            id: `delegation-proposal-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
-            taskId: liveTaskNode.id,
-            taskTitle: liveTaskNode.title,
-            requiredCapabilities: delegationDecision.policy.requiredCapabilities,
-            candidate: delegationDecision.candidate,
-            candidates: delegationDecision.candidates,
-            createdAt: Date.now(),
-          };
-          setGraphTaskStatus(task, 'delegation_pending', { delegationProposal: proposal });
-          commitTaskGraph(graph => recordTaskExecutionEvent(graph, task, 'delegation-proposed', {
-            targetGroupId: proposal.candidate.groupId,
-            targetAgentId: proposal.candidate.agentId,
-          }));
-          addMessage(chat.id, {
-            id: proposal.id,
-            agentId: 'system',
-            senderName: 'System',
-            text: `⇄|${t('Für „{task}“ gibt es lokal keinen passenden Experten. Delegation an {agent} in {group} hier oder im Workflow freigeben oder lokal ausführen.', {
-              task: liveTaskNode.title,
-              agent: proposal.candidate.agentName,
-              group: proposal.candidate.groupName,
-            })}`,
-            ts: Date.now(),
-            isError: false,
-            delegationTaskId: liveTaskNode.id,
-          });
-          return { task, agent, delegationApprovalRequested: true, delegationProposal: proposal };
-        }
-        if (delegationDecision.action === 'unavailable') {
-          setGraphTaskStatus(task, 'blocked', {
-            blockedReason: 'delegation-no-target-expert',
-            error: 'Keine freigeschaltete Zielgruppe deckt die benötigten Fähigkeiten semantisch ab.',
-          });
-          commitTaskGraph(graph => recordTaskExecutionEvent(graph, task, 'delegation-unavailable'));
-          addMessage(chat.id, {
-            id: `delegation-unavailable-${liveTaskNode.id}-${Date.now()}`,
-            agentId: 'system',
-            senderName: 'System',
-            text: `⇄|${t('Für „{task}“ wurde in den erreichbaren Zielgruppen keine ausreichende Kompetenzabdeckung gefunden. Der Plan blieb unverändert.', { task: liveTaskNode.title })}`,
-            ts: Date.now(),
-            isError: true,
-          });
-          return { task, agent, delegationUnavailable: true };
-        }
-      }
-      const configuredAgent = task.modelOverride
-        ? { ...agent, model: task.modelOverride }
-        : agent;
-      if (!task.outOfBand) {
-        const executionStatus = task.preparationOnly ? 'preparing' : 'running';
-        commitTaskGraph(graph => recordTaskExecutionEvent(graph, task, task.preparationOnly ? 'preparation-started' : 'started'));
-        registerGraphTask(task, { status: executionStatus });
-        setGraphTaskStatus(task, executionStatus, {
-          startedAt: Date.now(),
-          ...(task.preparationOnly ? { preparationAttemptedAt: Date.now(), preparationError: undefined } : {}),
-        });
-        if (task.runtimeRecovery && task.recovery?.originalGraphNodeId) {
-          commitTaskGraph(graph => updateTaskNodeStatus(graph, task.recovery.originalGraphNodeId, task.recovery.originalStatus || 'timed_out', {
-            recoveryStatus: task.source === 'timeout-recovery-step' ? 'step' : 'pm',
-            recoveryTaskId: task.graphNodeId,
-          }));
-        }
-      }
-      const activeHandoff = task.handoff || null;
-      const objective = activeHandoff?.summary || task.objective || initialObjective;
-      let pauseRequested = false;
-      let pauseQuestion = '';
-      let scheduleDecisionRequested = false;
-      let providerPauseRequested = false;
-      let providerRetryAfterMs = 0;
-      let groupPauseRequested = false;
-      let groupPauseRequests = [];
-      let savedInterimResult = '';
-      let releaseAgentLease = () => {};
-      const isOrchestrator = chat.type === 'group' && agent.id === pm?.id;
-      let taskKbContext = '';
-      if (kbPath && objective && window.electronAPI?.kbSearch) {
-        try {
-          const kbResult = await window.electronAPI.kbSearch({ query: objective, kbPath, maxResults: 3 });
-          if (kbResult?.results?.length > 0) {
-            taskKbContext = '\n\n[Für diese Aufgabe relevante Wissensbasis-Auszüge]:\n' +
-              kbResult.results.map(result => `**${result.title}**:\n${result.snippet}`).join('\n\n---\n');
-          }
-        } catch {
-          taskKbContext = '';
-        }
-      }
-      const taskProjectContext = projectPath
-        ? buildRelevantProjectInventoryContext({
-          files: projectInventory,
-          objective,
-          maxFiles: isOrchestrator || isDirectChat ? 20 : 12,
-          includeFallback: isOrchestrator || isDirectChat,
-        })
-        : '';
-      const taskComplexity = assessTaskComplexity({
-        objective,
-        source: task.source,
-        attachmentCount: activeAttachments.length,
-        recovery: task.source === 'timeout-recovery' || task.source === 'timeout-recovery-step',
-      });
-      const qualityPolicy = resolveQualityPolicy({
-        globalConfig: qualityRouting,
-        groupConfig: chat.qualityRouting,
-        agentConfig: configuredAgent.qualityRouting,
-        messageMode: activeQualityMode,
-        complexity: taskComplexity,
-        agent: configuredAgent,
-        providerModelsById: Object.fromEntries(providerConnections.map(connection => [connection.id, connection.models || []])),
-      });
-      let selectedModelAgent = task.modelOverride
-        ? configuredAgent
-        : qualityPolicy.directStrong ? qualityPolicy.escalationAgent : configuredAgent;
-      const agentRequestId = `${chat.id}-${agent.id}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-      const taskSummary = summarizeTaskActivity({ objective, source: task.source, handoff: activeHandoff });
-      const activeAgentRun = {
-        requestId: agentRequestId,
-        agentId: agent.id,
-        agentName: agent.name,
-        provider: selectedModelAgent.provider || 'openai',
-        runtime: selectedModelAgent.provider === 'anthropic' && !apiKeys?.anthropic?.trim() && !apiKeys?.anthropicConfigured && apiKeys?.claudeCli
-          ? 'claude'
-          : (selectedModelAgent.provider || 'openai'),
-        graphNodeId: task.graphNodeId,
-        taskSummary,
-        startedAt: Date.now(),
-      };
-      activeAgentRunRef.current.set(agentRequestId, activeAgentRun);
-      setAgentProgress(previous => ({ ...previous, [agent.id]: {
-        agentId: agent.id,
-        taskSummary,
-        detail: selectedModelAgent.provider === 'codex'
-          ? 'Bereitet die Arbeitsumgebung für diesen Task vor.'
-          : qualityPolicy.directStrong
-            ? 'Bearbeitet die Aufgabe direkt mit der stärkeren Modellstufe.'
-            : 'Bearbeitet die Aufgabe und formuliert das konkrete Ergebnis.',
-        phase: 'working',
-        startedAt: activeAgentRun.startedAt,
-        updatedAt: Date.now(),
-      }}));
-      setTypingAgents(prev => [...prev, agent.id]);
-      if (runIdRef.current !== myRunId) return;
-
-      try {
-        releaseAgentLease = await acquireAgentLease(agent.id);
-        if (runIdRef.current !== myRunId) return null;
-        let taskReviewContext = '';
-        const shouldRunConfiguredReview = !task.outOfBand
-          && chat.type === 'group'
-          && Boolean(projectPath)
-          && Boolean(chat.reviewEnvironment?.test?.command)
-          && /(?:test|prüf|validier|kontrollier|abnahme|quality|qa|lektori)/i.test(objective)
-          && /(?:test|qa|quality|prüf|review|lektor|analyst)/i.test(`${agent.role || ''} ${agent.name || ''}`)
-          && Boolean(window.electronAPI?.reviewRun);
-        if (shouldRunConfiguredReview) {
-          setAgentProgress(previous => ({ ...previous, [agent.id]: {
-            ...(previous[agent.id] || {}),
-            detail: t('Führt den konfigurierten Prüfbefehl aus.'),
-            phase: 'review', updatedAt: Date.now(),
-          }}));
-          addMessage(chat.id, {
-            id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-            text: `🧪|${t('{agent} startet den konfigurierten Prüfbefehl.', { agent: agent.name })}`,
-            ts: Date.now(), isError: false,
-          });
-          try {
-            const reviewResult = await window.electronAPI.reviewRun(chat.id, 'test');
-            if (runIdRef.current !== myRunId) return;
-            taskReviewContext = `\n\n[AUTOMATISCHER PRÜFLAUF]\nBefehl: ${reviewResult.command || ''}\nStatus: ${reviewResult.ok ? 'ERFOLGREICH' : 'FEHLGESCHLAGEN'}\nExit-Code: ${reviewResult.code ?? 'unbekannt'}\nAusgabe:\n${String(reviewResult.output || '(keine Ausgabe)').slice(-30000)}\n`;
-            addMessage(chat.id, {
-              id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-              text: `🧪|${reviewResult.ok
-                ? t('{agent}: Prüfbefehl erfolgreich abgeschlossen.', { agent: agent.name })
-                : t('{agent}: Prüfbefehl fehlgeschlagen. Die Ausgabe wurde an den Agenten übergeben.', { agent: agent.name })}`,
-              ts: Date.now(), isError: !reviewResult.ok,
-            });
-          } catch (reviewError) {
-            if (runIdRef.current !== myRunId) return;
-            taskReviewContext = `\n\n[AUTOMATISCHER PRÜFLAUF NICHT AUSGEFÜHRT]\n${reviewError.message}\n`;
-            addMessage(chat.id, {
-              id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-              text: `🧪|${t('{agent}: Prüfbefehl konnte nicht gestartet werden — {error}', { agent: agent.name, error: reviewError.message })}`,
-              ts: Date.now(), isError: true,
-            });
-          }
-        }
-        const memoryContext = memAPI ? await memAPI.getContextForAgent(
-          memoryNamespace, objective || agent.name, agent.name, 5
-        ) : '';
-        let isolatedSystemPrompt = buildIsolatedSystemPrompt({
-          agent,
-          groupName: chat.name,
-          groupAgentNames: chatAgents.map(a => a.name),
-          groupAgents: chatAgents,
-          availableGroups: chat.crossGroupCollaborationEnabled
-            ? groups
-              .filter(group => reachableCrossGroupIds.includes(group.id))
-              .map(group => ({
-                ...group,
-                capabilities: [...new Set([
-                  ...(group.capabilityIndex?.explicitCapabilities || []),
-                  ...(group.capabilityIndex?.derivedCapabilities || []),
-                ])].slice(0, 24),
-              }))
-            : [],
-          memoryNamespace,
-          projectPath: task.outOfBand ? '' : projectPath,
-          reviewEnvironment: chat.reviewEnvironment,
-          isOrchestrator,
-          isDirectChat,
-          planningMode: planningOnly,
-          recoveryMode: task.source === 'timeout-recovery',
-          userOwnedWorkflow: Boolean(
-            taskGraphRef.current?.planOwner === 'user' ||
-            taskGraphRef.current?.approvedPlan ||
-            taskGraphRef.current?.previousApprovedPlan
-          ),
-        });
-        if (qualityPolicy.acceptanceCriteria) {
-          isolatedSystemPrompt += `\n\nZusätzliche Akzeptanzkriterien für diesen Agenten:\n${qualityPolicy.acceptanceCriteria}`;
-        }
-        const recoveryOriginalGraphNodeId = task.runtimeRecovery ? task.recovery?.originalGraphNodeId : '';
-        const evidenceGraphNodeId = task.source === 'timeout-recovery-step' && recoveryOriginalGraphNodeId
-          ? recoveryOriginalGraphNodeId
-          : task.graphNodeId;
-        const taskCapsuleGraphNodeId = recoveryOriginalGraphNodeId || task.graphNodeId;
-        const allCurrentPlanNodes = activePlanRootNodeId
-          ? (taskGraphRef.current?.nodes || [])
-            .filter(node => node.planRootId === activePlanRootNodeId)
-            .sort((left, right) => (left.planOrder || 0) - (right.planOrder || 0))
-          : [];
-        const needsCompletePlanContext = planningOnly || (
-          isOrchestrator && ['user', 'team-synthesis', 'turn-limit-review'].includes(task.source)
-        );
-        const relevantPlanNodeIds = needsCompletePlanContext
-          ? null
-          : new Set([
-            taskCapsuleGraphNodeId,
-            ...workflowDependencyAncestorIds(taskGraphRef.current, taskCapsuleGraphNodeId),
-          ].filter(Boolean));
-        const currentPlanNodes = relevantPlanNodeIds
-          ? allCurrentPlanNodes.filter(node => relevantPlanNodeIds.has(node.id))
-          : allCurrentPlanNodes;
-        const currentPlanContext = currentPlanNodes.length
-          ? `${needsCompletePlanContext ? 'Aktueller Workflow-Plan' : 'Für diese Aufgabe relevanter Workflow-Ausschnitt'}:\n${currentPlanNodes.map(node =>
-            `- ${node.planTaskId || node.id}: ${node.title} | Typ: ${node.nodeType === 'review' ? 'review' : 'task'} | Ziel: ${node.objective || node.title} | Agent: ${node.agentName} | Übergeordnet: ${taskGraphRef.current?.nodes?.find(candidate => candidate.id === node.parentNodeId)?.planTaskId || 'keine'} | Abhängig von: ${(taskGraphRef.current?.edges || []).filter(edge => edge.to === node.id && ['dependency', 'review'].includes(edge.kind)).map(edge => taskGraphRef.current?.nodes?.find(candidate => candidate.id === edge.from)?.planTaskId || edge.from).join(', ') || 'keiner'} | Delegation: ${JSON.stringify(node.delegation || { mode: 'never', requiredCapabilities: [], allowedTargetGroupIds: [] })} | Status: ${node.status}`
-          ).join('\n')}${formatAcceptanceContext(currentPlanNodes)}`
-          : '';
-        const currentGraphTaskNode = taskGraphRef.current?.nodes?.find(node => node.id === taskCapsuleGraphNodeId);
-        const taskCapsule = buildTaskCapsule({
-          agentName: agent.name,
-          agentRole: agent.role || 'Agent',
-          objective,
-          constraints: [
-            ...(isDirectChat ? [
-              'Dies ist ein Einzelchat: Antworte direkt selbst auf die User-Anfrage.',
-              'Keine PM-Planung, keine Agenten-Handoffs und keine Abschlussprüfung durch einen anderen Agenten.',
-            ] : [
-              'Keinen vollständigen Gruppenverlauf anfordern.',
-              'Nur die zugewiesene Aufgabe bearbeiten.',
-              taskGraphRef.current?.planOwner === 'user'
-                ? (task.runtimeRecovery
-                  ? 'Dies ist eine systemseitige Recovery-Unteraufgabe. Der freigegebene Plan bleibt unverändert; nur die technische Ausführung der festgefahrenen Originalaufgabe wird kleinteilig fortgesetzt.'
-                  : 'Bei einem unlösbaren Problem den PM oder User um Entscheidung bitten; keine neue Aufgabe anlegen und den Plan nicht verändern.')
-                : 'Weitere Arbeit mit einer klaren @Name-Aufgabe übergeben.',
-            ]),
-            ...(isOrchestrator && task.source === 'user' && !useLeanFastPath && !planningOnly ? [
-              'Erstelle vor den Handoffs jetzt den vollständigen initialen [[TASK_PLAN]] mit allen absehbaren Aufgaben und echten Abhängigkeiten. Eine Prüfaufgabe ist optional.',
-            ] : []),
-            ...(isOrchestrator && task.source === 'user' && useLeanFastPath && !planningOnly ? [
-              'Schnellmodus für eine einfache Aufgabe: Halte die Koordination minimal und delegiere höchstens an einen Spezialisten.',
-              'Ein TASK_PLAN ist für diesen Lauf nicht erforderlich.',
-            ] : []),
-            ...(isOrchestrator && task.source === 'team-synthesis' && currentPlanContext ? [
-              'Nutze den aktuellen PM-Plan: Delegiere nur startbereite offene Aufgaben. Schließe nicht ab, solange geplante Fachaufgaben offen sind.',
-            ] : []),
-            ...(planningOnly ? [
-              ...(restartPlanningFromScratch ? [
-                'Achtung: Der vorherige Workflow wurde ausdrücklich gelöscht. Beginne die Planung vollständig neu.',
-                'Übernimm keine Aufgaben, IDs, Abhängigkeiten, Status oder Annahmen aus früheren TASK_PLAN-Blöcken. Maßgeblich ist ausschließlich die neue User-Anforderung.',
-              ] : []),
-              'Bleibe im Planungsmodus: keine Agenten aktivieren, keine Werkzeuge zur Umsetzung verwenden und keine Dateien erzeugen.',
-              'Wenn du für die Planung eine Antwort des Users benötigst, beginne jede Rückfrage ganz links auf einer eigenen Zeile mit @user.',
-              'Gib bei jeder Antwort den vollständigen aktuellen TASK_PLAN-Entwurf aus; er ersetzt den Entwurf im Workflowfenster.',
-              'In der Planungsphase darfst du nicht mehr benötigte oder fehlerhafte Aufgaben entfernen, indem du ihre IDs im vollständigen neuen TASK_PLAN weglässt.',
-              'Bewahre alle nicht von der gewünschten Änderung betroffenen IDs, Ziele, Agenten, Kriterien und Abhängigkeiten.',
-            ] : []),
-            ...(task.outOfBand ? [
-              'Dies ist eine direkte Fachfrage außerhalb des pausierten Workflows. Antworte selbst und verändere den gespeicherten Plan nicht.',
-              'Keine Agenten-Handoffs, keine TASK_PLAN-Ausgabe, keine Werkzeuge und keine Dateiänderungen.',
-            ] : []),
-            ...(task.source === 'timeout-recovery' ? [
-              `Dies ist eine ${task.recovery?.trigger === 'quality' ? 'Qualitäts-Recovery' : task.recovery?.trigger === 'error' ? 'Problem-Recovery' : 'Timeout-Recovery'} für ${task.recovery?.originalAgentName || 'den ursprünglichen Agenten'}.`,
-              `Untersuche die zu große oder festgefahrene Aufgabe und delegiere höchstens EINEN deutlich kleineren, konkret prüfbaren Schritt an @${task.recovery?.originalAgentName || 'den ursprünglichen Agenten'}.`,
-              'Delegiere während der Recovery nicht mehrere Schritte gleichzeitig und verwende noch kein [[PROJECT_DONE]].',
-              'Wenn die festgefahrene Aufgabe vollständig gelöst ist, bestätige das ausdrücklich mit [[RECOVERY_RESOLVED]].',
-              'Wenn du keine sichere Lösung innerhalb des freigegebenen Plans findest oder eine Entscheidung benötigst, beginne eine konkrete Rückfrage auf einer eigenen Zeile mit @user.',
-              'Eine @user-Rückfrage soll die Diagnose und möglichst zwei verständliche Handlungsoptionen enthalten.',
-            ] : []),
-            ...(task.source === 'timeout-recovery-step' ? [
-              'Dies ist ein verkleinerter Recovery-Teilschritt. Bearbeite ausschließlich diesen Schritt und erweitere seinen Umfang nicht.',
-              'Dein Ergebnis wird danach sofort vom PM geprüft.',
-            ] : []),
-            ...(task.preparationOnly ? [
-              'Dies ist ausschließlich ein sicherer Vorbereitungslauf, während freigegebene Abhängigkeiten noch laufen.',
-              'Bearbeite nur reversible, von den fehlenden Vorgängerergebnissen unabhängige Vorarbeit. Triff keine Annahmen über diese Ergebnisse.',
-              'Schließe die Gesamtaufgabe nicht ab. Stelle keine Rückfragen, delegiere nichts und gib keine @Erwähnungen, TASK_PLAN- oder PROJECT_DONE-Blöcke aus.',
-              'Dokumentiere präzise, was vorbereitet wurde und was bis zum Eintreffen der Abhängigkeiten offenbleibt.',
-            ] : []),
-            ...(isOrchestrator && task.source === 'turn-limit-review' ? [
-              'Dies ist die einmalige PM-Prüfung am Ende eines begrenzten Laufsegments.',
-              'Wenn die User-Anforderung vollständig erfüllt ist, gib den finalen Abschluss mit [[PROJECT_DONE]].',
-              'Wenn Arbeit offen ist, übergib höchstens EINEN priorisierten, kleinen und konkret prüfbaren nächsten Schritt.',
-              'Erstelle keinen neuen Gesamtplan und wiederhole keine bereits erledigte Aufgabe.',
-            ] : []),
-          ],
-          context: [
-            taskKbContext ? 'Aufgabenbezogene Wissensbasis-Auszüge stehen im Systemkontext.' : '',
-            memoryContext ? `Relevantes Shared Memory: memory://${memoryNamespace}` : '',
-            !task.outOfBand && projectPath ? `Projektdateien müssen in ${projectPath} als vollständige file:-Artefakte geliefert werden.` : '',
-            !isDirectChat ? currentPlanContext : '',
-          ].filter(Boolean),
-          handoff: activeHandoff,
-          acceptanceCriteria: currentGraphTaskNode?.acceptanceCriteria || [],
-          requestedOutput: isDirectChat || task.outOfBand
-            ? ['Direkte Antwort an den User', 'Offene Rückfrage, falls wirklich nötig']
-            : ['Konkretes Ergebnis', 'Offene Fragen oder nächster Handoff, falls nötig'],
-        });
-        const agentSession = buildAgentSession({
-          agent, taskCapsule, memoryContext, handoff: activeHandoff,
-          lastUserMessage: (isOrchestrator || isDirectChat) && task.source === 'user' ? objective : '',
-        });
-        const isolatedSession = { ...agentSession, systemPrompt: isolatedSystemPrompt };
-        const capsuleHistory = agentSession.messages.map((message, index) => ({
-          id: `${agentSession.sessionId}-${index}`,
-          agentId: message.role === 'assistant' ? agent.id : 'user',
-          senderName: message.role === 'assistant' ? agent.name : 'Task Capsule',
-          text: message.content,
-          ts: Date.now(),
-        }));
-        const relevantConversationHistory = buildRelevantConversationHistory({
-          history,
-          agent,
-          chatType: chat.type,
-          includeGroupContext: !isDirectChat && task.source === 'user',
-        });
-        const agentHistory = isDirectChat && relevantConversationHistory.length > 0
-          ? [...relevantConversationHistory]
-          : relevantConversationHistory.length > 0
-            ? [...relevantConversationHistory, ...capsuleHistory.slice(-1)]
-            : capsuleHistory;
-        if (activeAttachments.length > 0) {
-          let attachmentMessageIndex = -1;
-          for (let index = agentHistory.length - 1; index >= 0; index -= 1) {
-            if (agentHistory[index].agentId === 'user') { attachmentMessageIndex = index; break; }
-          }
-          if (attachmentMessageIndex >= 0) {
-            agentHistory[attachmentMessageIndex] = {
-              ...agentHistory[attachmentMessageIndex],
-              attachments: activeAttachments,
-            };
-          }
-        }
-
-        let usedMcp = false;
-        const callWithModel = (modelAgent, modelHistory) => callLLMWithMcp({
-          servers: planningOnly || task.outOfBand ? [] : activeMcpServers,
-          history: modelHistory,
-          agent: modelAgent,
-          requestPermission: requestMcpPermission,
-          onPermissionConsumed: handleMcpPermissionConsumed,
-          onToolResult: handleMcpToolResult,
-          onConnectionError: error => {
-            const key = `${error?.serverId || error?.serverName}:${error?.message}`;
-            if (reportedMcpErrorsRef.current.has(key)) return;
-            reportedMcpErrorsRef.current.add(key);
-            addMessage(chat.id, {
-              id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-              text: `MCP|${t('Verbindung zu „{server}“ fehlgeschlagen: {error}', {
-                server: error?.serverName || 'MCP',
-                error: error?.message || t('Unbekannter Fehler'),
-              })}`,
-              ts: Date.now(), isError: true,
-            });
-          },
-          call: ({ history: nextHistory, extraContext }) => callLLM({
-            apiKeys, providerConnections, agent: modelAgent,
-            history: nextHistory,
-            userMessage: null,
-            groupContext: isOrchestrator ? chatAgents.map(a => a.name).join(', ') : null,
-            kbContext: taskKbContext + memoryContext + taskProjectContext + taskReviewContext + extraContext,
-            isolatedSession,
-            projectPath: task.outOfBand ? '' : projectPath,
-            requestId: agentRequestId,
-            language,
-          }),
-          callRecovery: ({ history: nextHistory }) => callLLM({
-            apiKeys, providerConnections,
-            agent: createMcpPlannerAgent(modelAgent),
-            history: nextHistory,
-            userMessage: null,
-            groupContext: null,
-            kbContext: '',
-            isolatedSession: {
-              systemPrompt: 'Du bist ein reiner JSON-Datengenerator. Verwende keine Werkzeuge. Antworte ausschließlich mit genau einem gültigen JSON-Objekt, ohne Markdown, Erklärung oder Rückfrage.',
-            },
-            projectPath: task.outOfBand ? '' : projectPath,
-            requestId: agentRequestId,
-            language,
-          }),
-          onActivity: ({ serverName, toolName }) => {
-            usedMcp = true;
-            setAgentProgress(previous => ({ ...previous, [agent.id]: {
-              ...(previous[agent.id] || {}),
-              agentId: agent.id,
-              taskSummary,
-              detail: `MCP: ${serverName} · ${toolName}`,
-              phase: 'tool',
-              startedAt: previous[agent.id]?.startedAt || activeAgentRun.startedAt,
-              updatedAt: Date.now(),
-            }}));
-          },
-        });
-        const callWithoutTools = (modelAgent, modelHistory) => callLLM({
-          apiKeys,
-          providerConnections,
-          agent: modelAgent,
-          history: modelHistory,
-          userMessage: null,
-          groupContext: isOrchestrator ? chatAgents.map(a => a.name).join(', ') : null,
-          kbContext: taskKbContext + memoryContext + taskProjectContext + taskReviewContext,
-          isolatedSession,
-          projectPath: task.outOfBand ? '' : projectPath,
-          requestId: `${agentRequestId}-quality`,
-          language,
-        });
-
-        const taskModelContext = taskKbContext + memoryContext + taskProjectContext + taskReviewContext;
-        let estimatedInputTokens = estimateTokens(isolatedSystemPrompt) + estimateTokens(taskModelContext) + estimateTokens(agentHistory.map(message => message.text).join('\n'));
-        let reply = await callWithModel(selectedModelAgent, agentHistory);
-        if (runIdRef.current !== myRunId) return;
-        if (!reply || typeof reply !== 'string' || !reply.trim()) {
-          throw new Error('Der Agent hat keine verwertbare Antwort geliefert.');
-        }
-        let estimatedOutputTokens = estimateTokens(reply);
-
-        const assessCandidate = candidateReply => {
-          const normalized = normalizeAgentMentionLayout(candidateReply, agent, chatAgents);
-          const candidatePlan = isOrchestrator && !(useLeanFastPath && task.source === 'user')
-            ? extractTaskPlan(normalized)
-            : null;
-          const candidateFiles = extractProjectFiles(normalized);
-          return {
-            normalized,
-            evaluation: evaluateResponseQuality({
-              reply: normalized,
-              objective,
-              complexity: taskComplexity,
-              isOrchestrator,
-              requiresInitialPlan: isOrchestrator && task.source === 'user' && (planningOnly || !useLeanFastPath),
-              parsedTaskPlan: candidatePlan,
-              projectFiles: candidateFiles,
-              projectPath: task.outOfBand ? '' : projectPath,
-              usedMcp,
-            }),
-          };
-        };
-
-        let qualityResult = assessCandidate(reply);
-        let qualityOutcome = qualityPolicy.directStrong ? 'direct-strong' : 'baseline-accepted';
-        let escalationFailed = false;
-        let didEscalate = false;
-        if (
-          !qualityPolicy.directStrong &&
-          !task.modelOverride &&
-          qualityPolicy.enabled &&
-          qualityPolicy.maxEscalations > 0 &&
-          !qualityResult.evaluation.accepted
-        ) {
-          didEscalate = true;
-          const escalationAgent = qualityPolicy.escalationAgent;
-          addMessage(chat.id, {
-            id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-            text: `🧠|${t('{agent}: Die Qualitätsprüfung fordert eine stärkere Modellstufe ({from} → {to}).', {
-              agent: agent.name,
-              from: selectedModelAgent.model,
-              to: escalationAgent.model,
-            })}`,
-            ts: Date.now(), isError: false,
-          });
-          setAgentProgress(previous => ({ ...previous, [agent.id]: {
-            ...(previous[agent.id] || {}),
-            detail: t('Verbessert das Ergebnis mit der stärkeren Modellstufe.'),
-            phase: 'quality-escalation',
-            updatedAt: Date.now(),
-          }}));
-          selectedModelAgent = escalationAgent;
-          activeAgentRun.provider = selectedModelAgent.provider || 'openai';
-          activeAgentRun.runtime = selectedModelAgent.provider === 'anthropic' && !apiKeys?.anthropic?.trim() && !apiKeys?.anthropicConfigured && apiKeys?.claudeCli
-            ? 'claude'
-            : (selectedModelAgent.provider || 'openai');
-          activeAgentRunRef.current.set(agentRequestId, activeAgentRun);
-          const escalationHistory = buildEscalationHistory(agentHistory, {
-            previousReply: reply,
-            reasons: qualityResult.evaluation.reasons,
-            acceptanceCriteria: qualityPolicy.acceptanceCriteria,
-          });
-          estimatedInputTokens += estimateTokens(isolatedSystemPrompt) + estimateTokens(taskModelContext) + estimateTokens(escalationHistory.map(message => message.text).join('\n'));
-          try {
-            // MCP side effects must never be repeated by a quality retry. The
-            // stronger model improves the captured first result without tools.
-            reply = usedMcp
-              ? await callWithoutTools(selectedModelAgent, escalationHistory)
-              : await callWithModel(selectedModelAgent, escalationHistory);
-            if (runIdRef.current !== myRunId) return;
-            if (!reply || typeof reply !== 'string' || !reply.trim()) throw new Error(t('Leere Antwort der stärkeren Modellstufe.'));
-            estimatedOutputTokens += estimateTokens(reply);
-            qualityResult = assessCandidate(reply);
-            qualityOutcome = 'escalated';
-          } catch (qualityError) {
-            escalationFailed = true;
-            selectedModelAgent = configuredAgent;
-            reply = qualityResult.normalized;
-            addMessage(chat.id, {
-              id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-              text: `⚠️|${t('{agent}: Die stärkere Modellstufe war nicht verfügbar. Das erste Ergebnis wird beibehalten: {error}', {
-                agent: agent.name,
-                error: qualityError?.message || t('unbekannter Fehler'),
-              })}`,
-              ts: Date.now(), isError: false,
-            });
-          }
-        }
-
-        const qualityUnresolved = qualityPolicy.enabled && (
-          escalationFailed || !qualityResult.evaluation.accepted
-        );
-        recordQualityEvent({
-          outcome: qualityOutcome,
-          unresolved: qualityUnresolved,
-          estimatedInputTokens,
-          estimatedOutputTokens,
-        });
-        if (qualityUnresolved && didEscalate && !escalationFailed) {
-          addMessage(chat.id, {
-            id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-            text: `⚠️|${t('{agent}: Auch die stärkere Modellstufe erfüllt nicht alle automatisch prüfbaren Kriterien.', { agent: agent.name })}`,
-            ts: Date.now(), isError: false,
-          });
-        }
-        const shouldStartQualityRecovery = Boolean(
-          qualityUnresolved &&
-          !planningOnly &&
-          !task.outOfBand &&
-          !task.preparationOnly &&
-          !task.runtimeRecovery &&
-          taskGraphRef.current?.approvedPlan &&
-          pm &&
-          agent.id !== pm.id
-        );
-        if (shouldStartQualityRecovery) {
-          const qualityRecoveryError = new Error(
-            `Die Aufgabe blieb nach der Qualitätskaskade unzureichend: ${qualityResult.evaluation.reasons.join('; ') || 'automatische Kriterien nicht erfüllt'}`,
-          );
-          qualityRecoveryError.isTaskComplexityFailure = true;
-          throw qualityRecoveryError;
-        }
-
-        let rawReply = normalizeAgentMentionLayout(reply, agent, chatAgents);
-        const submittedTaskEvidence = extractTaskEvidence(rawReply);
-        const acceptanceDecisions = isOrchestrator ? extractAcceptanceReview(rawReply) : [];
-        const canMaterializePlan = shouldMaterializeTaskPlan({
-          isOrchestrator,
-          planningOnly,
-          taskSource: task.source,
-          hasApprovedPlan: Boolean(taskGraphRef.current?.approvedPlan),
-          userOwnedPlan: taskGraphRef.current?.planOwner === 'user',
-        });
-        const parsedTaskPlan = canMaterializePlan
-          ? extractTaskPlan(rawReply)
-          : null;
-        let normalizedPlanTasks = [];
-        if (parsedTaskPlan?.tasks?.length) {
-          const currentGraphNode = taskGraphRef.current?.nodes?.find(node => node.id === task.graphNodeId);
-          const planRootNodeId = activePlanRootNodeId || currentGraphNode?.planRootId || task.graphNodeId;
-          const distributedPlanTasks = distributeTaskPlanAcrossAgentPools(parsedTaskPlan.tasks, chatAgents);
-          normalizedPlanTasks = distributedPlanTasks.map(planTask => {
-            const plannedAgent = chatAgents.find(candidate =>
-              candidate.name.toLowerCase() === planTask.agent.toLowerCase()
-            );
-            return plannedAgent ? {
-              ...planTask,
-              agentId: plannedAgent.id,
-              agentName: plannedAgent.name,
-            } : null;
-          }).filter(Boolean);
-          if (normalizedPlanTasks.length) {
-            activePlanRootNodeId = planRootNodeId;
-            commitTaskGraph(graph => {
-              const materialized = materializeTaskPlan(graph, {
-                rootNodeId: planRootNodeId,
-                tasks: normalizedPlanTasks,
-                replace: planningOnly,
-                allowPlanningRevision: planningOnly,
-              });
-              return restartPlanningFromScratch ? {
-                ...materialized,
-                workflowResetRequired: false,
-                workflowResetConsumedAt: Date.now(),
-              } : materialized;
-            });
-          }
-        }
-        rawReply = rewritePlanHandoffAssignments(rawReply, normalizedPlanTasks);
-        const projectFiles = extractProjectFiles(rawReply);
-        const savedProjectFiles = [];
-        if (!planningOnly && !task.outOfBand && !task.preparationOnly && projectPath && window.electronAPI?.projectWrite) {
-          for (const file of projectFiles) {
-            const writeResult = await window.electronAPI.projectWrite({
-              projectPath,
-              filename: file.filename,
-              content: file.content,
-            });
-            if (writeResult?.success) {
-              savedProjectFiles.push(writeResult.relativePath || file.filename);
-            } else {
-              addMessage(chat.id, {
-                id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-                text: `📁|${t('{agent}: {file} konnte nicht gespeichert werden — {error}', {
-                  agent: agent.name,
-                  file: file.filename,
-                  error: writeResult?.error || t('unbekannter Fehler'),
-                })}`,
-                ts: Date.now(), isError: true,
-              });
-            }
-          }
-        }
-
-        const displayReply = cleanAgentReply(rawReply) ||
-          (savedProjectFiles.length
-            ? t('Dateien gespeichert: {files}', { files: savedProjectFiles.join(', ') })
-            : t('Aufgabe abgeschlossen.'));
-        const reviewEvidence = buildProjectReviewEvidence({
-          displayReply,
-          projectFiles,
-          savedProjectFiles,
-        });
-        const evidenceNode = taskGraphRef.current?.nodes?.find(node => node.id === evidenceGraphNodeId);
-        if (!planningOnly && !task.preparationOnly && evidenceNode?.acceptanceCriteria?.length) {
-          const evidenceKind = savedProjectFiles.length
-            ? 'artifact'
-            : taskReviewContext.includes('Status: ERFOLGREICH')
-              ? 'automatic-test'
-              : 'result';
-          commitTaskGraph(graph => submitTaskEvidence(graph, evidenceGraphNodeId, submittedTaskEvidence, {
-            author: agent.name,
-            fallbackSummary: reviewEvidence,
-            kind: evidenceKind,
-          }));
-        }
-        if (!planningOnly && !task.preparationOnly && acceptanceDecisions.length) {
-          commitTaskGraph(graph => applyAcceptanceDecisions(graph, acceptanceDecisions, { reviewer: agent.name }));
-        }
-        if (!planningOnly && !task.outOfBand && projectPath && window.electronAPI?.projectWrite) {
-          const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-          const safeAgentName = agent.name.replace(/[^a-zA-Z0-9_-]/g, '-');
-          const progressPath = `.agent-teams/progress/${timestamp}-${safeAgentName}-${agentSession.sessionId}.md`;
-          const progressContent = [
-            `# ${t('Zwischenstand: {agent}', { agent: agent.name })}`,
-            '',
-            `- ${t('Session: {session}', { session: agentSession.sessionId })}`,
-            `- ${t('Aufgabe: {task}', { task: objective })}`,
-            `- ${t('Zeitpunkt: {time}', { time: new Date().toISOString() })}`,
-            savedProjectFiles.length
-              ? `- ${t('Geschriebene Dateien: {files}', { files: savedProjectFiles.join(', ') })}`
-              : `- ${t('Geschriebene Dateien: keine expliziten Datei-Artefakte')}`,
-            '',
-            `## ${t('Ergebnis')}`,
-            '',
-            (task.preparationOnly ? reviewEvidence : displayReply).slice(0, 100000),
-            '',
-          ].join('\n');
-          const progressResult = await window.electronAPI.projectWrite({
-            projectPath, filename: progressPath, content: progressContent,
-          });
-          if (!progressResult?.success) {
-            addMessage(chat.id, {
-              id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-              text: `📁|${t('Zwischenstand konnte nicht gespeichert werden — {error}', { error: progressResult?.error || t('unbekannter Fehler') })}`,
-              ts: Date.now(), isError: true,
-            });
-          }
-        }
-        if (savedProjectFiles.length) {
-          addMessage(chat.id, {
-            id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-            text: `📁|${t(
-              savedProjectFiles.length === 1
-                ? '{agent} hat {count} Datei gespeichert: {files}'
-                : '{agent} hat {count} Dateien gespeichert: {files}',
-              { agent: agent.name, count: savedProjectFiles.length, files: savedProjectFiles.join(', ') },
-            )}`,
-            ts: Date.now(), isError: false,
-          });
-        }
-
-        const agentMsg = {
-          id: Date.now() + Math.random(),
-          agentId: agent.id, senderName: agent.name,
-          text: displayReply, ts: Date.now(),
-          provider: selectedModelAgent.provider,
-          model: selectedModelAgent.model,
-        };
-        addMessage(chat.id, agentMsg);
-        history = [...history, agentMsg];
-        savedInterimResult = String(reviewEvidence || displayReply || '').slice(0, 12000);
-        const addressedGroups = task.outOfBand || task.preparationOnly
-          ? []
-          : extractGroupMentions(rawReply, groups, { sourceGroupId: chat.id, userAuthored: false });
-        if (addressedGroups.length > 0) {
-          const batchId = `group-request-batch-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-          groupPauseRequests = addressedGroups.map(mention => createCrossGroupRequest({
-            sourceGroup: chat,
-            sourceTask: task,
-            sourceAgent: agent,
-            targetGroup: mention.group,
-            question: mention.question,
-            attachments: activeAttachments,
-            batchId,
-            origin: 'agent',
-            qualityMode: activeQualityMode,
-          })).filter(Boolean);
-          groupPauseRequests.forEach(enqueueCrossGroupRequest);
-          groupPauseRequested = groupPauseRequests.length > 0;
-          if (groupPauseRequested) {
-            setGraphTaskStatus(task, 'waiting_group', {
-              waitingGroupRequestIds: groupPauseRequests.map(request => request.id),
-              waitingGroupNames: groupPauseRequests.map(request => request.targetGroupName),
-              groupWaitStartedAt: Date.now(),
-              interimResult: savedInterimResult,
-              interimSavedAt: Date.now(),
-            });
-            commitTaskGraph(graph => recordTaskExecutionEvent(graph, task, 'waiting-group', {
-              requestIds: groupPauseRequests.map(request => request.id),
-            }));
-            addMessage(chat.id, {
-              id: `cross-group-wait-${batchId}`,
-              agentId: 'system',
-              senderName: 'System',
-              text: `↗|${t('{agent} wartet auf eine Antwort von {groups}. Unabhängige Aufgaben laufen weiter; der freigegebene Plan bleibt unverändert.', {
-                agent: agent.name,
-                groups: groupPauseRequests.map(request => request.targetGroupName).join(', '),
-              })}`,
-              ts: Date.now(),
-              isError: false,
-            });
-          }
-        }
-        if (!groupPauseRequested && !task.preparationOnly) {
-          successfulTasks += 1;
-          taskQueue.markSuccessful(task);
-        }
-        if (!task.outOfBand && task.preparationOnly) {
-          setGraphTaskStatus(task, 'prepared', {
-            preparationCompletedAt: Date.now(),
-            interimResult: savedInterimResult,
-            interimSavedAt: Date.now(),
-            preparedFiles: projectFiles.map(file => file.filename),
-            runtimeModel: selectedModelAgent.model,
-            qualityEscalated: didEscalate,
-          });
-          commitTaskGraph(graph => recordTaskExecutionEvent(graph, task, 'prepared', {
-            model: selectedModelAgent.model,
-            savedFileCount: savedProjectFiles.length,
-          }));
-          addMessage(chat.id, {
-            id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-            text: `⏸|${t('{agent} hat sichere Vorarbeit für „{task}“ zwischengespeichert. Die Aufgabe wartet weiterhin auf ihre Abhängigkeiten.', {
-              agent: agent.name,
-              task: liveTaskNode?.title || objective,
-            })}`,
-            ts: Date.now(), isError: false,
-          });
-        } else if (!task.outOfBand && !groupPauseRequested) {
-          setGraphTaskStatus(task, 'agent_done', {
-            completedAt: Date.now(),
-            runtimeModel: selectedModelAgent.model,
-            qualityEscalated: didEscalate,
-            ...(liveTaskNode?.interimResult ? { interimConsumedAt: Date.now() } : {}),
-          });
-          commitTaskGraph(graph => recordTaskExecutionEvent(graph, task, 'completed', { model: selectedModelAgent.model }));
-        } else if (task.consultingGraphNodeId) {
-          commitTaskGraph(graph => updateTaskNodeStatus(graph, task.consultingGraphNodeId, 'retryable', {
-            pmConsultedAt: Date.now(),
-          }));
-          addMessage(chat.id, {
-            id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-            text: `💬|${t('Die PM-Einschätzung liegt vor. Der freigegebene Plan blieb unverändert; der User kann die Aufgabe erneut starten oder eine neue Planversion bearbeiten.')}`,
-            ts: Date.now(), isError: false,
-          });
-        }
-
-        const knowledgeEntries = extractKnowledgeFromReply(displayReply, agent.id, agent.name);
-        if (!planningOnly && !task.preparationOnly && memAPI && knowledgeEntries.length > 0) {
-          for (const entry of knowledgeEntries) {
-            const requestedType = entry.tags.find(tag => ['fact', 'decision', 'constraint', 'finding', 'task_state'].includes(tag));
-            await memAPI.write(memoryNamespace, createEntry({
-              type: requestedType || 'finding', namespace: memoryNamespace, content: entry.text,
-              tags: entry.tags, author: agent.name, confidence: 'medium',
-            }));
-          }
-          await refreshMemoryCount();
-        }
-
-        const addressedGroupNames = new Set(addressedGroups.map(item => item.group.name.toLowerCase()));
-        const handoffs = task.outOfBand || task.preparationOnly ? [] : extractHandoffsFromReply(rawReply, agent, chatAgents)
-          .filter(handoff => !addressedGroupNames.has(String(handoff.to || '').toLowerCase()));
-        const userQuestions = task.outOfBand || task.preparationOnly ? [] : extractUserQuestions(rawReply);
-        let asksUser = userQuestions.length > 0;
-        const immediateHandoffTasks = [];
-        const claimedPlanNodeIds = new Set();
-        const canDrivePlan = isOrchestrator &&
-          activePlanRootNodeId &&
-          ['user', 'team-synthesis', 'turn-limit-review'].includes(task.source);
-        const findPlannedNode = (target, summary) => {
-          if (!canDrivePlan) return null;
-          const newPlanIds = new Set(normalizedPlanTasks.map(planTask => planTask.id));
-          const candidates = (taskGraphRef.current?.nodes || [])
-            .filter(node =>
-              node.planRootId === activePlanRootNodeId &&
-              node.agentId === target.id &&
-              node.nodeType !== 'review' &&
-              CLAIMABLE_PLAN_STATUSES.has(node.status) &&
-              !claimedPlanNodeIds.has(node.id)
-            )
-            .map(node => ({
-              node,
-              score: planTaskMatchScore(node, summary),
-              ready: isTaskNodeReady(taskGraphRef.current, node.id),
-              isNew: newPlanIds.has(node.planTaskId),
-            }))
-            .sort((left, right) =>
-              right.score - left.score ||
-              Number(right.isNew) - Number(left.isNew) ||
-              Number(right.ready) - Number(left.ready) ||
-              (left.node.planOrder || 0) - (right.node.planOrder || 0)
-            );
-          const best = candidates[0];
-          return best && (best.score > 0 || best.isNew) ? best.node : null;
-        };
-
-        for (const handoff of handoffs) {
-          const target = chatAgents.find(candidate => candidate.name.toLowerCase() === handoff.to.toLowerCase());
-          if (!target || target.id === agent.id) continue;
-          const plannedNode = findPlannedNode(target, handoff.summary);
-          const isRecoveryDelegation = task.source === 'timeout-recovery' &&
-            task.runtimeRecovery === true &&
-            task.recovery &&
-            agent.id === pm?.id &&
-            target.id === task.recovery.originalAgentId;
-          if (taskGraphRef.current?.approvedPlan && !plannedNode && !isRecoveryDelegation) {
-            if (target.id === pm?.id && agent.id !== pm.id) {
-              setGraphTaskStatus(task, 'waiting_pm', {
-                blockedReason: 'pm-consultation',
-                issueSummary: handoff.summary,
-              });
-              immediateHandoffTasks.push({
-                agent: target,
-                objective: `Berate zur bestehenden Aufgabe „${objective}“: ${handoff.summary}. Ändere den Workflow nicht und schlage dem User höchstens konkrete Optionen innerhalb der bestehenden Aufgabe vor.`,
-                source: 'workflow-consultation',
-                outOfBand: true,
-                consultingGraphNodeId: task.graphNodeId,
-              });
-              addMessage(chat.id, {
-                id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-                text: `💬|${t('{agent} hat den PM um Hilfe gebeten. Die Aufgabe und der freigegebene Plan werden dabei nicht verändert.', { agent: agent.name })}`,
-                ts: Date.now(), isError: false,
-              });
-            } else {
-              setGraphTaskStatus(task, 'waiting_user', {
-                blockedReason: 'unplanned-handoff',
-                issueSummary: handoff.summary,
-              });
-              addMessage(chat.id, {
-                id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-                text: `🛡️|${t('{agent} schlägt zusätzliche Arbeit vor: {proposal} Der Plan wurde nicht verändert. Entscheide im Workflowfenster, ob du eine neue Planversion anlegen möchtest.', { agent: agent.name, proposal: handoff.summary })}`,
-                ts: Date.now(), isError: false,
-              });
-            }
-            continue;
-          }
-          if (!planningOnly && memAPI) await memAPI.handoff(memoryNamespace, handoff);
-          if (shouldDeferHandoffToPM({ fromAgent: agent, targetAgent: target, pm })) {
-            needsSynthesis = true;
-            continue;
-          }
-          const recovery = isRecoveryDelegation
-            ? {
-              ...task.recovery,
-              attempt: task.recovery.mode === 'review'
-                ? (task.recovery.attempt || 0) + 1
-                : task.recovery.attempt,
-              mode: 'step',
-              currentStep: handoff.summary,
-            }
-            : null;
-          if (plannedNode) {
-            claimedPlanNodeIds.add(plannedNode.id);
-            // Future plan steps are visible in the tree but must not enter the
-            // executable queue before all of their dependencies are complete.
-            if (!isTaskNodeReady(taskGraphRef.current, plannedNode.id)) continue;
-          }
-          const dependencyNodeId = plannedNode
-            ? null
-            : inferHandoffDependency(handoff.summary, immediateHandoffTasks);
-          const approvedObjective = plannedNode && taskGraphRef.current?.approvedPlan
-            ? (plannedNode.objective || plannedNode.title)
-            : handoff.summary;
-          const predecessorFindings = agent.id !== pm?.id && reviewEvidence
-            ? [`Relevantes Ergebnis des direkten Vorgängers ${agent.name}: ${String(reviewEvidence).slice(0, 8000)}`]
-            : [];
-          const contextualHandoff = predecessorFindings.length > 0
-            ? { ...handoff, findings: [...(handoff.findings || []), ...predecessorFindings] }
-            : handoff;
-          const executableHandoff = approvedObjective === handoff.summary
-            ? contextualHandoff
-            : { ...contextualHandoff, summary: approvedObjective };
-          const approvedTaskNode = plannedNode && taskGraphRef.current?.approvedPlan
-            ? taskGraphRef.current.approvedPlan.nodes.find(node => node.id === plannedNode.id)
-            : null;
-          const approvedTaskModel = approvedTaskNode
-            ? (approvedTaskNode.modelOverride || approvedTaskNode.model)
-            : plannedNode?.modelOverride;
-          const nextTask = registerGraphTask({
-            agent: target,
-            objective: approvedObjective,
-            handoff: executableHandoff,
-            source: recovery ? 'timeout-recovery-step' : agent.name,
-            ...(recovery ? { runtimeRecovery: true } : {}),
-            ...(plannedNode ? {
-              graphNodeId: plannedNode.id,
-              planRootId: activePlanRootNodeId,
-              planTaskId: plannedNode.planTaskId,
-              ...(approvedTaskModel ? { modelOverride: approvedTaskModel } : {}),
-            } : {}),
-            ...(recovery ? { recovery } : {}),
-          }, { status: 'planned', parentNodeId: plannedNode ? null : task.graphNodeId });
-          if (recovery?.originalGraphNodeId) {
-            commitTaskGraph(graph => updateTaskNodeStatus(graph, recovery.originalGraphNodeId, recovery.originalStatus || 'timed_out', {
-              recoveryStatus: 'step',
-              recoveryTaskId: nextTask.graphNodeId,
-            }));
-          }
-          if (dependencyNodeId) {
-            commitTaskGraph(graph => addTaskEdge(graph, {
-              from: dependencyNodeId,
-              to: nextTask.graphNodeId,
-              kind: 'dependency',
-            }));
-          }
-          immediateHandoffTasks.push(nextTask);
-        }
-
-        // The structured PM plan is authoritative. Queue every currently
-        // reachable planned task even if the PM forgot its matching @line;
-        // future nodes remain disabled until a later review unlocks them.
-        if (canDrivePlan && !asksUser) {
-          const readyPlanNodes = (taskGraphRef.current?.nodes || [])
-            .filter(node =>
-              node.planRootId === activePlanRootNodeId &&
-              node.nodeType !== 'review' &&
-              CLAIMABLE_PLAN_STATUSES.has(node.status) &&
-              !claimedPlanNodeIds.has(node.id) &&
-              isTaskNodeReady(taskGraphRef.current, node.id)
-            )
-            .sort((left, right) => (left.planOrder || 0) - (right.planOrder || 0));
-          for (const plannedNode of readyPlanNodes) {
-            const target = chatAgents.find(candidate => candidate.id === plannedNode.agentId);
-            if (!target) continue;
-            const plannedHandoff = createHandoff({
-              from: agent.name,
-              to: target.name,
-              taskId: `plan-${plannedNode.planTaskId}`,
-              summary: plannedNode.objective || plannedNode.title,
-            });
-            const nextTask = registerGraphTask({
-              agent: target,
-              objective: plannedHandoff.summary,
-              handoff: plannedHandoff,
-              source: agent.name,
-              graphNodeId: plannedNode.id,
-              planRootId: activePlanRootNodeId,
-              planTaskId: plannedNode.planTaskId,
-              ...(plannedNode.modelOverride ? { modelOverride: plannedNode.modelOverride } : {}),
-            }, { status: 'planned' });
-            immediateHandoffTasks.push(nextTask);
-            claimedPlanNodeIds.add(plannedNode.id);
-          }
-        }
-        let queuedHandoffs = immediateHandoffTasks.length;
-        let prependResult = { accepted: immediateHandoffTasks, rejected: [] };
-        if (planningOnly && isOrchestrator) {
-          planningDraftTasks = immediateHandoffTasks;
-        } else {
-          queuedHandoffs = taskQueue.prepend(immediateHandoffTasks);
-          prependResult = taskQueue.getLastPrependResult();
-        }
-        if (!planningOnly && prependResult.rejected.length > 0) {
-          loopGuardRejections.push(...prependResult.rejected);
-          for (const rejection of prependResult.rejected) {
-            setGraphTaskStatus(rejection.task, 'blocked', {
-              blockedReason: rejection.reason === 'repeat-limit'
-                ? 'repeat-limit'
-                : 'duplicate-handoff',
-            });
-          }
-        }
-        const parallelHandoffTasks = prependResult.accepted;
-        if (!planningOnly && agent.id === pm?.id && parallelHandoffTasks.length >= 2 && task.source !== 'timeout-recovery') {
-          if (taskGraphRef.current?.approvedPlan || autoRunRef.current) {
-            const safeParallelIds = findSafeAutoParallelTaskIds(taskGraphRef.current, parallelHandoffTasks);
-            safeParallelIds.forEach(nodeId => requestedParallelTaskIds.add(nodeId));
-            taskQueue.prioritize(safeParallelIds);
-            if (safeParallelIds.length >= 2) {
-              addMessage(chat.id, {
-                id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-                text: `⚡|${t('{count} unabhängige Aufgaben werden automatisch parallel ausgeführt.', { count: safeParallelIds.length })}`,
-                ts: Date.now(), isError: false,
-              });
-            }
-          } else {
-            scheduleDecisionRequested = true;
-          }
-        }
-
-        if (!groupPauseRequested && agent.id === pm?.id && queuedHandoffs > 0) {
-          const skipFastFinalReview = useLeanFastPath &&
-            task.source === 'user' &&
-            queuedHandoffs === 1 &&
-            !activePlanRootNodeId;
-          needsSynthesis = !skipFastFinalReview;
-          if (task.source === 'timeout-recovery') {
-            delegatedResults.push({
-              agent: agent.name,
-              objective: `${task.recovery?.trigger === 'quality' ? 'Qualitäts-Recovery' : task.recovery?.trigger === 'error' ? 'Problem-Recovery' : 'Timeout-Recovery'} für ${task.recovery?.originalAgentName || 'Agent'}`,
-              result: reviewEvidence,
-              graphNodeId: task.graphNodeId,
-            });
-          }
-        } else if (!groupPauseRequested && !task.preparationOnly && agent.id !== pm?.id) {
-          delegatedResults.push({ agent: agent.name, objective, result: reviewEvidence, graphNodeId: task.graphNodeId });
-          // A single specialist explicitly addressed by the user remains a
-          // direct conversation. Multi-agent/delegated work still returns to
-          // the PM for the final synthesis.
-          if (shouldRequestPMFinalReview({
-            pm,
-            agent,
-            taskSource: task.source,
-            routeMode: task.routeMode || route.mode,
-            explicitMentionCount: task.explicitMentionCount ?? explicitMentions.length,
-            explicitlyAddressedAgentId: task.explicitlyAddressedAgentId || explicitMentions[0]?.id,
-            handoffCount: handoffs.length,
-            hasActivePlan: !!activePlanRootNodeId,
-            useLeanFastPath,
-            asksUser,
-            requiresAcceptanceReview: Boolean(evidenceNode?.acceptanceCriteria?.some(criterion => criterion.required !== false)),
-          })) needsSynthesis = true;
-        }
-
-        if (task.source === 'timeout-recovery-step' && task.recovery && pm) {
-          const recoveryReviewTask = buildTimeoutRecoveryReviewTask({
-            pm,
-            recovery: task.recovery,
-            stepObjective: objective,
-            result: reviewEvidence,
-          });
-          if (recoveryReviewTask) {
-            registerGraphTask(recoveryReviewTask, { status: 'planned', parentNodeId: task.graphNodeId });
-            taskQueue.prepend([recoveryReviewTask]);
-          }
-        }
-
-        const recoveryResolved = /\[\[RECOVERY_RESOLVED\]\]/i.test(rawReply);
-        const recoveryNeedsUser = !groupPauseRequested && task.source === 'timeout-recovery' &&
-          task.runtimeRecovery === true && handoffs.length === 0 && !asksUser && !recoveryResolved;
-        if (recoveryNeedsUser) {
-          asksUser = true;
-          pauseRequested = true;
-          pauseQuestion = buildRecoveryUserQuestion({ recovery: task.recovery, pmReply: displayReply });
-        }
-        const recoveredOriginalNodeId = !groupPauseRequested && task.source === 'timeout-recovery' &&
-          task.runtimeRecovery === true && recoveryResolved &&
-          handoffs.length === 0 && !asksUser
-          ? task.recovery.originalGraphNodeId
-          : '';
-        if (recoveredOriginalNodeId) {
-          commitTaskGraph(graph => approveAgentDoneTasks(
-            recordTaskExecutionEvent(
-              updateTaskNodeStatus(graph, recoveredOriginalNodeId, 'agent_done', {
-                recoveredAt: Date.now(),
-                recoveryStatus: null,
-                recoveryTaskId: null,
-                recoveryTrigger: null,
-                recoveryError: undefined,
-                error: undefined,
-                blockedReason: undefined,
-              }),
-              {
-                graphNodeId: recoveredOriginalNodeId,
-                agent: chatAgents.find(candidate => candidate.id === task.recovery.originalAgentId),
-              },
-              'recovered',
-              { recoveryAttempt: task.recovery.attempt },
-            ),
-          ));
-          addMessage(chat.id, {
-            id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-            text: `🧭|${t('PM hat die Recovery abgeschlossen. Die ursprüngliche Aufgabe wird im freigegebenen Workflow fortgeführt.')}`,
-            ts: Date.now(), isError: false,
-          });
-        }
-
-        if (asksUser && !groupPauseRequested) {
-          pauseRequested = true;
-          pauseQuestion = pauseQuestion || userQuestions.join('\n');
-          if (task.runtimeRecovery && task.recovery?.originalGraphNodeId) {
-            commitTaskGraph(graph => updateTaskNodeStatus(graph, task.recovery.originalGraphNodeId, 'waiting_user', {
-              recoveryStatus: 'user',
-              recoveryTaskId: task.graphNodeId,
-              recoveryTrigger: task.recovery.trigger || 'timeout',
-              blockedReason: 'pm-recovery-needs-user',
-              issueSummary: pauseQuestion,
-            }));
-          }
-        }
-
-        const openPlanTaskCount = activePlanRootNodeId
-          ? (taskGraphRef.current?.nodes || []).filter(node =>
-            node.planRootId === activePlanRootNodeId &&
-            node.id !== task.graphNodeId &&
-            !FINISHED_PLAN_STATUSES.has(node.status)
-          ).length
-          : 0;
-        const acceptanceSummary = activePlanRootNodeId
-          ? summarizeAcceptance(taskGraphRef.current, activePlanRootNodeId)
-          : { ready: true, unmet: [], required: 0, passed: 0 };
-        const requestedProjectCompletion = /\[\[PROJECT_DONE\]\]/i.test(rawReply);
-        if (requestedProjectCompletion && !acceptanceSummary.ready) {
-          resumableFailure = true;
-          setGraphTaskStatus(task, 'blocked', { blockedReason: 'acceptance-pending' });
-          addMessage(chat.id, {
-            id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-            text: `🛡️|${t('Abschluss blockiert: {count} erforderliche Abnahmekriterien sind noch nicht bestanden. Der PM muss Nachweise prüfen, Korrekturen beauftragen oder eine erforderliche User-Freigabe einholen.', { count: acceptanceSummary.unmet.length })}`,
-            ts: Date.now(), isError: false,
-          });
-        }
-        if (!groupPauseRequested && !task.preparationOnly && !planningOnly && shouldCompleteProject({
-          isOrchestrator,
-          source: task.source,
-          reply: rawReply,
-          handoffCount: handoffs.length,
-          pendingTaskCount: taskQueue.length + openPlanTaskCount,
-          asksUser,
-          acceptanceReady: acceptanceSummary.ready,
-        })) {
-          projectCompleted = true;
-          needsSynthesis = false;
-          taskQueue.clear();
-          finishRunCheckpoint();
-          commitTaskGraph(graph => approveAgentDoneTasks(
-            updateTaskNodeStatus(graph, task.graphNodeId, 'completed', { pmApprovedAt: Date.now() })
-          ));
-          if (projectPath && window.electronAPI?.projectWrite) {
-            const completionContent = [
-              `# ${t('Projekt abgeschlossen')}`,
-              '',
-              `- ${t('Gruppe: {group}', { group: chat.name })}`,
-              `- ${t('Abschluss durch: {agent}', { agent: agent.name })}`,
-              `- ${t('Zeitpunkt: {time}', { time: new Date().toISOString() })}`,
-              `- ${t('Bearbeitete Agenten-Tasks: {count}', { count: successfulTasks })}`,
-              ...(acceptanceSummary.required > 0
-                ? [`- ${t('Bestandene Abnahmekriterien: {passed}/{required}', { passed: acceptanceSummary.passed, required: acceptanceSummary.required })}`]
-                : []),
-              '',
-              `## ${t('Abschlussbericht')}`,
-              '',
-              displayReply,
-              '',
-            ].join('\n');
-            const completionResult = await window.electronAPI.projectWrite({
-              projectPath, filename: '.agent-teams/PROJECT_DONE.md', content: completionContent,
-            });
-            if (!completionResult?.success) {
-              addMessage(chat.id, {
-                id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-                text: `📁|${t('Abschlussbericht konnte nicht gespeichert werden — {error}', { error: completionResult?.error || t('unbekannter Fehler') })}`,
-                ts: Date.now(), isError: true,
-              });
-            }
-          }
-          addMessage(chat.id, {
-            id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-            text: projectPath
-              ? `✅|${t('Projekt abgeschlossen. Dateien und Abschlussbericht liegen in {path}.', { path: projectPath })}`
-              : `✅|${t('Projekt abgeschlossen. Es war kein Projektordner konfiguriert.')}`,
-            ts: Date.now(), isError: false,
-          });
-        }
-      } catch (e) {
-        if (runIdRef.current !== myRunId) return;
-        const rateLimited = e.rateLimited || e.status === 429;
-        const timedOut = isAgentTimeoutError(e);
-        const qualityBlocked = e.isTaskComplexityFailure === true;
-        if (!task.outOfBand) {
-          setGraphTaskStatus(task, task.preparationOnly ? 'planned' : rateLimited ? 'provider_paused' : timedOut ? 'timed_out' : qualityBlocked ? 'blocked' : 'failed', {
-            error: task.preparationOnly ? undefined : e.message,
-            ...(qualityBlocked ? { blockedReason: 'quality-recovery' } : {}),
-            ...(task.preparationOnly ? { preparationFailedAt: Date.now(), preparationError: e.message } : {}),
-          });
-          commitTaskGraph(graph => recordTaskExecutionEvent(graph, task, task.preparationOnly ? 'preparation-failed' : 'failed', { error: String(e.message || '').slice(0, 600) }));
-        }
-        addMessage(chat.id, {
-          id: Date.now() + Math.random(),
-          agentId: 'system', senderName: 'System',
-          text: `${agent.name}|${e.message}`,
-          ts: Date.now(), isError: true,
-        });
-        if (task.outOfBand || task.preparationOnly) {
-          // A failed side conversation must not enqueue PM synthesis, recovery,
-          // or provider checkpoints into the paused workflow. Preparation is
-          // best-effort and failure never blocks the later full task.
-        } else if (rateLimited) {
-          taskQueue.retry(task);
-          providerPauseRequested = true;
-          providerRetryAfterMs = e.retryAfterMs || 60000;
-          resumableFailure = true;
-        } else if (task.runtimeRecovery && pm && agent.id === pm.id) {
-          pauseRequested = true;
-          pauseQuestion = buildRecoveryUserQuestion({
-            recovery: task.recovery,
-            errorMessage: e.message,
-          });
-          if (task.recovery?.originalGraphNodeId) {
-            commitTaskGraph(graph => updateTaskNodeStatus(graph, task.recovery.originalGraphNodeId, 'waiting_user', {
-              recoveryStatus: 'user',
-              recoveryTaskId: task.graphNodeId,
-              recoveryTrigger: task.recovery.trigger || 'error',
-              recoveryError: e.message,
-              blockedReason: 'pm-recovery-needs-user',
-              issueSummary: pauseQuestion,
-            }));
-          }
-        } else if (pm && agent.id !== pm.id) {
-          const problemTrigger = qualityBlocked ? 'quality' : timedOut ? 'timeout' : task.recovery?.trigger || 'error';
-          delegatedResults.push({
-            agent: agent.name,
-            objective,
-            result: `${problemTrigger === 'quality' ? 'QUALITÄTSPROBLEM' : problemTrigger === 'timeout' ? 'TIMEOUT' : 'AUSFÜHRUNGSPROBLEM'}: ${e.message}`,
-            graphNodeId: task.graphNodeId,
-          });
-          needsSynthesis = true;
-          const originalAgent = task.recovery
-            ? chatAgents.find(candidate => candidate.id === task.recovery.originalAgentId) || agent
-            : agent;
-          const originalGraphNodeId = task.recovery?.originalGraphNodeId || task.graphNodeId;
-          const recoveryTask = buildTimeoutRecoveryTask({
-            pm,
-            originalAgent,
-            objective,
-            errorMessage: e.message,
-            previousRecovery: task.recovery,
-            originalGraphNodeId,
-            planRootId: task.planRootId || task.recovery?.planRootId || activePlanRootNodeId,
-            trigger: problemTrigger,
-          });
-          if (recoveryTask) {
-            const registeredRecoveryTask = registerGraphTask(recoveryTask, { status: 'planned', parentNodeId: task.graphNodeId });
-            taskQueue.prepend([registeredRecoveryTask]);
-            if (originalGraphNodeId) {
-              commitTaskGraph(graph => updateTaskNodeStatus(graph, originalGraphNodeId, recoveryTask.recovery?.originalStatus || (timedOut ? 'timed_out' : 'blocked'), {
-                recoveryStatus: 'pm',
-                recoveryTaskId: registeredRecoveryTask.graphNodeId,
-                recoveryTrigger: recoveryTask.recovery?.trigger || problemTrigger,
-              }));
-            }
-          } else {
-            resumableFailure = true;
-          }
-          addMessage(chat.id, {
-            id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-            text: `🧭|${problemTrigger === 'quality'
-              ? t('PM übernimmt die Qualitäts-Recovery für {agent}: Aufgabe verkleinern und schrittweise mit erneuter Qualitätsprüfung ausführen.', { agent: originalAgent.name })
-              : problemTrigger === 'timeout'
-                ? t('PM übernimmt sofort die Timeout-Recovery für {agent}: Aufgabe untersuchen, verkleinern und schrittweise neu vergeben.', { agent: originalAgent.name })
-                : t('PM übernimmt die Problem-Recovery für {agent}: Ursache prüfen und einen sicheren kleineren Lösungsschritt planen.', { agent: originalAgent.name })}`,
-            ts: Date.now(), isError: false,
-          });
-        } else if (taskGraphRef.current?.approvedPlan) {
-          // Without an available PM, or when the PM's own approved task fails,
-          // the user becomes the final decision authority.
-          pauseRequested = true;
-          pauseQuestion = buildRecoveryUserQuestion({
-            recovery: task.recovery || {
-              trigger: timedOut ? 'timeout' : qualityBlocked ? 'quality' : 'error',
-              originalObjective: objective,
-            },
-            errorMessage: e.message,
-          });
-          setGraphTaskStatus(task, 'waiting_user', {
-            blockedReason: 'pm-recovery-needs-user',
-            issueSummary: pauseQuestion,
-          });
-          needsSynthesis = false;
-        } else if (agent.id === pm?.id) {
-          resumableFailure = true;
-        } else if (pm) {
-          delegatedResults.push({
-            agent: agent.name,
-            objective,
-            result: `FEHLER: ${e.message}`,
-            graphNodeId: task.graphNodeId,
-          });
-          needsSynthesis = true;
-        }
-      } finally {
-        releaseAgentLease();
-        setTypingAgents(prev => prev.filter(id => id !== agent.id));
-        if (activeAgentRunRef.current.has(agentRequestId)) {
-          activeAgentRunRef.current.delete(agentRequestId);
-          setAgentProgress(previous => {
-            const next = { ...previous };
-            delete next[agent.id];
-            return next;
-          });
-        }
-      }
-
-      return {
-        task,
-        agent,
-        pauseRequested,
-        pauseQuestion,
-        scheduleDecisionRequested,
-        providerPauseRequested,
-        providerRetryAfterMs,
-        groupPauseRequested,
-        groupPauseRequests,
-        interimResult: savedInterimResult,
-      };
-    };
-
-    const enqueueReadyApprovedWorkflowTasks = (excludedNodeIds = new Set()) => {
-      const currentGraph = taskGraphRef.current;
-      if (planningOnly || !currentGraph?.approvedPlan || !activePlanRootNodeId) return [];
-      const queuedNodeIds = new Set(taskQueue.pendingTasks().map(pendingTask => pendingTask.graphNodeId).filter(Boolean));
-      const readyNodes = (currentGraph.nodes || [])
-        .filter(node =>
-          node.planRootId === activePlanRootNodeId &&
-          inferTaskNodeType(node) !== 'request' &&
-          CLAIMABLE_PLAN_STATUSES.has(node.status) &&
-          !queuedNodeIds.has(node.id) &&
-          !excludedNodeIds.has(node.id) &&
-          isTaskNodeReady(currentGraph, node.id)
-        )
-        .sort((left, right) => (left.planOrder || 0) - (right.planOrder || 0));
-      const acceptedTasks = [];
-      for (const plannedNode of readyNodes) {
-        const target = chatAgents.find(candidate => candidate.id === plannedNode.agentId);
-        if (!target) continue;
-        const runtimeRecovery = plannedNode.runtimeRecovery === true && String(plannedNode.source || '').startsWith('timeout-recovery');
-        const approvedNode = currentGraph.approvedPlan.nodes.find(node => node.id === plannedNode.id);
-        const approvedModel = approvedNode?.modelOverride || approvedNode?.model;
-        const relevantResultNodeIds = workflowDependencyAncestorIds(currentGraph, plannedNode.id);
-        const relevantResults = delegatedResults
-          .filter(result => relevantResultNodeIds.has(result.graphNodeId))
-          .slice(-12);
-        const preparedFinding = plannedNode.interimResult
-          ? [`Zwischengespeicherte Vorarbeit dieser Aufgabe: ${String(plannedNode.interimResult).slice(0, 12000)}`]
-          : [];
-        const handoff = createHandoff({
-          from: runtimeRecovery ? 'Timeout-Wächter' : 'Workflow-Scheduler',
-          to: target.name,
-          taskId: `approved-${plannedNode.planTaskId || plannedNode.id}`,
-          summary: plannedNode.objective || plannedNode.title,
-          findings: [
-            ...preparedFinding,
-            ...relevantResults.map(item => `${item.agent}: ${String(item.result || '').slice(0, 6000)}`),
-          ],
-        });
-        const readyTask = registerGraphTask({
-          agent: target,
-          objective: plannedNode.objective || plannedNode.title,
-          handoff,
-          source: runtimeRecovery ? plannedNode.source : 'approved-workflow',
-          ...(runtimeRecovery ? { runtimeRecovery: true, recovery: plannedNode.recovery } : {}),
-          graphNodeId: plannedNode.id,
-          planRootId: activePlanRootNodeId,
-          planTaskId: plannedNode.planTaskId,
-          ...(approvedModel ? { modelOverride: approvedModel } : {}),
-        }, { status: plannedNode.status });
-        if (taskQueue.enqueue(readyTask)) acceptedTasks.push(readyTask);
-      }
-      return acceptedTasks;
-    };
-
-    const enqueueDependencyPreparationTasks = ({
-      activeNodeIds = new Set(),
-      activeAgentIds = new Set(),
-      limit = 2,
-    } = {}) => {
-      const currentGraph = taskGraphRef.current;
-      if (planningOnly || !currentGraph?.approvedPlan || !activePlanRootNodeId) return [];
-      const pendingTasks = taskQueue.pendingTasks();
-      const queuedNodeIds = new Set(pendingTasks.map(pendingTask => pendingTask.graphNodeId).filter(Boolean));
-      const queuedAgentIds = new Set(pendingTasks.map(pendingTask => pendingTask.agent?.id).filter(Boolean));
-      const candidateIds = findDependencyPreparationCandidateIds(currentGraph, {
-        activeNodeIds: [...activeNodeIds],
-        activeAgentIds: [...activeAgentIds, ...queuedAgentIds],
-        queuedNodeIds: [...queuedNodeIds],
-        limit,
-      });
-      const preparationTasks = [];
-      for (const nodeId of candidateIds) {
-        const plannedNode = currentGraph.nodes.find(node => node.id === nodeId);
-        const target = chatAgents.find(candidate => candidate.id === plannedNode?.agentId);
-        if (!plannedNode || !target || plannedNode.planRootId !== activePlanRootNodeId) continue;
-        const approvedNode = currentGraph.approvedPlan.nodes.find(node => node.id === nodeId);
-        const approvedModel = approvedNode?.modelOverride || approvedNode?.model;
-        const taskObjective = plannedNode.objective || plannedNode.title;
-        const handoff = createHandoff({
-          from: 'Workflow-Scheduler',
-          to: target.name,
-          taskId: `prepare-${plannedNode.planTaskId || plannedNode.id}`,
-          summary: `Sichere Vorarbeit für die freigegebene Aufgabe „${taskObjective}“ erstellen. Bearbeite ausschließlich Teile, die ohne die noch laufenden Vorgängerergebnisse korrekt und reversibel vorbereitet werden können.`,
-          findings: ['Die eigentliche Aufgabe bleibt blockiert, bis alle freigegebenen Abhängigkeiten abgeschlossen sind.'],
-        });
-        const preparationTask = registerGraphTask({
-          agent: target,
-          objective: handoff.summary,
-          handoff,
-          source: 'dependency-preparation',
-          preparationOnly: true,
-          approvedContinuation: true,
-          graphNodeId: plannedNode.id,
-          planRootId: activePlanRootNodeId,
-          planTaskId: plannedNode.planTaskId,
-          ...(approvedModel ? { modelOverride: approvedModel } : {}),
-        }, { status: plannedNode.status });
-        if (taskQueue.enqueue(preparationTask)) preparationTasks.push(preparationTask);
-      }
-      return preparationTasks;
-    };
-
-    const runWorkConservingApprovedBatch = async (initialTasks) => {
-      const activeRuns = new Map();
-      const activeAgentIds = new Set();
-      const executions = [];
-      let launchSequence = 0;
-      let stopScheduling = false;
-
-      const launchTask = (nextTask) => {
-        const runKey = `${nextTask.graphNodeId || nextTask.agent.id}:${launchSequence++}`;
-        activeAgentIds.add(nextTask.agent.id);
-        requestedParallelTaskIds.delete(nextTask.graphNodeId);
-        const promise = executeAgentTask(nextTask).then(execution => {
-          if (
-            !execution || execution.pauseRequested || execution.scheduleDecisionRequested ||
-            execution.providerPauseRequested || projectCompleted || runIdRef.current !== myRunId
-          ) stopScheduling = true;
-          return { runKey, task: nextTask, execution };
-        });
-        activeRuns.set(runKey, { task: nextTask, promise });
-      };
-
-      const drainRunnableTasks = () => {
-        if (stopScheduling || projectCompleted || runIdRef.current !== myRunId) return;
-        const activeNodeIds = new Set([...activeRuns.values()].map(activeRun => activeRun.task.graphNodeId).filter(Boolean));
-        enqueueReadyApprovedWorkflowTasks(activeNodeIds);
-        enqueueDependencyPreparationTasks({ activeNodeIds, activeAgentIds });
-        let runnableTask;
-        while ((runnableTask = taskQueue.nextMatching(candidate => (
-          !activeAgentIds.has(candidate.agent.id) &&
-          (candidate.outOfBand || validateApprovedTaskExecution(taskGraphRef.current, candidate).ok)
-        )))) {
-          launchTask(runnableTask);
-        }
-      };
-
-      const persistActiveWork = () => {
-        if (runIdRef.current !== myRunId) return;
-        const activeTasks = [...activeRuns.values()].map(activeRun => activeRun.task);
-        persistRunCheckpoint({
-          status: 'running',
-          pendingTasks: [...activeTasks, ...taskQueue.pendingTasks()],
-          parallelTaskIds: activeTasks.length >= 2 ? activeTasks.map(activeTask => activeTask.graphNodeId).filter(Boolean) : [],
-          initialObjective,
-          needsSynthesis,
-          synthesisCount,
-          delegatedResults: [...delegatedResults],
-          successfulTasks,
-          queueGuard: taskQueue.guardState(),
-          planRootGraphNodeId: activePlanRootNodeId,
-        });
-      };
-
-      initialTasks.forEach(launchTask);
-      drainRunnableTasks();
-      persistActiveWork();
-
-      while (activeRuns.size > 0) {
-        const settled = await Promise.race([...activeRuns.values()].map(activeRun => activeRun.promise));
-        activeRuns.delete(settled.runKey);
-        activeAgentIds.delete(settled.task.agent.id);
-        executions.push(settled.execution);
-        drainRunnableTasks();
-        persistActiveWork();
-      }
-
-      return executions;
-    };
-
-    while ((task = taskQueue.next())) {
-      const taskBatch = [task];
-      const startsSelectedParallelBatch = requestedParallelTaskIds.has(task.graphNodeId);
-      if (startsSelectedParallelBatch) {
-        requestedParallelTaskIds.delete(task.graphNodeId);
-        // Selected tasks were stably sorted to the front while restoring the
-        // checkpoint. Peek before next() so unrelated sequential work is never
-        // accidentally pulled into this batch.
-        while (requestedParallelTaskIds.size > 0 && taskQueue.length > 0) {
-          const nextPendingTask = taskQueue.pendingTasks()[0];
-          if (!requestedParallelTaskIds.has(nextPendingTask?.graphNodeId)) break;
-          const parallelTask = taskQueue.next();
-          if (!parallelTask) break;
-          requestedParallelTaskIds.delete(parallelTask.graphNodeId);
-          taskBatch.push(parallelTask);
-        }
-      }
-
-      const authorizationFailure = taskBatch
-        .map(candidate => ({
-          task: candidate,
-          validation: candidate.outOfBand
-            ? { ok: true, mode: 'side-conversation' }
-            : validateApprovedTaskExecution(taskGraphRef.current, candidate),
-        }))
-        .find(item => !item.validation.ok);
-      if (authorizationFailure) {
-        const rejectedTask = authorizationFailure.task;
-        if (rejectedTask?.graphNodeId && taskGraphRef.current?.nodes?.some(node => node.id === rejectedTask.graphNodeId)) {
-          const belongsToContract = taskGraphRef.current?.approvedPlan?.nodes?.some(node => node.id === rejectedTask.graphNodeId);
-          commitTaskGraph(graph => belongsToContract
-            ? updateTaskNodeStatus(graph, rejectedTask.graphNodeId, 'waiting_user', {
-              blockedReason: 'contract-violation',
-              issueSummary: authorizationFailure.validation.reason,
-            })
-            : removePlanningTask(graph, rejectedTask.graphNodeId));
-        }
-        const attentionCheckpoint = {
-          mode: 'execution',
-          status: 'needs-attention',
-          pendingTasks: [],
-          parallelTaskIds: [],
-          initialObjective,
-          needsSynthesis,
-          synthesisCount,
-          delegatedResults: [...delegatedResults],
-          successfulTasks,
-          queueGuard: taskQueue.guardState(),
-          planRootGraphNodeId: activePlanRootNodeId,
-        };
-        persistRunCheckpoint(attentionCheckpoint);
-        addMessage(chat.id, {
-          id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-          text: `🛡️|${t('Eine nicht freigegebene Workflowaktion wurde blockiert: {reason} Der Plan blieb unverändert. Nur der User kann eine neue Planversion anlegen.', { reason: authorizationFailure.validation.reason })}`,
-          ts: Date.now(), isError: false,
-        });
-        setRunning(false);
-        return;
-      }
-
-      const remainingBatchTasks = new Map(taskBatch.map(batchTask => [batchTask.graphNodeId, batchTask]));
-      persistRunCheckpoint({
-        status: 'running',
-        pendingTasks: [...taskBatch, ...taskQueue.pendingTasks()],
-        parallelTaskIds: startsSelectedParallelBatch ? taskBatch.map(batchTask => batchTask.graphNodeId) : [],
-        initialObjective,
-        needsSynthesis,
-        synthesisCount,
-        delegatedResults: [...delegatedResults],
-        successfulTasks,
-        queueGuard: taskQueue.guardState(),
-        planRootGraphNodeId: activePlanRootNodeId,
-      });
-
-      const executions = !planningOnly && taskGraphRef.current?.approvedPlan
-        ? await runWorkConservingApprovedBatch(taskBatch)
-        : await runTaskBatch(taskBatch, async batchTask => {
-          const execution = await executeAgentTask(batchTask);
-          if (execution && runIdRef.current === myRunId) {
-            remainingBatchTasks.delete(batchTask.graphNodeId);
-            // Persist after every settled task. If another parallel agent is
-            // interrupted, already completed siblings are not repeated later.
-            const unfinishedBatch = [...remainingBatchTasks.values()];
-            persistRunCheckpoint({
-              status: 'running',
-              pendingTasks: [...unfinishedBatch, ...taskQueue.pendingTasks()],
-              parallelTaskIds: startsSelectedParallelBatch
-                ? unfinishedBatch.map(pendingTask => pendingTask.graphNodeId)
-                : [],
-              initialObjective,
-              needsSynthesis,
-              synthesisCount,
-              delegatedResults: [...delegatedResults],
-              successfulTasks,
-              queueGuard: taskQueue.guardState(),
-              planRootGraphNodeId: activePlanRootNodeId,
-            });
-          }
-          return execution;
-        });
-      if (executions.some(execution => !execution)) {
-        setRunning(false);
-        return;
-      }
-      const groupPauseExecutions = executions.filter(execution => execution.groupPauseRequested);
-      const delegationApprovalExecutions = executions.filter(execution => execution.delegationApprovalRequested);
-      const delegationUnavailableExecutions = executions.filter(execution => execution.delegationUnavailable);
-      for (const execution of groupPauseExecutions) {
-        const requests = execution.groupPauseRequests || [];
-        const batchId = requests[0]?.batchId;
-        if (!batchId || retainedGroupWaits.some(wait => wait.batchId === batchId)) continue;
-        retainedGroupWaits.push({
-          batchId,
-          requestIds: requests.map(request => request.id),
-          targetGroupIds: requests.map(request => request.targetGroupId),
-          targetGroupNames: requests.map(request => request.targetGroupName),
-          kind: requests.some(request => request.kind === 'task_delegation') ? 'task_delegation' : 'consultation',
-          task: execution.task,
-          interimResult: execution.interimResult || '',
-          createdAt: Date.now(),
-        });
-      }
-      for (const execution of delegationApprovalExecutions) {
-        if (retainedDelegationWaits.some(wait => wait.taskId === execution.task.graphNodeId)) continue;
-        retainedDelegationWaits.push({
-          taskId: execution.task.graphNodeId,
-          task: execution.task,
-          proposal: execution.delegationProposal,
-          createdAt: Date.now(),
-        });
-      }
-      if (planningOnly) {
-        const planningPause = executions.find(execution => execution.pauseRequested);
-        const pauseQuestion = planningPause?.pauseQuestion || '';
-        if (planningPause) setGraphTaskStatus(planningPause.task, 'waiting_user');
-        persistRunCheckpoint({
-          status: planningPause ? 'awaiting-user' : groupPauseExecutions.length > 0 ? 'awaiting-group' : 'planning',
-          ...(planningPause ? {
-            askingAgent: planningPause.agent,
-            askingGraphNodeId: planningPause.task.graphNodeId,
-            question: pauseQuestion,
-          } : {}),
-          pendingTasks: planningDraftTasks,
-          initialObjective,
-          needsSynthesis: planningDraftTasks.length > 0,
-          synthesisCount,
-          delegatedResults: [],
-          successfulTasks: 0,
-          queueGuard: taskQueue.guardState(),
-          planRootGraphNodeId: activePlanRootNodeId,
-        });
-        if (planningPause) {
-          const questionList = pauseQuestion
-            .split('\n')
-            .map(question => question.trim())
-            .filter(Boolean)
-            .map(question => `• ${question}`)
-            .join('\n');
-          setStoppedForUser(true);
-          addMessage(chat.id, {
-            id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-            text: `💬|${t('{agent} wartet auf deine Antwort:', { agent: planningPause.agent.name })}\n\n${questionList || `• ${t('Bitte beantworte die Rückfrage des Agenten.')}`}\n\n${t('Antworte einfach im Eingabefeld – danach läuft die Agenten-Konversation weiter.')}`,
-            ts: Date.now(), isError: false,
-          });
-        }
-        setRunning(false);
-        return;
-      }
-      const pauseExecution = executions.find(execution => execution.pauseRequested);
-      const scheduleExecution = executions.find(execution => execution.scheduleDecisionRequested);
-      const providerPauseExecution = executions.find(execution => execution.providerPauseRequested);
-      const lastExecution = executions.at(-1);
-      const { agent } = providerPauseExecution || pauseExecution || scheduleExecution || lastExecution;
-      task = (providerPauseExecution || pauseExecution || scheduleExecution || lastExecution).task;
-
-      if (projectCompleted) {
-        setRunning(false);
-        return;
-      }
-
-      if (providerPauseExecution) {
-        const retrySeconds = Math.max(1, Math.ceil(providerPauseExecution.providerRetryAfterMs / 1000));
-        persistRunCheckpoint({
-          status: 'provider-limited',
-          pendingTasks: taskQueue.pendingTasks(),
-          initialObjective,
-          needsSynthesis,
-          synthesisCount,
-          delegatedResults: [...delegatedResults],
-          successfulTasks,
-          queueGuard: taskQueue.guardState(),
-          planRootGraphNodeId: activePlanRootNodeId,
-          limitedProvider: agent.provider,
-          limitedAgentId: agent.id,
-          retryAfterMs: providerPauseExecution.providerRetryAfterMs,
-          retryNotBefore: Date.now() + providerPauseExecution.providerRetryAfterMs,
-        });
-        addMessage(chat.id, {
-          id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-          text: `⏳|${t('{agent}s Task bleibt in der Warteschlange. Frühestens in etwa {seconds}s fortsetzen; bereits fertige Parallel-Tasks werden nicht wiederholt.', { agent: agent.name, seconds: retrySeconds })}`,
-          ts: Date.now(), isError: false,
-        });
-        setRunning(false);
-        return;
-      }
-
-      if (pauseExecution) {
-        const { pauseQuestion } = pauseExecution;
-        setGraphTaskStatus(task, 'waiting_user');
-        const questionList = pauseQuestion
-          .split('\n')
-          .map(question => question.trim())
-          .filter(Boolean)
-          .map(question => `• ${question}`)
-          .join('\n');
-        persistRunCheckpoint({
-          status: 'awaiting-user',
-          askingAgent: agent,
-          askingGraphNodeId: task.graphNodeId,
-          question: pauseQuestion,
-          pendingTasks: taskQueue.pendingTasks(),
-          initialObjective,
-          needsSynthesis,
-          synthesisCount,
-          delegatedResults: [...delegatedResults],
-          successfulTasks,
-          queueGuard: taskQueue.guardState(),
-          planRootGraphNodeId: activePlanRootNodeId,
-        });
-        setStoppedForUser(true);
-        addMessage(chat.id, {
-          id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-          text: `💬|${t('{agent} wartet auf deine Antwort:', { agent: agent.name })}\n\n${questionList || `• ${t('Bitte beantworte die Rückfrage des Agenten.')}`}\n\n${t('Antworte einfach im Eingabefeld – danach läuft die Agenten-Konversation weiter.')}`,
-          ts: Date.now(), isError: false,
-        });
-        setRunning(false);
-        return;
-      }
-
-      if (scheduleExecution) {
-        persistRunCheckpoint({
-          status: 'awaiting-schedule',
-          pendingTasks: taskQueue.pendingTasks(),
-          initialObjective,
-          needsSynthesis,
-          synthesisCount,
-          delegatedResults: [...delegatedResults],
-          successfulTasks,
-          queueGuard: taskQueue.guardState(),
-          planRootGraphNodeId: activePlanRootNodeId,
-        });
-        addMessage(chat.id, {
-          id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-          text: `🗺️|${t('Der Aufgabenplan ist bereit. Prüfe ihn im Workflowfenster und starte die laut Abhängigkeiten bereiten Aufgaben.')}`,
-          ts: Date.now(), isError: false,
-        });
-        setRunning(false);
-        return;
-      }
-
-      if (delegationUnavailableExecutions.length > 0) {
-        persistRunCheckpoint({
-          status: 'needs-attention',
-          pendingTasks: taskQueue.pendingTasks(),
-          initialObjective,
-          needsSynthesis,
-          synthesisCount,
-          delegatedResults: [...delegatedResults],
-          successfulTasks,
-          queueGuard: taskQueue.guardState(),
-          planRootGraphNodeId: activePlanRootNodeId,
-        });
-        setRunning(false);
-        return;
-      }
-
-      if (delegationApprovalExecutions.length > 0) {
-        persistRunCheckpoint({
-          status: 'awaiting-delegation',
-          pendingTasks: taskQueue.pendingTasks(),
-          initialObjective,
-          needsSynthesis,
-          synthesisCount,
-          delegatedResults: [...delegatedResults],
-          successfulTasks,
-          queueGuard: taskQueue.guardState(),
-          planRootGraphNodeId: activePlanRootNodeId,
-        });
-        setRunning(false);
-        return;
-      }
-
-      if (groupPauseExecutions.length > 0) {
-        persistRunCheckpoint({
-          status: 'awaiting-group',
-          pendingTasks: taskQueue.pendingTasks(),
-          initialObjective,
-          needsSynthesis,
-          synthesisCount,
-          delegatedResults: [...delegatedResults],
-          successfulTasks,
-          queueGuard: taskQueue.guardState(),
-          planRootGraphNodeId: activePlanRootNodeId,
-        });
-        setRunning(false);
-        return;
-      }
-
-      // A locked workflow advances from the approved graph itself. The PM may
-      // describe work, but cannot silently redefine which task runs next.
-      if (taskQueue.length === 0 && needsSynthesis && taskGraphRef.current?.approvedPlan && activePlanRootNodeId) {
-        const approvedTasks = enqueueReadyApprovedWorkflowTasks();
-        if (approvedTasks.length > 0) {
-          const safeParallelIds = findSafeAutoParallelTaskIds(taskGraphRef.current, approvedTasks);
-          safeParallelIds.forEach(nodeId => requestedParallelTaskIds.add(nodeId));
-          taskQueue.prioritize(safeParallelIds);
-        }
-      }
-
-      if (taskQueue.length === 0 && needsSynthesis && taskGraphRef.current?.approvedPlan) {
-        const openContractNodes = (taskGraphRef.current.nodes || []).filter(node =>
-          node.planRootId === activePlanRootNodeId &&
-          inferTaskNodeType(node) !== 'request' &&
-          !FINISHED_PLAN_STATUSES.has(node.status)
-        );
-        resumableFailure = openContractNodes.length > 0;
-        needsSynthesis = false;
-        if (resumableFailure) {
-          persistRunCheckpoint({
-            status: retainedDelegationWaits.length > 0
-              ? 'awaiting-delegation'
-              : retainedGroupWaits.length > 0
-                ? 'awaiting-group'
-                : 'needs-attention',
-            pendingTasks: [],
-            initialObjective,
-            needsSynthesis: false,
-            synthesisCount,
-            delegatedResults: [...delegatedResults],
-            successfulTasks,
-            queueGuard: taskQueue.guardState(),
-            planRootGraphNodeId: activePlanRootNodeId,
-          });
-        } else {
-          delegatedResults.length = 0;
-        }
-      }
-
-      // Free mode retains dynamic PM synthesis. Approved workflows execute only
-      // user-authored nodes; even the PM cannot create a hidden review task.
-      if (taskQueue.length === 0 && needsSynthesis && pm && delegatedResults.length > 0 && !taskGraphRef.current?.approvedPlan) {
-        synthesisCount += 1;
-        const reviewDependencyIds = [...new Set(delegatedResults.map(item => item.graphNodeId).filter(Boolean))];
-        const synthesisHandoff = createHandoff({
-          from: `Team-Runde-${synthesisCount}`,
-          to: pm.name,
-          taskId: `synthesis-${Date.now().toString(36)}`,
-          summary: `Final-Review: Prüfe alle Ergebnisse gegen die ursprüngliche User-Anforderung "${initialObjective}". Falls etwas offen ist, delegiere es konkret an den zuständigen Agenten. Falls alles erfüllt ist, gib den Abschluss an den User und beende mit [[PROJECT_DONE]].`,
-          findings: delegatedResults.slice(-12).map(item => `${item.agent} | Aufgabe: ${item.objective} | Ergebnis: ${String(item.result || '').slice(0, 6000)}`),
-        });
-        const synthesisTask = registerGraphTask({
-          agent: pm,
-          objective: synthesisHandoff.summary,
-          handoff: synthesisHandoff,
-          source: 'team-synthesis',
-          planRootId: activePlanRootNodeId,
-        }, {
-          status: 'planned',
-          parentNodeId: reviewDependencyIds.length ? null : task.graphNodeId,
-        });
-        if (reviewDependencyIds.length > 0) {
-          commitTaskGraph(graph => reviewDependencyIds.reduce((nextGraph, dependencyNodeId) =>
-            addTaskEdge(nextGraph, { from: dependencyNodeId, to: synthesisTask.graphNodeId, kind: 'review' }),
-          graph));
-        }
-        taskQueue.enqueue(synthesisTask);
-        delegatedResults.length = 0;
-        needsSynthesis = false;
-      }
-
-      if (taskQueue.length > 0) {
-        persistRunCheckpoint({
-          status: 'running',
-          pendingTasks: taskQueue.pendingTasks(),
-          initialObjective,
-          needsSynthesis,
-          synthesisCount,
-          delegatedResults: [...delegatedResults],
-          successfulTasks,
-          queueGuard: taskQueue.guardState(),
-          planRootGraphNodeId: activePlanRootNodeId,
-        });
-      } else if (!resumableFailure) {
-        // Mark the just-finished task as consumed before the final cleanup, so
-        // an app shutdown in this small window cannot execute it a second time.
-        persistRunCheckpoint({
-          status: 'running',
-          pendingTasks: [],
-          initialObjective,
-          needsSynthesis,
-          synthesisCount,
-          delegatedResults: [...delegatedResults],
-          successfulTasks,
-          queueGuard: taskQueue.guardState(),
-          planRootGraphNodeId: activePlanRootNodeId,
-        });
-      }
-    }
-
-    // A bounded run segment never ends without PM supervision. The PM gets
-    // one extra review task outside the normal queue budget and may either
-    // approve completion or define one smaller next step. Remaining work is
-    // checkpointed for an explicit resume, which keeps the loop guard intact.
-    if (taskQueue.reachedLimit && chat.type === 'group' && pm && conversationLimits.pmReviewOnLimit) {
-      const pendingAtLimit = taskQueue.pendingTasks();
-      if (taskGraphRef.current?.approvedPlan) {
-        persistRunCheckpoint({
-          status: 'limit-reached',
-          pendingTasks: pendingAtLimit,
-          initialObjective,
-          needsSynthesis,
-          synthesisCount,
-          delegatedResults: [...delegatedResults],
-          successfulTasks,
-          queueGuard: taskQueue.guardState(),
-          planRootGraphNodeId: activePlanRootNodeId,
-          completedSegmentTurns: conversationLimits.maxTurns,
-        });
-        addMessage(chat.id, {
-          id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-          text: `💾|${t('Der freigegebene Workflow wurde an der Laufgrenze sicher pausiert. Mit „Fortsetzen“ läuft derselbe Plan weiter.', { count: conversationLimits.maxTurns })}`,
-          ts: Date.now(), isError: false,
-        });
-        setRunning(false);
-        return;
-      }
-      addMessage(chat.id, {
-        id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-        text: `🧭|${t('Laufgrenze nach {count} Agenten-Tasks erreicht. Der PM prüft jetzt Abschluss und offene Arbeit.', { count: conversationLimits.maxTurns })}`,
-        ts: Date.now(), isError: false,
-      });
-      const limitReviewDraft = buildTurnLimitReviewTask({
-        pm,
-        initialObjective,
-        maxTurns: conversationLimits.maxTurns,
-        pendingTasks: pendingAtLimit,
-        delegatedResults,
-      });
-      const limitReviewTask = registerGraphTask(limitReviewDraft, { status: 'planned' });
-      const reviewExecution = await executeAgentTask(limitReviewTask);
-      if (!reviewExecution || runIdRef.current !== myRunId) {
-        setRunning(false);
-        return;
-      }
-      if (projectCompleted) {
-        setRunning(false);
-        return;
-      }
-
-      if (reviewExecution.providerPauseRequested) {
-        const retrySeconds = Math.max(1, Math.ceil(reviewExecution.providerRetryAfterMs / 1000));
-        persistRunCheckpoint({
-          status: 'provider-limited',
-          pendingTasks: taskQueue.pendingTasks(),
-          initialObjective,
-          needsSynthesis,
-          synthesisCount,
-          delegatedResults: [...delegatedResults],
-          successfulTasks,
-          queueGuard: taskQueue.guardState(),
-          planRootGraphNodeId: activePlanRootNodeId,
-          limitedProvider: pm.provider,
-          limitedAgentId: pm.id,
-          retryAfterMs: reviewExecution.providerRetryAfterMs,
-          retryNotBefore: Date.now() + reviewExecution.providerRetryAfterMs,
-        });
-        addMessage(chat.id, {
-          id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-          text: `⏳|${t('Die PM-Grenzprüfung wurde gespeichert und kann in etwa {seconds}s fortgesetzt werden.', { seconds: retrySeconds })}`,
-          ts: Date.now(), isError: false,
-        });
-        setRunning(false);
-        return;
-      }
-
-      if (reviewExecution.pauseRequested) {
-        const pauseQuestion = reviewExecution.pauseQuestion || '';
-        const questionList = pauseQuestion
-          .split('\n')
-          .map(question => question.trim())
-          .filter(Boolean)
-          .map(question => `• ${question}`)
-          .join('\n');
-        setGraphTaskStatus(limitReviewTask, 'waiting_user');
-        persistRunCheckpoint({
-          status: 'awaiting-user',
-          askingAgent: pm,
-          askingGraphNodeId: limitReviewTask.graphNodeId,
-          question: pauseQuestion,
-          pendingTasks: taskQueue.pendingTasks(),
-          initialObjective,
-          needsSynthesis,
-          synthesisCount,
-          delegatedResults: [...delegatedResults],
-          successfulTasks,
-          queueGuard: taskQueue.guardState(),
-          planRootGraphNodeId: activePlanRootNodeId,
-        });
-        setStoppedForUser(true);
-        addMessage(chat.id, {
-          id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-          text: `💬|${t('{agent} wartet auf deine Antwort:', { agent: pm.name })}\n\n${questionList || `• ${t('Bitte beantworte die Rückfrage des Agenten.')}`}\n\n${t('Antworte einfach im Eingabefeld – danach läuft die Agenten-Konversation weiter.')}`,
-          ts: Date.now(), isError: false,
-        });
-        setRunning(false);
-        return;
-      }
-
-      if (reviewExecution.scheduleDecisionRequested) {
-        persistRunCheckpoint({
-          status: 'awaiting-schedule',
-          pendingTasks: taskQueue.pendingTasks(),
-          initialObjective,
-          needsSynthesis,
-          synthesisCount,
-          delegatedResults: [...delegatedResults],
-          successfulTasks,
-          queueGuard: taskQueue.guardState(),
-          planRootGraphNodeId: activePlanRootNodeId,
-        });
-        addMessage(chat.id, {
-          id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-          text: `🗺️|${t('Der Aufgabenplan ist bereit. Prüfe ihn im Workflowfenster und starte die laut Abhängigkeiten bereiten Aufgaben.')}`,
-          ts: Date.now(), isError: false,
-        });
-        setRunning(false);
-        return;
-      }
-
-      const pendingAfterReview = taskQueue.pendingTasks();
-      persistRunCheckpoint({
-        status: 'limit-reached',
-        pendingTasks: pendingAfterReview,
-        initialObjective,
-        needsSynthesis,
-        synthesisCount,
-        delegatedResults: [...delegatedResults],
-        successfulTasks,
-        queueGuard: taskQueue.guardState(),
-        planRootGraphNodeId: activePlanRootNodeId,
-        completedSegmentTurns: conversationLimits.maxTurns,
-      });
-      addMessage(chat.id, {
-        id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-        text: `💾|${t('Laufgrenze nach {count} Agenten-Tasks erreicht. Der Arbeitsstand und {pending} offene Aufgabe(n) wurden gespeichert. Mit „Fortsetzen“ beginnt das nächste Laufsegment.', {
-          count: conversationLimits.maxTurns,
-          pending: pendingAfterReview.length,
-        })}`,
-        ts: Date.now(), isError: false,
-      });
-      setRunning(false);
-      return;
-    }
-
-    if (loopGuardRejections.length > 0) {
-      finishRunCheckpoint();
-      const affectedAgents = [...new Set(loopGuardRejections
-        .map(rejection => rejection.task?.agent?.name)
-        .filter(Boolean))];
-      addMessage(chat.id, {
-        id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-        text: `🛑|${t('Wiederholungsschleife gestoppt: {agents} sollte eine bereits erledigte Dateiaufgabe erneut erhalten. Die doppelte Übergabe wurde blockiert; vorhandene Dateien und Zwischenstände bleiben erhalten.', { agents: affectedAgents.join(', ') || t('Ein Agent') })}`,
-        ts: Date.now(), isError: false,
-      });
-    } else if (taskQueue.reachedLimit) {
-      const pendingTasks = taskQueue.pendingTasks();
-      persistRunCheckpoint({
-        status: 'limit-reached',
-        pendingTasks,
-        initialObjective,
-        needsSynthesis,
-        synthesisCount,
-        delegatedResults: [...delegatedResults],
-        successfulTasks,
-        queueGuard: taskQueue.guardState(),
-        planRootGraphNodeId: activePlanRootNodeId,
-        completedSegmentTurns: conversationLimits.maxTurns,
-      });
-      addMessage(chat.id, {
-        id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-        text: `💾|${t('Laufgrenze nach {count} Agenten-Tasks erreicht. Der Arbeitsstand wurde gespeichert. Mit „Fortsetzen“ kann der PM die offene Arbeit prüfen.', { count: conversationLimits.maxTurns })}`,
-        ts: Date.now(), isError: false,
-      });
-    } else if (retainedDelegationWaits.length > 0) {
-      persistRunCheckpoint({
-        status: 'awaiting-delegation',
-        pendingTasks: taskQueue.pendingTasks(),
-        initialObjective,
-        needsSynthesis,
-        synthesisCount,
-        delegatedResults: [...delegatedResults],
-        successfulTasks,
-        queueGuard: taskQueue.guardState(),
-        planRootGraphNodeId: activePlanRootNodeId,
-      });
-    } else if (retainedGroupWaits.length > 0) {
-      persistRunCheckpoint({
-        status: 'awaiting-group',
-        pendingTasks: taskQueue.pendingTasks(),
-        initialObjective,
-        needsSynthesis,
-        synthesisCount,
-        delegatedResults: [...delegatedResults],
-        successfulTasks,
-        queueGuard: taskQueue.guardState(),
-        planRootGraphNodeId: activePlanRootNodeId,
-      });
-    } else if (resumableFailure) {
-      addMessage(chat.id, {
-        id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-        text: `⏸|${t('Der Arbeitsstand wurde gespeichert. Du kannst den Lauf mit „Fortsetzen“ an derselben Stelle erneut starten.')}`,
-        ts: Date.now(), isError: false,
-      });
-    } else if (successfulTasks > 0) {
-      finishRunCheckpoint();
-      if (chat.type === 'group' && !sideConversation) {
-        addMessage(chat.id, {
-          id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-          text: `✅|${t(
-            projectPath
-              ? (successfulTasks === 1
-                ? 'Agentenlauf beendet. {count} Task abgeschlossen; Zwischenstände wurden in {path} gespeichert.'
-                : 'Agentenlauf beendet. {count} Tasks abgeschlossen; Zwischenstände wurden in {path} gespeichert.')
-              : (successfulTasks === 1
-                ? 'Agentenlauf beendet. {count} Task abgeschlossen.'
-                : 'Agentenlauf beendet. {count} Tasks abgeschlossen.'),
-            { count: successfulTasks, path: projectPath },
-          )}`,
-          ts: Date.now(), isError: false,
-        });
-      }
-    } else {
-      finishRunCheckpoint();
-    }
-    setRunning(false);
-  }, [apiKeys, providerConnections, chatAgents, groups, conversationStates, kbPath, projectPath, memoryEnabled, memoryConfig?.namespace, memoryAPI, mcpServers, chat, qualityRouting, conversationLimits, recordQualityEvent, refreshMemoryCount, addMessage, enqueueCrossGroupRequest, requestMcpPermission, handleMcpPermissionConsumed, handleMcpToolResult, persistConversationCheckpoint, discardConversationCheckpoint, commitTaskGraph, registerGraphTask, setGraphTaskStatus, language, t]);
+  const runAgents = useConversationRunner({ chat, language, t, agents, groups, messages, conversationStates, addMessage, apiKeys, providerConnections, kbPath, enqueueCrossGroupRequest, mcpServers, conversationLimits, qualityRouting, recordQualityEvent, projectPath, chatAgents, running, setRunning, setTypingAgents, setLastRunContext, setStoppedForUser, setAgentProgress, claudeConversationSessionsRef, codexConversationSessionsRef, autoRunRef, runIdRef, activeAgentRunRef, taskGraphRef, reportedMcpErrorsRef, requestMcpPermission, handleMcpPermissionConsumed, handleMcpToolResult, memoryConfig, memoryEnabled, memoryAPI, activeMcpServers, reachableCrossGroupIds, refreshMemoryCount, persistConversationCheckpoint, discardConversationCheckpoint, commitTaskGraph, registerGraphTask, setGraphTaskStatus });
 
   const handleCancelRun = useCallback(async (options = {}) => {
     if (!running) return;
@@ -4665,6 +1336,39 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
     return cancelAndRemoveGroupRequests(requestIds, reason);
   }, [cancelAndRemoveGroupRequests, groupRequestTreeIds, t]);
 
+  const handleRewind = message => {
+    if (running || !message.rewindSnapshot?.graph) return;
+    if (!window.confirm(t('Zu diesem Punkt zurückspringen? Diese Nachricht und alle folgenden werden aus dem Chat entfernt. Der gespeicherte Workflow wird als Entwurf wiederhergestellt und muss erneut freigegeben werden. Dateiänderungen, geteilte Erinnerungen und externe Aktionen werden nicht rückgängig gemacht.'))) return;
+    queueDrainPausedRef.current = true;
+    runIdRef.current += 1;
+    cancelTaskBoundGroupWork(taskGraphRef.current, t('Der Chat wurde zurückgesetzt.'));
+    cancelAllMcpApprovals();
+    clearUserRequestQueue(chat.id);
+    claudeConversationSessionsRef.current.clear();
+    codexConversationSessionsRef.current.clear();
+    discardConversationCheckpoint();
+    setLastRunContext(null);
+    setStoppedForUser(false);
+    workflowUndoStackRef.current = [];
+    const graph = rewindDraft(message.rewindSnapshot.graph);
+    commitTaskGraph(graph);
+    if (chat.type === 'group') {
+      const root = graph.nodes.find(node => !node.parentNodeId && node.nodeType === 'request') || graph.nodes.find(node => !node.parentNodeId);
+      const checkpoint = { version: 1, mode: 'planning', status: 'planning', pendingTasks: [], parallelTaskIds: [],
+        planRootGraphNodeId: root?.id, initialObjective: root?.objective || '', delegatedResults: [], successfulTasks: 0, needsSynthesis: false };
+      checkpoint.pendingTasks = buildPlanningPendingTasks(graph, checkpoint, chatAgents);
+      persistConversationCheckpoint(checkpoint);
+    }
+    rewindMessages(chat.id, message.id);
+    if (message.agentId === 'user') setInput(message.text || '');
+    focusComposer();
+  };
+
+  const rewindButton = message => <button type="button" className="message-rewind-btn"
+    disabled={running || !message.rewindSnapshot?.graph}
+    title={t(running ? 'Zum Zurückspringen zuerst die laufende Arbeit stoppen' : !message.rewindSnapshot?.graph ? 'Für diese ältere Nachricht ist kein Rücksprungpunkt gespeichert' : 'Vor diese Nachricht zurückspringen')}
+    aria-label={t('Vor diese Nachricht zurückspringen')} onClick={() => handleRewind(message)}><Icon name="undo" size={16} /></button>;
+
   const handleDeleteWorkflow = useCallback(async () => {
     if (workflowDeletePendingRef.current) return;
     const checkpoint = conversationContinuations.get(chat.id) || conversationStates?.[chat.id];
@@ -4843,10 +1547,30 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
   }, [addMessage, cancelAllMcpApprovals, cancelTaskBoundGroupWork, chat.id, chat.name, chatAgents, conversationStates, focusComposer, messageQualityMode, persistConversationCheckpoint, running, saveTaskGraph, t, workflowImportDraft]);
 
   useEffect(() => {
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-      textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 120) + 'px';
-    }
+    const textarea = textareaRef.current;
+    if (!textarea) return undefined;
+    let frame = 0;
+    const resize = () => {
+      textarea.style.height = 'auto';
+      // An empty textarea can report the wrapped placeholder as scroll height.
+      // Keep the compact baseline until the user actually enters content.
+      textarea.style.height = `${input ? Math.min(textarea.scrollHeight, 120) : 40}px`;
+    };
+    const scheduleResize = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(resize);
+    };
+    scheduleResize();
+    const resizeObserver = typeof ResizeObserver === 'function'
+      ? new ResizeObserver(scheduleResize)
+      : null;
+    if (textarea.parentElement) resizeObserver?.observe(textarea.parentElement);
+    window.addEventListener('resize', scheduleResize);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      resizeObserver?.disconnect();
+      window.removeEventListener('resize', scheduleResize);
+    };
   }, [input]);
 
   // Keep every direct and group chat ready for immediate typing. Only the
@@ -4916,6 +1640,48 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
       },
     };
   }), [activeTaskGraph, agents, chat, conversationCheckpoint, groups]);
+  const expertiseHelp = useMemo(() => (activeTaskGraph.nodes || []).filter(node => {
+    if (['request', 'review'].includes(inferTaskNodeType(node)) || node.status === 'completed') return false;
+    return node.blockedReason === 'delegation-no-target-expert' || !chatAgents.some(agent => agent.id === node.agentId)
+      || evaluateTaskDelegation({ taskNode: node, sourceGroup: chat, groups, agents }).action === 'unavailable';
+  }).map(node => {
+    const skills = expertiseSkills(node);
+    const targets = expertiseTargets(chat, groups, node);
+    const searches = expertiseRequests(crossGroupRequests, node.id);
+    const latestBatch = searches.at(-1)?.batchId;
+    const results = searches.filter(request => request.batchId === latestBatch);
+    const candidates = [];
+    const suggested = agents.find(agent => agent.id === node.expertiseSuggestedAgentId && !agent.isSystemAgent);
+    const suggestedHome = suggested && expertiseTargets(chat, groups).find(group => group.agentIds?.includes(suggested.id));
+    if (suggestedHome) candidates.push({ id: suggested.id, name: suggested.name, groupName: suggestedHome.name, groupId: suggestedHome.id });
+    for (const member of chatAgents.filter(agent => !agent.isSystemAgent && (skills.length ? agentCoversCapabilities(agent, skills) : !node.agentId))) candidates.push({ id: member.id, name: member.name, groupName: chat.name, groupId: chat.id });
+    for (const target of targets) for (const member of agents.filter(agent => target.agentIds?.includes(agent.id) && !agent.isSystemAgent && skills.length && agentCoversCapabilities(agent, skills))) {
+      candidates.push({ id: member.id, name: member.name, groupName: target.name, groupId: target.id });
+    }
+    for (const request of results.filter(item => item.status === 'answered' && targets.some(group => group.id === item.targetGroupId))) {
+      const group = targets.find(item => item.id === request.targetGroupId);
+      const members = agents.filter(agent => group.agentIds?.includes(agent.id) && !agent.isSystemAgent);
+      try {
+        for (const id of parseExpertiseAnswer(request.answer, members).agentIds) {
+          const member = members.find(agent => agent.id === id);
+          candidates.push({ id, name: member.name, groupName: group.name, groupId: group.id });
+        }
+      } catch { /* Failed/invalid answers never grant an agent assignment. */ }
+    }
+    return { taskId: node.id, title: node.title, skills, targetCount: targets.length,
+      searched: results.length > 0, pending: results.some(request => !terminalSearch(request)),
+      failed: results.some(request => ['failed', 'timed_out', 'cancelled'].includes(request.status)),
+      candidates: [...new Map(candidates.map(candidate => [candidate.id, candidate])).values()],
+    };
+  }), [activeTaskGraph, agents, chat, chatAgents, crossGroupRequests, groups]);
+  useEffect(() => {
+    if (chat.type !== 'group') return;
+    for (const help of expertiseHelp) if (!help.searched && help.skills.length && help.targetCount && !help.candidates.length) {
+      const node = activeTaskGraph.nodes.find(item => item.id === help.taskId);
+      if (node) queueExpertSearch(node);
+    }
+  }, [activeTaskGraph, chat.type, expertiseHelp, queueExpertSearch]);
+
   const workflowModelOptions = useMemo(
     () => buildWorkflowModelOptions(activeTaskGraph, chatAgents, providerConnections),
     [activeTaskGraph, chatAgents, providerConnections],
@@ -4956,19 +1722,330 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
   const workflowStartDisabled = running || !(conversationCheckpoint?.pendingTasks || []).length || !workflowStartValidation.ok || !!workflowPreflightReason;
   const queuedUserMessageIds = new Set(queuedUserRequests.map(request => String(request.messageId)));
 
-  const resolveWorkflowProblem = useCallback(async (taskId, answer, suppliedProblem = null) => {
+  const runAcceptanceTests = useCallback(async (requestedTaskIds = []) => {
+    if (acceptanceTestRunRef.current) return false;
+    const currentGraph = taskGraphRef.current;
+    const requested = new Set((requestedTaskIds || []).map(String));
+    const candidates = (currentGraph?.nodes || []).filter(node => {
+      if (inferTaskNodeType(node) === 'request') return false;
+      if (requested.size && !requested.has(String(node.id)) && !requested.has(String(node.planTaskId || ''))) return false;
+      if (!['agent_done', 'completed', 'retryable'].includes(node.status)) return false;
+      return (node.acceptanceCriteria || []).some(criterion => (
+        criterion.verification === 'automatic' && !['passed', 'waived'].includes(criterion.status)
+      ));
+    });
+    if (!candidates.length) {
+      addMessage(chat.id, {
+        id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
+        text: `🧪|${t('Für die Auswahl sind keine offenen, automatisch prüfbaren Abnahmekriterien vorhanden.')}`,
+        ts: Date.now(), isError: false,
+      });
+      return false;
+    }
+    if (!chat.reviewEnvironment?.test?.command || !window.electronAPI?.reviewRun) {
+      const runId = `acceptance-test-${Date.now().toString(36)}`;
+      commitTaskGraph(graph => updateAcceptanceTestRun(graph, candidates.map(node => node.id), {
+        id: runId,
+        status: 'unavailable',
+        error: t('In den Gruppeneinstellungen ist kein Prüfbefehl konfiguriert.'),
+      }));
+      addMessage(chat.id, {
+        id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
+        text: `🧪|${t('Automatische AC-Prüfung nicht verfügbar: In den Gruppeneinstellungen ist kein Prüfbefehl konfiguriert. Die Kriterien können begründet manuell freigegeben werden.')}`,
+        ts: Date.now(), isError: true,
+      });
+      return false;
+    }
+
+    const runId = `acceptance-test-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    const taskIds = candidates.map(node => node.id);
+    acceptanceTestRunRef.current = runId;
+    commitTaskGraph(graph => updateAcceptanceTestRun(graph, taskIds, {
+      id: runId,
+      status: 'running',
+      startedAt: Date.now(),
+    }));
+    addMessage(chat.id, {
+      id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
+      text: `🧪|${t('AC-Prüflauf für {count} Ticket(s) gestartet. Der Hauptworkflow kann parallel weiterarbeiten.', { count: candidates.length })}`,
+      ts: Date.now(), isError: false,
+    });
+    try {
+      const result = await window.electronAPI.reviewRun(chat.id, 'test');
+      const finishedAt = Date.now();
+      const decisionStatus = result.ok ? 'passed' : 'failed';
+      const decisions = candidates.flatMap(node => (node.acceptanceCriteria || [])
+        .filter(criterion => criterion.verification === 'automatic' && !['passed', 'waived'].includes(criterion.status))
+        .map(criterion => ({
+          taskId: node.id,
+          criterionId: criterion.id,
+          status: decisionStatus,
+          note: `${result.command || 'Konfigurierter Prüfbefehl'}: ${result.ok ? 'erfolgreich' : 'fehlgeschlagen'} (Exit ${result.code ?? 'unbekannt'}). ${String(result.output || '').slice(-420)}`,
+        })));
+      commitTaskGraph(graph => {
+        if (graph.id !== currentGraph.id) return graph;
+        const validIds = candidates.filter(snapshot => {
+          const current = graph.nodes.find(node => node.id === snapshot.id);
+          return current && graph.planRevision === currentGraph.planRevision
+            && ['agent_done', 'completed', 'retryable'].includes(current.status)
+            && taskCompletionKey(current) === taskCompletionKey(snapshot);
+        }).map(node => node.id);
+        const staleIds = taskIds.filter(id => !validIds.includes(id) && graph.nodes.find(node => node.id === id)?.acceptanceTestRuns?.at(-1)?.id === runId);
+        const settledGraph = updateAcceptanceTestRun(graph, staleIds, {
+          id: runId, status: 'unavailable', finishedAt,
+          error: t('Aufgabe oder Plan während der Prüfung geändert. Erneute Prüfung erforderlich.'),
+        });
+        return applyAcceptanceDecisions(
+        updateAcceptanceTestRun(settledGraph, validIds, {
+          id: runId,
+          status: result.ok ? 'passed' : 'failed',
+          startedAt: result.startedAt,
+          finishedAt,
+          command: result.command,
+          output: result.output,
+          error: result.timedOut ? t('Der Prüflauf hat sein Zeitlimit überschritten.') : '',
+        }),
+        decisions.filter(decision => {
+          const criterion = graph.nodes.find(node => node.id === decision.taskId)?.acceptanceCriteria?.find(item => item.id === decision.criterionId);
+          return validIds.includes(decision.taskId) && criterion?.verification === 'automatic' && !['passed', 'waived'].includes(criterion.status);
+        }),
+        { reviewer: 'Automatischer Prüflauf' },
+      );
+      });
+      addMessage(chat.id, {
+        id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
+        text: `🧪|${t(result.ok
+          ? 'AC-Prüflauf erfolgreich: Die automatisch prüfbaren Kriterien wurden bestätigt.'
+          : 'AC-Prüflauf fehlgeschlagen: Die betroffenen Tickets wurden zur Nachbesserung zurückgegeben.')}`,
+        ts: Date.now(), isError: !result.ok,
+      });
+      return result.ok;
+    } catch (error) {
+      commitTaskGraph(graph => updateAcceptanceTestRun(graph, taskIds.filter(id => graph.nodes.find(node => node.id === id)?.acceptanceTestRuns?.at(-1)?.id === runId), {
+        id: runId,
+        status: 'unavailable',
+        finishedAt: Date.now(),
+        error: error?.message || t('Der Prüflauf konnte nicht gestartet werden.'),
+      }));
+      addMessage(chat.id, {
+        id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
+        text: `🧪|${t('AC-Prüflauf konnte nicht ausgeführt werden: {error}', { error: error?.message || t('Unbekannter Fehler') })}`,
+        ts: Date.now(), isError: true,
+      });
+      return false;
+    } finally {
+      if (acceptanceTestRunRef.current === runId) {
+        acceptanceTestRunRef.current = null;
+        setAcceptanceQueueVersion(version => version + 1);
+      }
+    }
+  }, [addMessage, chat.id, chat.reviewEnvironment, commitTaskGraph, t]);
+
+  useEffect(() => {
+    if (chat.type !== 'group') return;
+    const pmAgent = getGroupPMAgent(chat.type, chatAgents);
+    const missingCriteriaNode = (activeTaskGraph.nodes || []).find(node => (
+      node.status === 'agent_done' && inferTaskNodeType(node) !== 'review' &&
+      !(node.acceptanceCriteria || []).length && !node.manualAcceptanceRequestedAt
+    ));
+    const pendingUserNode = missingCriteriaNode || (activeTaskGraph.nodes || []).find(node => (
+      node.status === 'agent_done' && !node.manualAcceptanceRequestedAt &&
+      (node.acceptanceCriteria || []).some(criterion => (
+        criterion.verification === 'user' && !['passed', 'waived'].includes(criterion.status)
+      ))
+    ));
+    if (!pendingUserNode) return;
+    if (missingCriteriaNode) {
+      commitTaskGraph(graph => ensureManualAcceptanceCriterion(graph, pendingUserNode.id, {
+        requestedBy: pmAgent?.name || 'PM',
+      }));
+    } else {
+      commitTaskGraph(graph => updateTaskNodeStatus(graph, pendingUserNode.id, pendingUserNode.status, {
+        manualAcceptanceRequestedAt: Date.now(),
+        manualAcceptanceRequestedBy: pmAgent?.name || 'PM',
+        blockedReason: 'acceptance-pending',
+      }));
+    }
+    addMessage(chat.id, {
+      id: Date.now() + Math.random(),
+      agentId: pmAgent?.id || 'system',
+      senderName: pmAgent?.name || 'PM',
+      text: missingCriteriaNode
+        ? `@user: ${t('Für das Ticket „{task}“ wurden keine Abnahmekriterien definiert. Bitte prüfe das Ergebnis und erteile oder verweigere die manuelle Gesamtfreigabe im Workflowfenster.', { task: pendingUserNode.title })}`
+        : `@user: ${t('Das Ticket „{task}“ benötigt deine manuelle Abnahme. Bitte öffne im Workflowfenster den Tab „Prüfungen“ und entscheide die offenen User-AC mit einem Prüfnachweis.', { task: pendingUserNode.title })}`,
+      ts: Date.now(),
+      isError: false,
+    });
+  }, [active, activeTaskGraph, addMessage, chat.id, chat.type, chatAgents, commitTaskGraph, t]);
+
+  useEffect(() => {
+    if (chat.type !== 'group' || acceptanceTestRunRef.current) return;
+    const pendingAutomatic = (activeTaskGraph.nodes || []).filter(needsAutomaticAcceptance);
+    if (pendingAutomatic.length) void runAcceptanceTests(pendingAutomatic.map(node => node.id));
+  }, [activeTaskGraph, chat.type, runAcceptanceTests, acceptanceQueueVersion]);
+
+  const startWorkflowRecovery = useCallback(async (taskId, {
+    additionalInformation = '',
+    problem = null,
+  } = {}) => {
+    if (planningActive || workflowProblemAnswerPendingRef.current) return false;
+    const currentGraph = taskGraphRef.current;
+    const problemNode = currentGraph?.nodes?.find(node => node.id === taskId);
+    const recoverableStatuses = new Set([
+      'failed', 'timed_out', 'blocked', 'interrupted', 'waiting_user', 'waiting_pm', 'provider_paused', 'retryable',
+    ]);
+    if (!problemNode || !recoverableStatuses.has(problemNode.status)) return false;
+    if (problemNode.recoveryStatus && problemNode.recoveryStatus !== 'user') return false;
+
+    const pmAgent = getGroupPMAgent(chat.type, chatAgents);
+    const originalAgent = chatAgents.find(agent => agent.id === problemNode.agentId);
+    if (!pmAgent || !originalAgent) {
+      addMessage(chat.id, {
+        id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
+        text: `⚠️|${t('Die PM-Recovery konnte nicht gestartet werden, weil PM oder zuständiger Agent nicht verfügbar ist.')}`,
+        ts: Date.now(), isError: true,
+      });
+      return false;
+    }
+
+    const recoveryHistory = (currentGraph.nodes || [])
+      .filter(node => node.runtimeRecovery && node.recovery?.originalGraphNodeId === problemNode.id)
+      .map(node => node.recovery)
+      .sort((left, right) => (right.attempt || 0) - (left.attempt || 0));
+    let previousRecovery = recoveryHistory[0] || null;
+    const normalizedInformation = String(additionalInformation || '').trim().slice(0, 5000);
+    if ((previousRecovery?.attempt || 0) >= MAX_PM_RECOVERY_ATTEMPTS) {
+      if (!normalizedInformation) {
+        commitTaskGraph(graph => updateTaskNodeStatus(graph, problemNode.id, 'waiting_user', {
+          recoveryStatus: 'user',
+          blockedReason: 'pm-recovery-needs-user',
+          issueSummary: t('Zwei PM-Recovery-Runden waren nicht erfolgreich. Ergänze neue Informationen oder überarbeite den Hauptplan.'),
+        }));
+        return false;
+      }
+      // New user input starts a fresh, explicitly authorized bounded cycle;
+      // the previous attempts remain available in the durable ticket history.
+      previousRecovery = { ...previousRecovery, attempt: 0, userRestartedAt: Date.now() };
+    }
+
+    const rootNode = currentGraph.nodes.find(node => inferTaskNodeType(node) === 'request');
+    const trigger = problemNode.blockedReason === 'quality-recovery'
+      ? 'quality'
+      : problemNode.status === 'timed_out' ? 'timeout' : 'error';
+    const recoveryTask = buildTimeoutRecoveryTask({
+      pm: pmAgent,
+      originalAgent,
+      objective: problemNode.objective || problemNode.title,
+      errorMessage: problemNode.recoveryError || problemNode.error || problem?.message || '',
+      additionalInformation: normalizedInformation,
+      previousRecovery,
+      originalGraphNodeId: problemNode.id,
+      planRootId: problemNode.planRootId || rootNode?.id || '',
+      trigger,
+    });
+    if (!recoveryTask) return false;
+
+    commitTaskGraph(graph => invalidateTaskRecoveryBranch(
+      appendTaskRecoveryNote(graph, problemNode.id, {
+        author: 'User',
+        mode: 'runtime-recovery',
+        text: normalizedInformation,
+        problem: problem?.message || problemNode.error || problemNode.blockedReason || '',
+      }),
+      problemNode.id,
+      {
+        recoveryAttempt: recoveryTask.recovery.attempt,
+        reason: problem?.message || problemNode.error || problemNode.blockedReason || '',
+      },
+    ));
+    const registeredRecoveryTask = registerGraphTask(recoveryTask, {
+      status: 'planned',
+      parentNodeId: problemNode.id,
+    });
+    const nextGraph = commitTaskGraph(graph => updateTaskNodeStatus(
+      graph,
+      problemNode.id,
+      recoveryTask.recovery.originalStatus || (trigger === 'timeout' ? 'timed_out' : 'blocked'),
+      {
+        recoveryStatus: 'pm',
+        recoveryTaskId: registeredRecoveryTask.graphNodeId,
+        recoveryTrigger: trigger,
+        recoveryError: undefined,
+        issueSummary: problem?.message || problemNode.issueSummary,
+      },
+    ));
+
+    addMessage(chat.id, {
+      id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
+      text: running
+        ? `🧭|${t('PM-Recovery für „{task}“ wurde eingereiht und startet beim nächsten freien PM-Zeitfenster.', { task: problemNode.title })}`
+        : `🧭|${t('PM-Recovery für „{task}“ wurde gestartet.', { task: problemNode.title })}`,
+      ts: Date.now(), isError: false,
+    });
+    if (running) return true;
+
+    const currentCheckpoint = conversationContinuations.get(chat.id) || conversationStates?.[chat.id] || {};
+    const resumeCheckpoint = {
+      ...currentCheckpoint,
+      mode: 'execution',
+      status: 'interrupted',
+      askingAgent: undefined,
+      askingGraphNodeId: undefined,
+      question: undefined,
+      planRootGraphNodeId: currentCheckpoint.planRootGraphNodeId || problemNode.planRootId || rootNode?.id || null,
+      initialObjective: currentCheckpoint.initialObjective || rootNode?.objective || rootNode?.title || problemNode.objective || problemNode.title,
+      parallelTaskIds: [],
+    };
+    const pendingTasks = buildPlanningPendingTasks(nextGraph, resumeCheckpoint, chatAgents);
+    resumeCheckpoint.pendingTasks = [
+      ...pendingTasks.filter(task => task.graphNodeId === registeredRecoveryTask.graphNodeId),
+      ...pendingTasks.filter(task => task.graphNodeId !== registeredRecoveryTask.graphNodeId),
+    ];
+    persistConversationCheckpoint(resumeCheckpoint);
+    void runAgents(chatMessagesRef.current, null);
+    return true;
+  }, [addMessage, chat, chatAgents, commitTaskGraph, conversationStates, persistConversationCheckpoint, planningActive, registerGraphTask, runAgents, running, t]);
+
+  const resolveWorkflowProblem = useCallback(async (taskId, answer, suppliedProblem = null, mode = 'runtime-recovery') => {
     const normalizedAnswer = String(answer || '').trim();
     const problem = suppliedProblem || workflowProblems.find(candidate => candidate.taskId === taskId);
-    if (!normalizedAnswer || !problem || running || workflowProblemAnswerPendingRef.current) return;
+    if (!problem || workflowProblemAnswerPendingRef.current) return;
+    if (mode !== 'plan-revision') {
+      await startWorkflowRecovery(taskId, { additionalInformation: normalizedAnswer, problem });
+      return;
+    }
     workflowProblemAnswerPendingRef.current = true;
     try {
+      if (running) handleCancelRun();
+      const revisedGraph = commitTaskGraph(graph => beginPMPlanRevision(
+        appendTaskRecoveryNote(graph, taskId, {
+          author: 'User',
+          mode: 'plan-revision',
+          text: normalizedAnswer,
+          problem: problem.message,
+        }),
+        { taskId, note: normalizedAnswer, problem: problem.message },
+      ));
+      const currentCheckpoint = conversationContinuations.get(chat.id) || conversationStates?.[chat.id] || {};
+      const rootNode = revisedGraph.nodes.find(node => inferTaskNodeType(node) === 'request');
+      const draftCheckpoint = {
+        ...currentCheckpoint,
+        mode: 'planning',
+        status: 'planning',
+        parallelTaskIds: [],
+        planRootGraphNodeId: currentCheckpoint.planRootGraphNodeId || rootNode?.id || null,
+        initialObjective: currentCheckpoint.initialObjective || rootNode?.objective || rootNode?.title || '',
+        changeRequest: revisedGraph.changeRequest,
+      };
+      draftCheckpoint.pendingTasks = buildPlanningPendingTasks(revisedGraph, draftCheckpoint, chatAgents);
+      persistConversationCheckpoint(draftCheckpoint);
       const prompt = [
-        '@PM: Löse das folgende Workflow-Problem in der Planungsphase.',
+        '@PM: Der User verlangt wegen eines strukturellen Workflow-Problems einen neuen Planentwurf.',
         `Betroffene Aufgabe: ${problem.taskTitle}`,
         `Problem: ${problem.message}`,
         problem.suggestion ? `Bisheriger Lösungsvorschlag: ${problem.suggestion}` : '',
-        `Vorgabe oder Zusatzinformation des Users: ${normalizedAnswer}`,
-        'Passe den Aufgabenplan nur soweit nötig an. Wenn stattdessen eine Gruppen- oder Agentenkonfiguration geändert werden muss, erkläre dem User konkret welche Einstellung fehlt.',
+        normalizedAnswer ? `Vorgabe oder Zusatzinformation des Users: ${normalizedAnswer}` : '',
+        'Erstelle eine vollständige neue TASK_PLAN-Version und ändere nur den betroffenen Zweig. Bewahre erfolgreiche, unabhängige Tickets und deren Nachweise. Der neue Plan darf erst nach ausdrücklicher UI-Freigabe des Users ausgeführt werden.',
       ].filter(Boolean).join('\n\n');
       const userMessage = await sendUserMessage(prompt, [], messageQualityMode);
       if (!userMessage) return;
@@ -4976,10 +2053,10 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
     } finally {
       workflowProblemAnswerPendingRef.current = false;
     }
-  }, [messageQualityMode, runAgents, running, sendUserMessage, workflowProblems]);
+  }, [chat.id, chatAgents, commitTaskGraph, conversationStates, handleCancelRun, messageQualityMode, persistConversationCheckpoint, runAgents, running, sendUserMessage, startWorkflowRecovery, workflowProblems]);
 
   useEffect(() => {
-    if (!active || chat.type !== 'group' || !planningActive) return;
+    if (!active || chat.type !== 'group') return;
     const currentKeys = new Set(workflowProblemByNoticeKey.keys());
     for (const key of [...announcedWorkflowProblemKeysRef.current]) {
       if (!currentKeys.has(key)) announcedWorkflowProblemKeysRef.current.delete(key);
@@ -4996,14 +2073,14 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
         id: `workflow-problem-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         agentId: 'system',
         senderName: 'System',
-        text: `⚠|${t('Workflow-Problem bei „{task}“: {problem} Klicke auf „Lösen“, um dem PM eine Vorgabe oder Zusatzinformation zu geben.', { task: problem.taskTitle, problem: problem.message })}`,
+        text: `⚠|${t('Workflow-Problem bei „{task}“: {problem} Öffne „Lösen“, um die Ausführung reparieren oder den Hauptplan überarbeiten zu lassen.', { task: problem.taskTitle, problem: problem.message })}`,
         ts: Date.now(),
         isError: true,
         workflowProblemKey: key,
         workflowProblem: problem,
       });
     }
-  }, [active, addMessage, chat.id, chat.type, chatMessages, planningActive, t, workflowProblemByNoticeKey, workflowProblemRootId, workflowProblems]);
+  }, [active, addMessage, chat.id, chat.type, chatMessages, t, workflowProblemByNoticeKey, workflowProblemRootId, workflowProblems]);
 
   // The first active view of an unused group starts in planning mode. An
   // explicit X/deactivation persists planningSuspended and is therefore not
@@ -5067,7 +2144,9 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
       workflowProblems,
       pendingDelegations,
       groupRequests: chatGroupRequests,
+      expertiseHelp,
       delegationEnabled: chat.crossGroupCollaborationEnabled === true,
+      testConfigured: Boolean(chat.reviewEnvironment?.test?.command),
       groupOptions: groups
         .filter(group => reachableCrossGroupIds.includes(group.id))
         .map(group => ({ id: group.id, name: group.name, emoji: group.emoji || '💬' })),
@@ -5086,7 +2165,7 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
       preflightError: workflowInspectionReason,
       preflightTaskIds: workflowInspectionTaskIds,
     });
-  }, [active, activeTaskGraph, canResumeConversation, chat.crossGroupCollaborationEnabled, chat.crossGroupTargetGroupId, chat.crossGroupTargetGroupIds, chat.id, chat.name, chat.type, chatAgents, chatGroupRequests, getActiveWorkflowTaskIds, getPendingWorkflowQuestions, groups, pendingDelegations, planningActive, providerRetryRemainingMs, resumeMode, running, t, typingAgents, workflowFileStatus, workflowImportWindowState, workflowInspectionReason, workflowInspectionTaskIds, workflowModelOptions, workflowPlanningActive, workflowProblems]);
+  }, [active, activeTaskGraph, expertiseHelp, canResumeConversation, chat.crossGroupCollaborationEnabled, chat.crossGroupTargetGroupId, chat.crossGroupTargetGroupIds, chat.id, chat.name, chat.reviewEnvironment, chat.type, chatAgents, chatGroupRequests, getActiveWorkflowTaskIds, getPendingWorkflowQuestions, groups, pendingDelegations, planningActive, providerRetryRemainingMs, resumeMode, running, t, typingAgents, workflowFileStatus, workflowImportWindowState, workflowInspectionReason, workflowInspectionTaskIds, workflowModelOptions, workflowPlanningActive, workflowProblems]);
 
   useEffect(() => {
     if (!window.electronAPI?.onTaskWindowAction) return undefined;
@@ -5136,6 +2215,69 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
         void handleDeleteWorkflow();
         return;
       }
+      if (action.type === 'configure-expertise-groups') {
+        onEditGroup?.(chat, { tab: 'collaboration' });
+        return;
+      }
+      if (action.type === 'search-expertise') {
+        const node = taskGraphRef.current.nodes.find(item => item.id === action.taskId);
+        if (node) queueExpertSearch(node, true);
+        return;
+      }
+      if (action.type === 'create-expert') {
+        const help = expertiseHelp.find(item => item.taskId === action.taskId);
+        const node = taskGraphRef.current.nodes.find(item => item.id === action.taskId);
+        if (!help || !node || help.pending || (help.targetCount && help.skills.length && !help.searched)) return;
+        const baseline = chatAgents.find(agent => !agent.isSystemAgent && isAgentProviderConfigured(agent, apiKeys, providerConnections)) || chatAgents.find(agent => isAgentProviderConfigured(agent, apiKeys, providerConnections)) || chatAgents[0];
+        onCreateExpert?.(chat, expertDraft(node, baseline));
+        return;
+      }
+      if (action.type === 'assign-expert-task') {
+        if (running) return;
+        const help = expertiseHelp.find(item => item.taskId === action.taskId);
+        const candidate = help?.candidates.find(item => item.id === action.agentId);
+        const agent = agents.find(item => item.id === candidate?.id);
+        if (!candidate || !agent) return;
+        const node = taskGraphRef.current.nodes.find(item => item.id === action.taskId);
+        if (!node) return;
+        const local = candidate.groupId === chat.id;
+        const owner = chatAgents.find(item => item.id === node.agentId) || getGroupPMAgent(chat.type, chatAgents);
+        if (!owner) return;
+        const nextGraph = commitTaskGraph(graph => updateTaskNodeStatus(beginUserPlanEdit(graph), action.taskId, 'planned', {
+          agentId: local ? agent.id : owner.id, agentName: local ? agent.name : owner.name,
+          blockedReason: undefined, error: undefined, modelOverride: undefined,
+          delegationLocalApprovedAt: local ? Date.now() : undefined,
+          expertLoanApproval: local ? undefined : { agentId: agent.id, groupId: candidate.groupId, approvedAt: Date.now() },
+          delegation: local ? { ...normalizeDelegationPolicy(node.delegation), loanAgentId: undefined, loanGroupId: undefined } : {
+            ...normalizeDelegationPolicy(node.delegation), mode: 'automatic',
+            requiredCapabilities: expertiseSkills(node).length ? expertiseSkills(node) : agent.capabilities,
+            allowedTargetGroupIds: [candidate.groupId], loanGroupId: candidate.groupId, loanAgentId: agent.id,
+          },
+        }));
+        const checkpoint = conversationContinuations.get(chat.id) || conversationStates?.[chat.id] || {};
+        const root = nextGraph.nodes.find(node => inferTaskNodeType(node) === 'request');
+        const draft = { ...checkpoint, mode: 'planning', status: 'planning', parallelTaskIds: [],
+          planRootGraphNodeId: root?.id, initialObjective: checkpoint.initialObjective || root?.objective || root?.title || '',
+          changeRequest: nextGraph.changeRequest };
+        draft.pendingTasks = buildPlanningPendingTasks(nextGraph, draft, chatAgents);
+        persistConversationCheckpoint(draft);
+        addMessage(chat.id, { id: `expert-assigned-${Date.now()}`, agentId: 'system', senderName: 'System',
+          text: `${agent.name} ist nur für diese Aufgabe vorgesehen und bleibt in der Stammgruppe. Prüfe den aktualisierten Plan und wähle „Plan freigeben & starten“.`, ts: Date.now(), isError: false });
+        return;
+      }
+      if (action.type === 'configure-acceptance-tests') {
+        onEditGroup?.(chat, { tab: 'workspace' });
+        return;
+      }
+      if (action.type === 'open-acceptance-preview') {
+        if (projectPath) openReviewWindow();
+        else onEditGroup?.(chat, { tab: 'workspace' });
+        return;
+      }
+      if (action.type === 'run-acceptance-tests') {
+        void runAcceptanceTests(action.taskIds || (action.taskId ? [action.taskId] : []));
+        return;
+      }
       if (action.type === 'answer-agent-question') {
         const answer = String(action.answer || '').trim();
         const checkpoint = conversationContinuations.get(chat.id) || conversationStates?.[chat.id];
@@ -5157,7 +2299,7 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
         return;
       }
       if (action.type === 'resolve-workflow-problem') {
-        void resolveWorkflowProblem(action.taskId, action.answer, action.problem);
+        void resolveWorkflowProblem(action.taskId, action.answer, action.problem, action.mode);
         return;
       }
       if (action.type === 'undo-workflow-change') {
@@ -5198,80 +2340,7 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
         return;
       }
       if (action.type === 'repair-timeout-task') {
-        if (planningActive) return;
-        const currentGraph = taskGraphRef.current;
-        const timeoutNode = currentGraph?.nodes?.find(node => node.id === action.taskId);
-        // recoveryStatus is the single-flight guard. The card hides its fixer
-        // button at the same time, but this check also rejects stale UI events.
-        if (!timeoutNode || timeoutNode.status !== 'timed_out' || timeoutNode.recoveryStatus) return;
-        const pmAgent = getGroupPMAgent(chat.type, chatAgents);
-        const originalAgent = chatAgents.find(agent => agent.id === timeoutNode.agentId);
-        if (!pmAgent || !originalAgent) {
-          addMessage(chat.id, {
-            id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-            text: `⚠️|${t('Der Workflow-Fixer konnte nicht gestartet werden, weil PM oder ursprünglicher Agent nicht verfügbar ist.')}`,
-            ts: Date.now(), isError: true,
-          });
-          return;
-        }
-        // Preserve the attempt counter across failed recovery nodes so the PM
-        // can distinguish a fresh recovery from a repeated repair attempt.
-        const previousRecovery = (currentGraph.nodes || [])
-          .filter(node => node.runtimeRecovery && node.recovery?.originalGraphNodeId === timeoutNode.id)
-          .map(node => node.recovery)
-          .sort((left, right) => (right.attempt || 0) - (left.attempt || 0))[0] || null;
-        const rootNode = currentGraph.nodes.find(node => inferTaskNodeType(node) === 'request');
-        const recoveryTask = buildTimeoutRecoveryTask({
-          pm: pmAgent,
-          originalAgent,
-          objective: timeoutNode.objective || timeoutNode.title,
-          errorMessage: timeoutNode.recoveryError || timeoutNode.error || '',
-          previousRecovery,
-          originalGraphNodeId: timeoutNode.id,
-          planRootId: timeoutNode.planRootId || rootNode?.id || '',
-        });
-        if (!recoveryTask) return;
-        const registeredRecoveryTask = registerGraphTask(recoveryTask, { status: 'planned', parentNodeId: timeoutNode.id });
-        const nextGraph = commitTaskGraph(graph => updateTaskNodeStatus(graph, timeoutNode.id, 'timed_out', {
-          recoveryStatus: 'pm',
-          recoveryTaskId: registeredRecoveryTask.graphNodeId,
-          recoveryError: undefined,
-        }));
-        if (running) {
-          // The work-conserving scheduler rereads the graph whenever an agent
-          // finishes. Leaving the recovery node planned injects it safely into
-          // that run without starting a second concurrent scheduler.
-          addMessage(chat.id, {
-            id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-            text: `🧭|${t('Workflow-Fixer für „{task}“ wurde vorgemerkt und startet beim nächsten freien PM-Zeitfenster.', { task: timeoutNode.title })}`,
-            ts: Date.now(), isError: false,
-          });
-          return;
-        }
-        const currentCheckpoint = conversationContinuations.get(chat.id) || conversationStates?.[chat.id] || {};
-        const resumeCheckpoint = {
-          ...currentCheckpoint,
-          mode: 'execution',
-          status: 'interrupted',
-          askingAgent: undefined,
-          askingGraphNodeId: undefined,
-          question: undefined,
-          planRootGraphNodeId: currentCheckpoint.planRootGraphNodeId || timeoutNode.planRootId || rootNode?.id || null,
-          initialObjective: currentCheckpoint.initialObjective || rootNode?.objective || rootNode?.title || timeoutNode.objective || timeoutNode.title,
-          parallelTaskIds: [],
-        };
-        const pendingTasks = buildPlanningPendingTasks(nextGraph, resumeCheckpoint, chatAgents);
-        resumeCheckpoint.pendingTasks = [
-          ...pendingTasks.filter(task => task.graphNodeId === registeredRecoveryTask.graphNodeId),
-          ...pendingTasks.filter(task => task.graphNodeId !== registeredRecoveryTask.graphNodeId),
-        ];
-        persistConversationCheckpoint(resumeCheckpoint);
-        addMessage(chat.id, {
-          id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
-          text: `🧭|${t('Workflow-Fixer für „{task}“ wurde gestartet.', { task: timeoutNode.title })}`,
-          ts: Date.now(), isError: false,
-        });
-        void runAgents(chatMessagesRef.current, null);
+        void startWorkflowRecovery(action.taskId, { additionalInformation: action.additionalInformation || '' });
         return;
       }
       if (action.type === 'resolve-task-delegation') {
@@ -5408,10 +2477,36 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
         });
         return;
       }
-      if (action.type === 'retry-task') {
+      if (action.type === 'pause-task') {
+        const node = taskGraphRef.current?.nodes?.find(item => item.id === action.taskId);
+        if (!canPauseTask(node) || planningActive) return;
+        const activeRun = [...activeAgentRunRef.current.values()].find(run => run.graphNodeId === action.taskId);
+        if (activeRun) activeRun.taskPaused = true;
+        commitTaskGraph(graph => setTaskPaused(graph, action.taskId, true, { active: !!activeRun }));
+        if (activeRun) {
+          const currentApproval = activeMcpApprovalRef.current;
+          if (currentApproval?.agent?.id === activeRun.agentId) {
+            currentApproval.resolve({ allowed: false, scope: 'cancelled' });
+            activeMcpApprovalRef.current = null;
+            setMcpApproval(null);
+          }
+          mcpApprovalQueueRef.current = mcpApprovalQueueRef.current.filter(approval => {
+            if (approval.agent?.id !== activeRun.agentId) return true;
+            approval.resolve({ allowed: false, scope: 'cancelled' });
+            return false;
+          });
+          queueMicrotask(activateNextMcpApproval);
+          const cancel = activeRun.runtime === 'codex' ? window.electronAPI?.codexCancel
+            : activeRun.runtime === 'claude' ? window.electronAPI?.claudeCancel : window.electronAPI?.llmCancel;
+          if (cancel) void cancel(activeRun.requestId).catch(() => {});
+        }
+        return;
+      }
+      if (action.type === 'retry-task' || action.type === 'resume-task') {
         if (planningActive) return;
         const currentCheckpoint = conversationContinuations.get(chat.id) || conversationStates?.[chat.id] || {};
-        const nextGraph = commitTaskGraph(graph => retryTaskNode(graph, action.taskId));
+          const nextGraph = commitTaskGraph(graph => action.type === 'resume-task'
+            ? setTaskPaused(graph, action.taskId, false) : retryTaskNode(graph, action.taskId));
         const retriedNode = nextGraph.nodes.find(node => node.id === action.taskId);
         if (!retriedNode || retriedNode.status !== 'planned') return;
         if (running) {
@@ -5507,11 +2602,11 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
       if (action.type === 'update-acceptance-criteria' && planningActive) {
         const node = taskGraphRef.current?.nodes?.find(candidate => candidate.id === action.taskId);
         if (!node || !Array.isArray(action.criteria)) return;
-        const criteria = normalizeAcceptanceCriteria(action.criteria.map((text, index) => ({
+        const criteria = normalizeAcceptanceCriteria(action.criteria.map((criterion, index) => ({
           id: `${node.planTaskId || 'task'}-criterion-${index + 1}`,
-          text,
+          text: typeof criterion === 'string' ? criterion : criterion?.text,
           required: true,
-          verification: 'reviewer',
+          verification: typeof criterion === 'object' ? criterion.verification : 'reviewer',
         })), { taskId: node.planTaskId || node.id });
         const nextGraph = commitUserPlanChange(graph => updatePlanningTask(graph, action.taskId, { acceptanceCriteria: criteria }));
         syncPlanningCheckpoint(nextGraph);
@@ -5613,33 +2708,36 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
       if (action.type === 'acceptance-decision') {
         const node = taskGraphRef.current?.nodes?.find(candidate => candidate.id === action.taskId);
         const criterion = node?.acceptanceCriteria?.find(candidate => candidate.id === action.criterionId);
-        if (!node || !['agent_done', 'completed'].includes(node.status) || !criterion || criterion.verification !== 'user' || !['passed', 'failed'].includes(action.status)) return;
+        const note = String(action.note || '').replace(/\s+/g, ' ').trim().slice(0, 600);
+        if (!node || !['agent_done', 'completed', 'retryable', 'blocked'].includes(node.status) || !criterion || !['passed', 'failed', 'waived'].includes(action.status) || !note) return;
         commitTaskGraph(graph => applyAcceptanceDecisions(graph, [{
           taskId: node.id,
           criterionId: criterion.id,
           status: action.status,
-          note: action.status === 'passed' ? t('Vom User im Workflowfenster bestätigt.') : t('Vom User im Workflowfenster abgelehnt.'),
-        }], { reviewer: 'User', userOnly: true }));
+          note,
+        }], { reviewer: 'User', userOnly: true, allowManualOverride: true }));
         addMessage(chat.id, {
           id: Date.now() + Math.random(), agentId: 'system', senderName: 'System',
           text: `🛡️|${t(
             action.status === 'passed'
               ? 'User-Abnahme bestätigt: {criterion}'
-              : 'User-Abnahme abgelehnt: {criterion}',
+              : action.status === 'waived'
+                ? 'User-Ausnahmefreigabe erteilt: {criterion}'
+                : 'User-Abnahme abgelehnt: {criterion}',
             { criterion: criterion.text },
           )}`,
           ts: Date.now(), isError: action.status === 'failed',
         });
       }
     });
-  }, [addMessage, agents, canResumeConversation, chat, chatAgents, commitTaskGraph, conversationCheckpoint, conversationStates, crossGroupRequests, enqueueCrossGroupRequest, groups, handleApplyWorkflowImport, handleCancelRun, handleDeleteWorkflow, handleExportWorkflow, handleImportWorkflow, handleRunNow, handleScheduleChoice, handleWorkflowImportMapping, messageQualityMode, persistConversationCheckpoint, planningActive, registerGraphTask, resolveWorkflowProblem, retryCrossGroupRequest, runAgents, running, sendUserMessage, t, workflowModelOptions]);
+  }, [addMessage, agents, canResumeConversation, chat, chatAgents, commitTaskGraph, conversationCheckpoint, conversationStates, crossGroupRequests, enqueueCrossGroupRequest, groups, handleApplyWorkflowImport, handleCancelRun, handleDeleteWorkflow, handleExportWorkflow, handleImportWorkflow, handleRunNow, handleScheduleChoice, handleWorkflowImportMapping, messageQualityMode, persistConversationCheckpoint, planningActive, registerGraphTask, resolveWorkflowProblem, retryCrossGroupRequest, runAcceptanceTests, runAgents, running, onEditGroup, onCreateExpert, expertiseHelp, queueExpertSearch, apiKeys, providerConnections, openReviewWindow, projectPath, sendUserMessage, startWorkflowRecovery, t, workflowModelOptions]);
 
   return (
     <>
       {/* Chat Header */}
       <div className="chat-header">
         {chat.type === 'group' ? (
-          <div className="avatar group" style={{ width: 40, height: 40, fontSize: 18 }}>{chat.emoji || '💬'}</div>
+          <div className="avatar group" style={{ width: 40, height: 40, fontSize: 18 }}><EntityIcon value={chat.emoji} group size={24} /></div>
         ) : (
           <Avatar agent={getAgent(chat.id)} size={40} />
         )}
@@ -5647,12 +2745,100 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
           <div className="chat-header-name">{chat.name}</div>
           <div className="chat-header-sub">
             {chat.type === 'group'
-              ? chatAgents.map(a => `${a.emoji} ${a.name}`).join('  ·  ')
+              ? chatAgents.map(a => a.name).join('  ·  ')
               : getAgent(chat.id)?.role || 'Agent'}
             {projectPath && <span style={{ color: 'var(--accent)', marginLeft: 8, fontSize: 11 }}>📁 {projectPath.split(/[\\/]/).pop()}</span>}
           </div>
         </div>
-        <button className="icon-btn" title={t('Chat leeren')} onClick={handleClearChat} style={{ fontSize: 14 }}>🗑️</button>
+        {chat.type === 'group' && <ChatOptionsMenu>
+
+      {/* Controls row (group only) */}
+      {chat.type === 'group' && (
+        <div className="group-run-controls">
+          <button type="button" role="switch" aria-checked={autoRun} aria-label={t('Auto-Mode')} className={`toggle-switch ${autoRun ? 'on' : ''}`} onClick={() => { setAutoRun(!autoRun); autoRunRef.current = !autoRun; }}>
+            <div className="toggle-knob" />
+          </button>
+          <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+            {autoRun ? t('Auto-Mode AN') : t('Auto-Mode AUS')}
+          </span>
+          {stoppedForUser && !running && (
+            <span style={{ fontSize: 12, color: 'var(--accent)', marginLeft: 4 }}>⏸ {t('Wartet auf dich')}</span>
+          )}
+          {conversationCheckpoint?.status === 'awaiting-group' && !running && (
+            <span style={{ fontSize: 12, color: '#aeb9ff', marginLeft: 4 }}>↗ {t('Wartet auf eine andere Gruppe')}</span>
+          )}
+          {canResumeConversation && !running && (
+            <span style={{ fontSize: 12, color: '#e6a23c', marginLeft: 4 }}>💾 {t('Arbeitsstand gespeichert')}</span>
+          )}
+          {providerCooldownActive && !running && (
+            <span style={{ fontSize: 12, color: '#e6a23c', marginLeft: 4 }}>
+              ⏳ {t('Provider-Limit · Fortsetzen in {seconds}s', { seconds: Math.ceil(providerRetryRemainingMs / 1000) })}
+            </span>
+          )}
+          {queuedUserRequests.length > 0 && (
+            <span className="user-queue-status">⏳ {t('Warteschlange: {count}', { count: queuedUserRequests.length })}</span>
+          )}
+          <div className="group-run-actions">
+
+            {/* "Agenten laufen lassen" only makes sense when conversation is paused or no agents responded yet */}
+            {!running && !resumeMode && !stoppedForUser && (canStartAgentsManually || queuedUserRequests.length > 0) && (
+              <button className="run-btn" onClick={handleRunNow}>
+                {canResumeConversation
+                  ? `▶ ${t('Fortsetzen')}`
+                  : queuedUserRequests.length > 0
+                    ? `▶ ${t('Warteschlange starten')}`
+                    : `▶ ${t('Agenten starten')}`}
+              </button>
+            )}
+            {running && (
+              <button
+                className="run-btn"
+                style={{ background: 'rgba(192,57,43,0.75)' }}
+                onClick={handleCancelRun}
+              >■ {t('Abbrechen')}</button>
+            )}
+          </div>
+        </div>
+      )}
+
+        {chat.type === 'group' && workflowPlanningActive && (
+          <div className="planning-mode-bar" role="status">
+            <div className="planning-mode-copy">
+              <strong>📝 {t(planningActive ? 'Planungsmodus aktiv' : 'Ausführungsplanung pausiert')}</strong>
+              <span>{t(planningActive
+                ? (workflowPreflightReason || (activeTaskGraph.planOwner === 'user'
+                  ? 'Du bearbeitest den verbindlichen Plan. Der PM kann beraten, aber keine Aufgabe oder Abhängigkeit verändern.'
+                  : 'Der PM erstellt einen ersten Entwurf. Andere Agenten beginnen erst nach deiner Freigabe.'))
+                : 'Prüfe den Workflow und starte die laut Abhängigkeiten bereiten Aufgaben.')}</span>
+            </div>
+            <button type="button" className="btn btn-secondary" onClick={() => openTaskGraphWindow()}>
+              {t('Workflow ansehen')}
+            </button>
+            {planningActive && (
+              <button
+                type="button"
+                className="planning-mode-close"
+                title={t('Planungsmodus deaktivieren')}
+                aria-label={t('Planungsmodus deaktivieren')}
+                onClick={handleDeactivatePlanningMode}
+              >×</button>
+            )}
+          </div>
+        )}
+        </ChatOptionsMenu>}
+        {chat.type === 'group' && (
+          <button className="icon-btn" title={t('Workflow')} onClick={() => openTaskGraphWindow()} style={{ fontSize: 14 }}><Icon name="workflow" /></button>
+        )}
+
+        {chat.type === 'group' && projectPath && (
+          <button className="icon-btn" title={t('Prüf- und Vorschauumgebung')} onClick={openReviewWindow} style={{ fontSize: 14 }}><Icon name="test" /></button>
+        )}
+        {chat.type === 'group' && memoryEnabled && (
+          <MemoryBadge count={memoryCount} onOpen={handleOpenMemory} />
+        )}
+        {chat.type === 'group' && !conversationCheckpoint && !running && (
+          <button className="icon-btn" title={t('Planungsmodus starten')} onClick={handleStartPlanningMode} style={{ fontSize: 14 }}><Icon name="plan" /></button>
+        )}
         {activeMcpPermissionCount > 0 && (
           <button
             className="icon-btn"
@@ -5664,20 +2850,10 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
               }
             }}
             style={{ fontSize: 14 }}
-          >🔓</button>
+          ><Icon name="lock" /></button>
         )}
-        {chat.type === 'group' && (
-          <button className="icon-btn" title={t('Workflow')} onClick={() => openTaskGraphWindow()} style={{ fontSize: 14 }}>🔀</button>
-        )}
-        {chat.type === 'group' && !conversationCheckpoint && !running && (
-          <button className="icon-btn" title={t('Planungsmodus starten')} onClick={handleStartPlanningMode} style={{ fontSize: 14 }}>📝</button>
-        )}
-        {chat.type === 'group' && projectPath && (
-          <button className="icon-btn" title={t('Prüf- und Vorschauumgebung')} onClick={openReviewWindow} style={{ fontSize: 14 }}>🧪</button>
-        )}
-        {chat.type === 'group' && memoryEnabled && (
-          <MemoryBadge count={memoryCount} onOpen={handleOpenMemory} />
-        )}
+        <button className="icon-btn" title={t('Chat leeren')} onClick={handleClearChat} style={{ fontSize: 14 }}><Icon name="trash" /></button>
+
       </div>
 
       {chat.type === 'group' && !projectPath && (
@@ -5694,7 +2870,8 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
       )}
 
       {/* Messages */}
-      <div className="messages-container">
+      <div className="messages-container" ref={messagesContainerRef}>
+        <div ref={messagesContentRef} className="messages-content">
         {chatMessages.length === 0 && (
           <div style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: 13, padding: '32px 0' }}>
             {t('Schreibe eine Nachricht und starte das Gespräch!')}
@@ -5721,6 +2898,7 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
                   const messageWorkflowProblem = workflowProblemByNoticeKey.get(msg.workflowProblemKey) || null;
                   return (
                     <ErrorBubble
+                      rewindAction={rewindButton(msg)}
                       key={msg.id || mi}
                       text={label ? `${label}: ${errorText}` : errorText}
                       isError={msg.isError !== false}
@@ -5750,7 +2928,7 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
                         label: t('Lösen'),
                         icon: '!',
                         tone: 'problem',
-                        disabled: running,
+                        disabled: false,
                         title: t('Workflow-Problem lösen'),
                         onClick: () => setOpenWorkflowProblem(messageWorkflowProblem),
                       } : null}
@@ -5764,7 +2942,7 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
                       <div className="message-avatar"><Avatar agent={agent} size={28} /></div>
                     )}
                     {!isUser && mi < group.msgs.length - 1 && <div style={{ width: 28 }} />}
-                    <div>
+                    <div className="message-content-column">
                       {!isUser && mi === 0 && (
                         <div className="message-sender" style={{ fontSize: 12, color: '#8696a0', marginBottom: 2, marginLeft: 10 }}>
                           {msg.senderName}
@@ -5774,8 +2952,9 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
                         </div>
                       )}
                       <div className={`message-bubble ${isUser ? 'out' : 'in'} ${msgText ? 'has-copy-action' : ''}`}>
+                        {rewindButton(msg)}
                         <MessageAttachments attachments={msg.attachments || []} />
-                        {msgText && <div className="message-text">{msgText}</div>}
+                        {msgText && <MarkdownMessage className="message-text" onCopy={copyText}>{msgText}</MarkdownMessage>}
                         {msg.diagram && <ExcalidrawDiagram diagram={msg.diagram} />}
                         <div className="message-meta">
                           {queuedUserMessageIds.has(String(msg.id)) && <span className="message-queued-label">⏳ {t('Eingereiht')} · </span>}
@@ -5796,102 +2975,16 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
           <TypingBubble
             key={id}
             agent={getAgent(id)}
+            progress={agentProgress[id]}
           />
         ))}
         {mcpApproval && <McpPermissionPrompt request={mcpApproval} onDecision={resolveMcpApproval} />}
         <div ref={messagesEndRef} />
-      </div>
-
-      {/* Controls row (group only) */}
-      {chat.type === 'group' && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 16px', background: 'var(--bg-secondary)', borderTop: '1px solid var(--border)' }}>
-          <div className={`toggle-switch ${autoRun ? 'on' : ''}`} onClick={() => { setAutoRun(!autoRun); autoRunRef.current = !autoRun; }}>
-            <div className="toggle-knob" />
-          </div>
-          <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-            {autoRun ? t('Auto-Mode AN') : t('Auto-Mode AUS')}
-          </span>
-          {stoppedForUser && !running && (
-            <span style={{ fontSize: 12, color: 'var(--accent)', marginLeft: 4 }}>⏸ {t('Wartet auf dich')}</span>
-          )}
-          {conversationCheckpoint?.status === 'awaiting-group' && !running && (
-            <span style={{ fontSize: 12, color: '#aeb9ff', marginLeft: 4 }}>↗ {t('Wartet auf eine andere Gruppe')}</span>
-          )}
-          {canResumeConversation && !running && (
-            <span style={{ fontSize: 12, color: '#e6a23c', marginLeft: 4 }}>💾 {t('Arbeitsstand gespeichert')}</span>
-          )}
-          {providerCooldownActive && !running && (
-            <span style={{ fontSize: 12, color: '#e6a23c', marginLeft: 4 }}>
-              ⏳ {t('Provider-Limit · Fortsetzen in {seconds}s', { seconds: Math.ceil(providerRetryRemainingMs / 1000) })}
-            </span>
-          )}
-          {queuedUserRequests.length > 0 && (
-            <span className="user-queue-status">⏳ {t('Warteschlange: {count}', { count: queuedUserRequests.length })}</span>
-          )}
-          <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
-            {hasRecentError && !running && (
-              <button className="run-btn" style={{ background: 'rgba(192,57,43,0.5)' }} onClick={handleRetry}>
-                ↺ Retry
-              </button>
-            )}
-            {/* "Agenten laufen lassen" only makes sense when conversation is paused or no agents responded yet */}
-            {!running && !stoppedForUser && (canStartAgentsManually || canResumeConversation || queuedUserRequests.length > 0) && (
-              <button className="run-btn" onClick={handleRunNow}>
-                {canResumeConversation
-                  ? `▶ ${t('Fortsetzen')}`
-                  : queuedUserRequests.length > 0
-                    ? `▶ ${t('Warteschlange starten')}`
-                    : `▶ ${t('Agenten starten')}`}
-              </button>
-            )}
-            {running && (
-              <button
-                className="run-btn"
-                style={{ background: 'rgba(192,57,43,0.75)' }}
-                onClick={handleCancelRun}
-              >■ {t('Abbrechen')}</button>
-            )}
-          </div>
         </div>
-      )}
+      </div>
 
       {/* Input */}
       <div className="composer-area">
-        {chat.type === 'group' && workflowPlanningActive && (
-          <div className="planning-mode-bar" role="status">
-            <div className="planning-mode-copy">
-              <strong>📝 {t(planningActive ? 'Planungsmodus aktiv' : 'Ausführungsplanung pausiert')}</strong>
-              <span>{t(planningActive
-                ? (workflowPreflightReason || (activeTaskGraph.planOwner === 'user'
-                  ? 'Du bearbeitest den verbindlichen Plan. Der PM kann beraten, aber keine Aufgabe oder Abhängigkeit verändern.'
-                  : 'Der PM erstellt einen ersten Entwurf. Andere Agenten beginnen erst nach deiner Freigabe.'))
-                : 'Prüfe den Workflow und starte die laut Abhängigkeiten bereiten Aufgaben.')}</span>
-            </div>
-            <button type="button" className="btn btn-secondary" onClick={() => openTaskGraphWindow()}>
-              {t('Workflow ansehen')}
-            </button>
-            <button
-              type="button"
-              className="run-btn"
-              onClick={() => handleScheduleChoice(plannedParallelTaskIds.length >= 2 ? plannedParallelTaskIds : [])}
-              disabled={workflowStartDisabled}
-              title={!workflowStartValidation.ok
-                ? t(workflowStartValidation.messageKey || workflowStartValidation.reason, workflowStartValidation.messageValues)
-                : workflowPreflightReason || undefined}
-            >
-              {t(planningActive ? 'Planversion freigeben & Workflow starten' : 'Bereite Aufgaben starten')}
-            </button>
-            {planningActive && (
-              <button
-                type="button"
-                className="planning-mode-close"
-                title={t('Planungsmodus deaktivieren')}
-                aria-label={t('Planungsmodus deaktivieren')}
-                onClick={handleDeactivatePlanningMode}
-              >×</button>
-            )}
-          </div>
-        )}
         {chat.type !== 'group' && queuedUserRequests.length > 0 && (
           <div className="direct-user-queue-status">⏳ {t('Warteschlange: {count}', { count: queuedUserRequests.length })}</div>
         )}
@@ -5918,10 +3011,15 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
           </div>
         )}
         <div className="input-area" style={{ position: 'relative' }}>
-          {chat.type !== 'group' && !running && (canResumeConversation || queuedUserRequests.length > 0) && (
-            <button className="run-btn" onClick={handleRunNow} style={{ flexShrink: 0 }}>
-              ▶ {canResumeConversation ? t('Fortsetzen') : t('Warteschlange starten')}
-            </button>
+          {!running && (hasRecentError || resumeMode || (chat.type !== 'group' && queuedUserRequests.length > 0)) && (
+            <div className="composer-recovery-actions" role="group" aria-label={t('Unterhaltung fortsetzen')}>
+              {hasRecentError && <button type="button" className="btn btn-secondary" onClick={handleRetry} disabled={providerCooldownActive}>
+                <Icon name="undo" size={16} /> Retry
+              </button>}
+              {(resumeMode || (chat.type !== 'group' && queuedUserRequests.length > 0)) && <button type="button" className="btn btn-primary" onClick={handleRunNow} disabled={providerCooldownActive}>
+                <Icon name="play" size={16} /> {resumeMode ? t('Fortsetzen') : t('Warteschlange starten')}
+              </button>}
+            </div>
           )}
           {mentionOpen && mentionItems.length > 0 && (
             <MentionDropdown
@@ -5937,6 +3035,23 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
             className="attachment-file-input"
             onChange={handleBrowserAttachments}
           />
+
+          {chat.type === 'group' && workflowPlanningActive && (
+            <div className="composer-plan-actions" role="group" aria-label={t('Planfreigabe')}>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => handleScheduleChoice(plannedParallelTaskIds.length >= 2 ? plannedParallelTaskIds : [])}
+              disabled={workflowStartDisabled}
+              title={!workflowStartValidation.ok
+                ? t(workflowStartValidation.messageKey || workflowStartValidation.reason, workflowStartValidation.messageValues)
+                : workflowPreflightReason || undefined}
+            >
+              {t(planningActive ? 'Plan freigeben & starten' : 'Bereite Aufgaben starten')}
+            </button>
+            </div>
+          )}
+          <div className="composer-message-row">
           <select
             className="quality-mode-select"
             value={messageQualityMode}
@@ -5951,38 +3066,39 @@ export default function ChatView({ chat, onEditGroup, active = true }) {
             <option value="auto">⚖️ {t('Automatisch')}</option>
             <option value="deep">🧠 {t('Gründlich')}</option>
           </select>
-          <button
-            type="button"
-            className="attach-btn"
-            title={t('Dateien anhängen')}
-            aria-label={t('Dateien anhängen')}
-            onClick={handlePickAttachments}
-            disabled={pendingAttachments.length >= 8}
-          >📎</button>
-          <textarea
-            ref={textareaRef}
-            className="message-input"
-            autoFocus
-            rows={1}
-            placeholder={t('Nachricht eingeben… (@Name für Mentions)')}
-            value={input}
-            onChange={handleInputChange}
-            onKeyDown={handleKeyDown}
-          />
-          {running && chat.type !== 'group' && (
             <button
-              className="run-btn"
-              style={{ background: 'rgba(192,57,43,0.75)', flexShrink: 0 }}
-              onClick={handleCancelRun}
-            >■ {t('Abbrechen')}</button>
-          )}
-          <button
-            className="send-btn"
-            onClick={handleSend}
-            disabled={!input.trim() && !pendingAttachments.length}
-            title={running ? t('Nachricht einreihen') : t('Nachricht senden')}
-            aria-label={running ? t('Nachricht einreihen') : t('Nachricht senden')}
-          >➤</button>
+              type="button"
+              className="attach-btn"
+              title={t('Dateien anhängen')}
+              aria-label={t('Dateien anhängen')}
+              onClick={handlePickAttachments}
+              disabled={pendingAttachments.length >= 8}
+            ><Icon name="attach" /></button>
+            <textarea
+              ref={textareaRef}
+              className="message-input"
+              autoFocus
+              rows={1}
+              placeholder={t('Nachricht eingeben… (@Name für Mentions)')}
+              value={input}
+              onChange={handleInputChange}
+              onKeyDown={handleKeyDown}
+            />
+            {running && (
+              <button
+                className="run-btn composer-run-action"
+                style={{ background: 'rgba(192,57,43,0.75)', flexShrink: 0 }}
+                onClick={handleCancelRun}
+              >■ {t('Stopp')}</button>
+            )}
+            <button
+              className="send-btn"
+              onClick={handleSend}
+              disabled={!input.trim() && !pendingAttachments.length}
+              title={running ? t('Nachricht einreihen') : t('Nachricht senden')}
+              aria-label={running ? t('Nachricht einreihen') : t('Nachricht senden')}
+            ><Icon name="send" size={19} /></button>
+          </div>
         </div>
       </div>
       {openWorkflowProblem && <WorkflowProblemDialog

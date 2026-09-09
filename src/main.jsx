@@ -7,6 +7,7 @@ import { StoreProvider } from './store.jsx'
 import { I18nProvider } from './i18n.jsx'
 import ErrorBoundary from './ErrorBoundary.jsx'
 import './index.css'
+import './theme.css'
 
 const isTaskWindow = new URLSearchParams(window.location.search).get('taskWindow') === '1'
 const isReviewWindow = new URLSearchParams(window.location.search).get('reviewWindow') === '1'

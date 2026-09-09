@@ -22,11 +22,10 @@ export default function WorkflowProblemDialog({ problem, running = false, onSubm
 
   if (!problem) return null;
 
-  const submit = event => {
+  const submit = (event, mode = 'runtime-recovery') => {
     event.preventDefault();
     const normalizedAnswer = answer.trim();
-    if (!normalizedAnswer || running) return;
-    onSubmit?.(problem.taskId, normalizedAnswer, problem);
+    onSubmit?.(problem.taskId, normalizedAnswer, problem, mode);
     onClose?.();
   };
 
@@ -37,22 +36,42 @@ export default function WorkflowProblemDialog({ problem, running = false, onSubm
         <button type="button" onClick={onClose} title={t('Problemfenster schließen')}>×</button>
       </div>
       <p>{problem.message}</p>
-      {problem.suggestion && <div className="workflow-problem-suggestion"><strong>{t('Vorschlag')}</strong><span>{problem.suggestion}</span></div>}
-      <label htmlFor="workflow-problem-answer">{t('Deine Lösung oder Zusatzinformation')}</label>
+      {problem.suggestion && <div className="workflow-problem-suggestion"><strong>{t('Vorschlag')}</strong><span>{problem.suggestion}</span>
+        <button type="button" className="btn btn-primary" onClick={() => {
+          onSubmit?.(problem.taskId, [String(problem.suggestion).trim(), answer.trim()].filter(Boolean).join('\n\n'), problem, problem.kind === 'execution' ? 'runtime-recovery' : 'plan-revision');
+          onClose?.();
+        }}>{t('Vorschlag übernehmen')}</button>
+      </div>}
+      <label htmlFor="workflow-problem-answer">{t('Deine Lösung oder Zusatzinformation (optional)')}</label>
       <textarea
         ref={textareaRef}
         id="workflow-problem-answer"
         value={answer}
         onChange={event => setAnswer(event.target.value)}
         onKeyDown={event => {
-          if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') submit(event);
+          if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') submit(event, 'runtime-recovery');
         }}
         placeholder={t('Beschreibe dem PM, wie das Problem gelöst werden soll…')}
         rows={4}
       />
       <div className="workflow-question-dialog-actions">
         <button type="button" onClick={onClose}>{t('Abbrechen')}</button>
-        <button type="submit" className="answer" disabled={!answer.trim() || running}>➤ {t('Lösung an PM senden')}</button>
+        <button
+          type="button"
+          className="revision"
+          onClick={event => submit(event, 'plan-revision')}
+          title={t('Der PM erstellt einen neuen Planentwurf. Erst deine Freigabe startet ihn.')}
+        >✎ {t('Hauptplan überarbeiten')}</button>
+        <button
+          type="submit"
+          className="answer"
+          disabled={problem.kind !== 'execution'}
+          title={running
+            ? t('Die Recovery wird in den laufenden Workflow eingereiht.')
+            : problem.kind === 'execution'
+              ? t('Der PM teilt die Ausführung in Recovery-Tickets auf.')
+              : t('Dieses Problem erfordert eine Änderung des Planentwurfs oder der Konfiguration.')}
+        >🧭 {t('Ausführung reparieren')}</button>
       </div>
     </form>
   </div>;

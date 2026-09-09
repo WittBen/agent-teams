@@ -1,4 +1,4 @@
-import { normalizeCrossGroupTargetIds } from './delegation';
+import { normalizeCrossGroupTargetIds } from './delegation.js';
 
 const GROUP_REQUEST_STATUSES = new Set([
   'queued',

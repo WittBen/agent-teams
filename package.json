@@ -1,7 +1,7 @@
 {
   "name": "agent-teams-desktop",
   "private": true,
-  "version": "1.1.0-beta.10",
+  "version": "1.1.0-beta.11",
   "description": "Local-first Electron desktop app for configurable AI agent teams, shared memory and MCP tools.",
   "author": "Ben Witt",
   "license": "MIT",
@@ -15,7 +15,11 @@
     "dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && cross-env NODE_ENV=development electron .\"",
     "build": "vite build",
     "lint": "oxlint . --deny-warnings",
-    "test": "npm run lint && npm run test:smoke && npm run test:security && npm run test:review && npm run test:snake",
+    "test:cli-performance": "node --test scripts/cli-performance-test.cjs scripts/codex-lifecycle-test.cjs",
+    "test:context-quality": "node --test scripts/context-quality-test.mjs",
+    "test:teams": "node --test scripts/team-portability-test.mjs",
+    "test:ui": "node --test scripts/ui-behavior-test.cjs scripts/message-plan-test.mjs",
+    "test": "npm run test:workflow && npm run test:ui && npm run test:teams && npm run test:context-quality && npm run test:cli-performance && npm run lint && npm run test:smoke && npm run test:security && npm run test:review && npm run test:snake",
     "test:smoke": "node scripts/smoke-test.mjs",
     "test:security": "node --test scripts/security-test.cjs",
     "test:review": "node --test scripts/review-environment-test.cjs",
@@ -23,7 +27,8 @@
     "audit": "npm audit --audit-level=high",
     "electron": "electron .",
     "dist": "vite build && electron-builder --publish never",
-    "dist:win": "vite build && electron-builder --win --publish never"
+    "dist:win": "vite build && electron-builder --win --publish never",
+    "test:workflow": "node --test scripts/workflow-runtime-test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/client": "^2.0.0",
@@ -32,6 +37,9 @@
     "mammoth": "^1.12.2",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
+    "react-markdown": "^10.1.0",
+    "remark-breaks": "^4.0.0",
+    "remark-gfm": "^4.0.1",
     "uuid": "^11.1.1"
   },
   "devDependencies": {

@@ -13,6 +13,7 @@ const { normalizeServer, resolveConfiguredRecord } = require('../electron/mcp-ma
 const { writeProjectFile } = require('../electron/project-files');
 const { createLocalMemoryOperationQueue, operateLocalMemory } = require('../electron/memory-local');
 const { normalizeProviderConnection, normalizeProviderConnections } = require('../electron/provider-config');
+const { createTaskTicketStore } = require('../electron/task-ticket-store');
 
 function fakeStore(initial = {}) {
   const values = new Map(Object.entries(initial));
@@ -169,6 +170,51 @@ test('project writer blocks traversal and protected directories', () => {
     assert.match(writeProjectFile({ projectPath: root, filename: '../outside.txt', content: 'x' }).error, /innerhalb/);
     assert.match(writeProjectFile({ projectPath: root, filename: '.git/config', content: 'x' }).error, /Geschützter/);
     assert.equal(writeProjectFile({ projectPath: root, filename: 'src/ok.txt', content: 'ok' }).success, true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('task tickets persist atomically, reconcile and archive with requests', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-teams-tickets-'));
+  let clock = 1000;
+  const tickets = createTaskTicketStore({ projectPathForChat: () => root, now: () => ++clock });
+  const graph = {
+    chatId: 'group/demo', title: 'Demo', version: 2, updatedAt: 20,
+    nodes: [{
+      id: 'root:plan:task-a', planTaskId: 'task-a', title: 'Feature bauen', objective: 'Feature vollständig bauen',
+      agentId: 'agent-a', agentName: 'Ada', status: 'agent_done',
+      acceptanceCriteria: [{ id: 'ac-1', text: 'Funktioniert', status: 'submitted', evidence: [] }],
+      acceptanceTestRuns: [{ id: 'run-1', status: 'passed', command: 'npm test', output: 'ok', startedAt: 17, finishedAt: 18 }],
+      manualAcceptanceRequestedAt: 19,
+      manualAcceptanceRequestedBy: 'Sarah',
+      recoveryNotes: [{ id: 'note-1', author: 'User', mode: 'runtime-recovery', text: 'Parser prüfen', createdAt: 19 }],
+      recoveryPlan: { batchId: 'batch-1', attempt: 1, taskIds: ['recovery-a'] },
+      staleBecauseTaskId: 'upstream-a', stalePreviousStatus: 'completed', staleAt: 18,
+    }],
+    edges: [],
+  };
+  try {
+    const saved = tickets.saveWorkflow('group/demo', graph, { reason: 'test' });
+    assert.equal(saved.version, 3);
+    assert.equal(saved.nodes[0].ticketId, 'task-a');
+    assert.equal(saved.nodes[0].priority, 'medium');
+    const workflowRoot = path.join(root, '.agent-teams', 'tickets', 'group-demo');
+    const persistedTicket = JSON.parse(fs.readFileSync(path.join(workflowRoot, 'task-a.json'), 'utf8'));
+    assert.equal(persistedTicket.description, 'Feature vollständig bauen');
+    assert.equal(persistedTicket.recoveryNotes[0].text, 'Parser prüfen');
+    assert.equal(persistedTicket.recoveryPlan.batchId, 'batch-1');
+    assert.equal(persistedTicket.staleDependency.taskId, 'upstream-a');
+    assert.equal(persistedTicket.acceptanceTestRuns[0].status, 'passed');
+    assert.equal(persistedTicket.manualAcceptance.requestedBy, 'Sarah');
+    assert.equal(fs.readFileSync(path.join(workflowRoot, 'history.jsonl'), 'utf8').trim().split('\n').length, 1);
+    const olderFallback = { ...graph, updatedAt: 10, nodes: [] };
+    assert.equal(tickets.reconcileWorkflow('group/demo', olderFallback).nodes.length, 1);
+    tickets.syncRequests({ req: { id: 'req', sourceGroupId: 'group/demo', targetGroupId: 'other', status: 'queued' } });
+    const archived = tickets.archiveWorkflow('group/demo');
+    assert.equal(archived.archived, true);
+    assert.equal(fs.existsSync(path.join(root, '.agent-teams', 'archive', archived.archiveName, 'workflow.json')), true);
+    assert.equal(fs.existsSync(path.join(root, '.agent-teams', 'archive', archived.archiveName, 'requests', 'req.json')), true);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

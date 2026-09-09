@@ -1,3 +1,5 @@
+import { placeExpertInHomeGroup } from './expertise-help.mjs';
+import { prepareTeamImport } from './team-portability.mjs';
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import { DEFAULT_QUALITY_ROUTING, DEFAULT_QUALITY_STATS, updateQualityStats } from './quality-cascade';
@@ -25,6 +27,8 @@ import {
   normalizeCapabilities,
   normalizeCrossGroupTargetIds,
 } from './delegation';
+import { migrateGraphTickets } from './task-ticket';
+import { restoreTaskPauses } from './workflow-task-pause.mjs';
 
 const StoreContext = createContext(null);
 
@@ -284,7 +288,21 @@ export function StoreProvider({ children }) {
         setUserRequestQueues(normalizeUserRequestQueues(
           await window.electronAPI.appStateGet('userRequestQueues') || {},
         ));
-        setTaskGraphs(await window.electronAPI.appStateGet('taskGraphs') || {});
+        const storedTaskGraphs = await window.electronAPI.appStateGet('taskGraphs') || {};
+        const reconciledTaskGraphs = { ...storedTaskGraphs };
+        if (window.electronAPI.reconcileTaskTickets) {
+          await Promise.all(fixedGroups.map(async group => {
+            try {
+              const result = await window.electronAPI.reconcileTaskTickets(group.id, storedTaskGraphs[group.id] || null);
+              if (result?.graph) reconciledTaskGraphs[group.id] = migrateGraphTickets(result.graph);
+            } catch (error) {
+              console.error('Persistente Aufgabentickets konnten nicht geladen werden:', error.message);
+            }
+          }));
+        }
+        setTaskGraphs(Object.fromEntries(Object.entries(reconciledTaskGraphs).map(([chatId, graph]) => [
+          chatId, restoreTaskPauses(migrateGraphTickets(graph)),
+        ])));
         const storedCrossGroupRequests = normalizeCrossGroupRequests(
           await window.electronAPI.appStateGet('crossGroupRequests') || {},
           { recoverRunning: true },
@@ -337,7 +355,7 @@ export function StoreProvider({ children }) {
         setUserRequestQueues(normalizeUserRequestQueues(
           JSON.parse(localStorage.getItem('userRequestQueues') || '{}'),
         ));
-        setTaskGraphs(JSON.parse(localStorage.getItem('taskGraphs') || '{}'));
+        setTaskGraphs(Object.fromEntries(Object.entries(JSON.parse(localStorage.getItem('taskGraphs') || '{}')).map(([id, graph]) => [id, restoreTaskPauses(graph)])));
         const storedCrossGroupRequests = normalizeCrossGroupRequests(
           JSON.parse(localStorage.getItem('crossGroupRequests') || '{}'),
           { recoverRunning: true },
@@ -526,14 +544,43 @@ export function StoreProvider({ children }) {
     });
   }, [persist]);
 
-  const addAgent = useCallback((agent) => {
-    const newAgents = [...agents, { ...agent, capabilities: normalizeCapabilities(agent.capabilities), id: uuidv4() }];
+  const importTeam = useCallback((document) => {
+    const imported = prepareTeamImport(document, { agents, groups, createId: uuidv4 });
+    const normalized = normalizeAgentRoleState(agentRoles, [...agents, ...imported.agents]);
+    const importedGroups = imported.groups.map(group => ({
+      ...group, capabilityIndex: buildGroupCapabilityIndex(group, normalized.agents),
+    }));
+    const nextGroups = [...groups, ...importedGroups];
+    setAgentRolesState(normalized.roles);
+    setAgents(normalized.agents);
+    setGroups(nextGroups);
+    persist('agentRoles', normalized.roles);
+    persist('agents', normalized.agents);
+    persist('groups', nextGroups);
+    return { agents: imported.agents.length, groups: imported.groups.length };
+  }, [agents, groups, agentRoles, persist]);
+
+  const addAgent = useCallback((agent, expertPlacement = null) => {
+    const id = uuidv4();
+    let updatedGroups = groups;
+    if (expertPlacement?.sourceGroupId) {
+      const newHomeGroup = expertPlacement.homeGroupId === 'new' ? {
+        id: uuidv4(), name: String(expertPlacement.newGroupName || 'Expertengruppe').trim().slice(0, 100),
+        type: 'group', emoji: '💡', agentIds: [SYSTEM_PM_AGENT.id],
+        crossGroupCollaborationEnabled: false, crossGroupTargetGroupIds: [],
+        memory: { enabled: false },
+      } : null;
+      updatedGroups = placeExpertInHomeGroup(groups, { ...expertPlacement, agentId: id,
+        homeGroupId: newHomeGroup?.id || expertPlacement.homeGroupId, newHomeGroup });
+    }
+    const normalized = normalizeAgentRoleState(agentRoles, [...agents, { ...agent, capabilities: normalizeCapabilities(agent.capabilities), id }]);
+    const newAgents = normalized.agents;
+    setAgentRolesState(normalized.roles);
+    persist('agentRoles', normalized.roles);
     saveAgents(newAgents);
-    saveGroups(groups.map(group => ({
-      ...group,
-      capabilityIndex: buildGroupCapabilityIndex(group, newAgents),
-    })));
-  }, [agents, groups, saveAgents, saveGroups]);
+    saveGroups(updatedGroups.map(group => ({ ...group, capabilityIndex: buildGroupCapabilityIndex(group, newAgents) })));
+    return id;
+  }, [agents, agentRoles, groups, persist, saveAgents, saveGroups]);
 
   const updateAgent = useCallback((id, updates) => {
     const newAgents = agents.map(a => a.id === id ? {
@@ -676,6 +723,17 @@ export function StoreProvider({ children }) {
     });
   }, [persist]);
 
+  const rewindMessages = useCallback((chatId, messageId) => {
+    setMessages(previous => {
+      const history = previous[chatId] || [];
+      const index = history.findIndex(message => String(message.id) === String(messageId));
+      if (index < 0) return previous;
+      const updated = { ...previous, [chatId]: history.slice(0, index) };
+      persist('messages', updated);
+      return updated;
+    });
+  }, [persist]);
+
   const saveConversationState = useCallback((chatId, state) => {
     setConversationStates(prev => {
       const updated = { ...prev, [chatId]: state };
@@ -719,20 +777,28 @@ export function StoreProvider({ children }) {
   }, [persist]);
 
   const saveTaskGraph = useCallback((chatId, graph) => {
+    const ticketGraph = migrateGraphTickets(graph);
     setTaskGraphs(prev => {
-      const updated = { ...prev, [chatId]: graph };
+      const updated = { ...prev, [chatId]: ticketGraph };
       persist('taskGraphs', updated);
       return updated;
+    });
+    window.electronAPI?.saveTaskTickets?.(chatId, ticketGraph).catch(error => {
+      console.error('Aufgabentickets konnten nicht gespeichert werden:', error.message);
     });
   }, [persist]);
 
   const updateTaskGraph = useCallback((chatId, updater) => {
     setTaskGraphs(previous => {
       const current = previous[chatId];
-      const graph = typeof updater === 'function' ? updater(current) : updater;
+      const candidate = typeof updater === 'function' ? updater(current) : updater;
+      const graph = migrateGraphTickets(candidate);
       if (!graph || graph === current) return previous;
       const updated = { ...previous, [chatId]: graph };
       persist('taskGraphs', updated);
+      window.electronAPI?.saveTaskTickets?.(chatId, graph).catch(error => {
+        console.error('Aufgabentickets konnten nicht gespeichert werden:', error.message);
+      });
       return updated;
     });
   }, [persist]);
@@ -749,6 +815,9 @@ export function StoreProvider({ children }) {
       ) return previous;
       const updated = normalizeCrossGroupRequests({ ...previous, [request.id]: request });
       persist('crossGroupRequests', updated);
+      window.electronAPI?.syncTaskTicketRequests?.(updated).catch(error => {
+        console.error('Ticket-Anfragen konnten nicht gespeichert werden:', error.message);
+      });
       return updated;
     });
   }, [persist]);
@@ -758,6 +827,9 @@ export function StoreProvider({ children }) {
       const updated = updateCrossGroupRequestMap(previous, requestId, updates);
       if (updated === previous) return previous;
       persist('crossGroupRequests', updated);
+      window.electronAPI?.syncTaskTicketRequests?.(updated).catch(error => {
+        console.error('Ticket-Anfragen konnten nicht gespeichert werden:', error.message);
+      });
       return updated;
     });
   }, [persist]);
@@ -767,6 +839,9 @@ export function StoreProvider({ children }) {
       const updated = retryCrossGroupRequestMap(previous, requestId);
       if (updated === previous) return previous;
       persist('crossGroupRequests', updated);
+      window.electronAPI?.syncTaskTicketRequests?.(updated).catch(error => {
+        console.error('Ticket-Anfragen konnten nicht gespeichert werden:', error.message);
+      });
       return updated;
     });
   }, [persist]);
@@ -780,6 +855,9 @@ export function StoreProvider({ children }) {
   }, [persist]);
 
   const clearTaskGraph = useCallback((chatId) => {
+    window.electronAPI?.archiveTaskTickets?.(chatId).catch(error => {
+      console.error('Aufgabentickets konnten nicht archiviert werden:', error.message);
+    });
     setTaskGraphs(prev => {
       if (!prev[chatId]) return prev;
       const updated = { ...prev };
@@ -795,8 +873,8 @@ export function StoreProvider({ children }) {
     <StoreContext.Provider value={{
       agents, groups, messages, conversationStates, userRequestQueues, taskGraphs, crossGroupRequests, apiKeys, providerConnections, kbPath, projectPath, groupMemory, mcpServers, mcpPermissions, agentRoles,
       qualityRouting, qualityStats, conversationLimits,
-      addMessage, addAgent, updateAgent, deleteAgent,
-      addGroup, updateGroup, deleteGroup, clearMessages,
+      addMessage, addAgent, updateAgent, deleteAgent, importTeam,
+      addGroup, updateGroup, deleteGroup, clearMessages, rewindMessages,
       saveConversationState, clearConversationState,
       enqueueUserRequest, removeUserRequest, clearUserRequestQueue,
       saveTaskGraph, updateTaskGraph, clearTaskGraph,

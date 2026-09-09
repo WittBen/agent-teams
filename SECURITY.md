@@ -22,5 +22,9 @@ The maintainers should acknowledge a report within seven days and avoid publishi
   current user's permissions and can potentially access data outside the working
   directory.
 - The optional localhost API grants broad app access to anyone holding its bearer token.
+- Experience learning selects only predefined checklist hints from bounded
+  quality observations. Hints do not grant tool permissions or replace acceptance
+  checks. The global register is separate from group memory; its retention and
+  explicit deletion controls are documented in [PRIVACY.md](PRIVACY.md).
 
 See [THREAT_MODEL.md](THREAT_MODEL.md) for the detailed trust model.

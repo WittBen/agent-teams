@@ -182,3 +182,15 @@
     border-right-color: var(--border);
   }
 }
+.message-task-plan {
+  margin: 12px 0;
+  padding: 14px 16px;
+  border: 1px solid var(--border-color, #344b5b);
+  border-radius: 12px;
+  background: var(--bg-secondary, #152633);
+}
+.message-task-plan > ol { padding-left: 24px; margin: 12px 0; }
+.message-task-plan > ol > li { padding: 10px 4px; border-bottom: 1px solid var(--border-color, #344b5b); }
+.message-task-plan > ol > li:last-child { border-bottom: 0; }
+.message-task-plan li > div { margin-top: 6px; }
+.message-task-plan > p { color: var(--text-muted); font-size: 12px; }
