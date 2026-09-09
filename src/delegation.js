@@ -42,6 +42,7 @@ export function normalizeDelegationPolicy(value = {}) {
   const mode = DELEGATION_MODES.has(value?.mode) ? value.mode : 'never';
   return {
     mode,
+    ...(value?.loanAgentId && value?.loanGroupId ? { loanAgentId: String(value.loanAgentId).slice(0, 200), loanGroupId: String(value.loanGroupId).slice(0, 200) } : {}),
     requiredCapabilities: normalizeCapabilities(value?.requiredCapabilities),
     allowedTargetGroupIds: [...new Set((Array.isArray(value?.allowedTargetGroupIds)
       ? value.allowedTargetGroupIds
@@ -296,7 +297,7 @@ function candidateFromGroupMatch(group, match) {
 export function findDelegationCandidates({ sourceGroupId, groups = [], agents = [], policy = {} } = {}) {
   const normalizedPolicy = normalizeDelegationPolicy(policy);
   const required = normalizedPolicy.requiredCapabilities;
-  if (!required.length) return [];
+  if (!required.length && !normalizedPolicy.loanAgentId) return [];
   const sourceGroup = groups.find(group => group?.id === sourceGroupId);
   const configuredTargetGroupIds = new Set(normalizeCrossGroupTargetIds(
     sourceGroup?.crossGroupTargetGroupIds,
@@ -309,6 +310,14 @@ export function findDelegationCandidates({ sourceGroupId, groups = [], agents = 
     if (!group?.id || group.id === sourceGroupId) continue;
     if (!configuredTargetGroupIds.has(group.id)) continue;
     if (allowed.size > 0 && !allowed.has(group.id)) continue;
+    if (normalizedPolicy.loanAgentId) {
+      if (group.id !== normalizedPolicy.loanGroupId) continue;
+      const member = agents.find(agent => agent.id === normalizedPolicy.loanAgentId && group.agentIds?.includes(agent.id));
+      if (member) candidates.push({ candidateId: `${group.id}:${member.id}`, groupId: group.id, groupName: group.name,
+        agentId: member.id, agentName: member.name, agentIds: [member.id], agentNames: [member.name], agentRole: member.role,
+        matchScore: 1, inferred: false, team: false });
+      continue;
+    }
     const match = matchGroupCapabilities(group, agents, required);
     if (match.covers) candidates.push(candidateFromGroupMatch(group, match));
   }
@@ -325,6 +334,15 @@ export function evaluateTaskDelegation({ taskNode, sourceGroup, groups = [], age
   const policy = normalizeDelegationPolicy(taskNode?.delegation);
   if (!sourceGroup?.crossGroupCollaborationEnabled || policy.mode === 'never') {
     return { action: 'local', reason: sourceGroup?.crossGroupCollaborationEnabled ? 'policy-never' : 'group-disabled', policy };
+  }
+  if (policy.loanAgentId) {
+    const approval = taskNode?.expertLoanApproval;
+    if (!approval?.approvedAt || approval.agentId !== policy.loanAgentId || approval.groupId !== policy.loanGroupId) {
+      return { action: 'unavailable', reason: 'loan-not-approved', policy, candidates: [] };
+    }
+    const candidates = findDelegationCandidates({ sourceGroupId: sourceGroup.id, groups, agents, policy });
+    return candidates.length ? { action: 'delegate', reason: 'user-approved-expert-loan', policy, candidate: candidates[0], candidates }
+      : { action: 'unavailable', reason: 'loan-unavailable', policy, candidates: [] };
   }
   if (taskNode?.delegationLocalApprovedAt) {
     return { action: 'local', reason: 'user-local-override', policy };

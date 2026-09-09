@@ -1,10 +1,12 @@
-import { normalizeDelegationPolicy } from './delegation';
-
-const ELIGIBLE_PARALLEL_STATUSES = new Set(['planned', 'queued', 'prepared', 'interrupted', 'retryable']);
-const PREPARATION_CANDIDATE_STATUSES = new Set(['planned', 'queued', 'interrupted', 'retryable']);
-const FINISHED_DEPENDENCY_STATUSES = new Set(['agent_done', 'completed']);
+import { taskCompletionKey } from './acceptance-scheduling.mjs';
+import { normalizeDelegationPolicy } from './delegation.js';
+import { PREPARATION_CANDIDATE_STATUSES, FINISHED_DEPENDENCY_STATUSES, isTaskNodeReady } from './workflow-scheduling.mjs';
+import { ACCEPTED_CRITERION_STATUSES, normalizeAcceptanceId, normalizeAcceptanceCriteria, mergeAcceptanceCriteria, requiredCriteriaAccepted } from './workflow-acceptance.mjs';
+import { directedPathExists, inferTaskNodeType, isWorkflowBlockingEdge, workflowTopologyEdges, upstreamTaskNodeIds } from './workflow-topology.mjs';
 
 export const TASK_STATUS = {
+  paused: { label: 'Pausiert', color: '#fbbf24' },
+  pausing: { label: 'Wird pausiert', color: '#fbbf24' },
   planned: { label: 'Geplant', color: '#8696a0' },
   queued: { label: 'Bereit', color: '#53bdeb' },
   preparing: { label: 'Bereitet vor', color: '#f6b94f' },
@@ -16,6 +18,7 @@ export const TASK_STATUS = {
   delegation_pending: { label: 'Delegation freigeben', color: '#c084fc' },
   provider_paused: { label: 'Provider pausiert', color: '#f59e0b' },
   retryable: { label: 'Erneut ausführbar', color: '#fb923c' },
+  stale_dependency: { label: 'Ergebnis erneut prüfen', color: '#fbbf24' },
   agent_done: { label: 'Agent fertig', color: '#4ade80' },
   completed: { label: 'PM bestätigt', color: '#00a884' },
   blocked: { label: 'Blockiert', color: '#f59e0b' },
@@ -24,90 +27,74 @@ export const TASK_STATUS = {
   interrupted: { label: 'Unterbrochen', color: '#fb923c' },
 };
 
-export const ACCEPTANCE_STATUS = {
-  open: { label: 'Offen', color: '#8696a0' },
-  submitted: { label: 'Nachweis vorhanden', color: '#53bdeb' },
-  passed: { label: 'Bestanden', color: '#00a884' },
-  failed: { label: 'Abgelehnt', color: '#ef4444' },
-  waived: { label: 'Ausnahme bestätigt', color: '#c084fc' },
-};
-
-const ACCEPTED_CRITERION_STATUSES = new Set(['passed', 'waived']);
-const ACCEPTANCE_VERIFICATION = new Set(['reviewer', 'automatic', 'user']);
-
-function normalizeAcceptanceId(value, fallback) {
-  return String(value || fallback || '')
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 64);
-}
-
-export function normalizeAcceptanceCriteria(criteria = [], { taskId = 'task', fallbackText = '' } = {}) {
-  const source = Array.isArray(criteria) ? criteria : [];
-  const normalized = [];
-  const seen = new Set();
-  for (const [index, candidate] of source.slice(0, 12).entries()) {
-    const text = String(typeof candidate === 'string' ? candidate : candidate?.text || '')
-      .replace(/\s+/g, ' ').trim().slice(0, 300);
-    if (!text) continue;
-    const id = normalizeAcceptanceId(
-      typeof candidate === 'object' ? candidate?.id : '',
-      `${taskId}-criterion-${index + 1}`,
-    );
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
-    const verification = ACCEPTANCE_VERIFICATION.has(candidate?.verification)
-      ? candidate.verification
-      : 'reviewer';
-    const status = ACCEPTANCE_STATUS[candidate?.status] ? candidate.status : 'open';
-    normalized.push({
-      id,
-      text,
-      required: candidate?.required !== false,
-      verification,
-      status,
-      evidence: Array.isArray(candidate?.evidence) ? candidate.evidence.slice(-8) : [],
-      ...(candidate?.reviewedBy ? { reviewedBy: String(candidate.reviewedBy).slice(0, 80) } : {}),
-      ...(candidate?.reviewedAt ? { reviewedAt: candidate.reviewedAt } : {}),
-    });
-  }
-  if (!normalized.length && fallbackText) {
-    normalized.push({
-      id: normalizeAcceptanceId('', `${taskId}-result`),
-      text: String(fallbackText).replace(/\s+/g, ' ').trim().slice(0, 300),
-      required: true,
-      verification: 'reviewer',
-      status: 'open',
-      evidence: [],
-    });
-  }
-  return normalized;
-}
-
-function mergeAcceptanceCriteria(previous = [], incoming = []) {
-  const existing = new Map((previous || []).map(criterion => [criterion.id, criterion]));
-  return (incoming || []).map(criterion => {
-    const prior = existing.get(criterion.id);
-    return prior ? {
-      ...criterion,
-      status: prior.status || criterion.status,
-      evidence: Array.isArray(prior.evidence) ? prior.evidence : criterion.evidence,
-      ...(prior.reviewedBy ? { reviewedBy: prior.reviewedBy } : {}),
-      ...(prior.reviewedAt ? { reviewedAt: prior.reviewedAt } : {}),
-    } : criterion;
+export function ensureManualAcceptanceCriterion(graph, taskId, { requestedBy = 'PM' } = {}) {
+  if (!graph || !taskId) return graph;
+  const requestedAt = Date.now();
+  let changed = false;
+  const nodes = graph.nodes.map(node => {
+    if (
+      node.id !== taskId || inferTaskNodeType(node) === 'review' ||
+      (node.acceptanceCriteria || []).length > 0
+    ) return node;
+    changed = true;
+    return {
+      ...node,
+      acceptanceCriteria: normalizeAcceptanceCriteria([{
+        id: `${node.planTaskId || node.id}-manual-release`,
+        text: 'Das gelieferte Ergebnis wird vom User als vollständig und verwendbar freigegeben.',
+        required: true,
+        verification: 'user',
+      }], { taskId: node.planTaskId || node.id }),
+      manualAcceptanceRequestedAt: requestedAt,
+      manualAcceptanceRequestedBy: String(requestedBy || 'PM').slice(0, 80),
+      blockedReason: 'acceptance-pending',
+      updatedAt: requestedAt,
+    };
   });
+  return changed ? { ...graph, nodes, updatedAt: requestedAt } : graph;
 }
 
-function requiredCriteriaAccepted(criteria = []) {
-  return criteria.filter(criterion => criterion.required !== false)
-    .every(criterion => ACCEPTED_CRITERION_STATUSES.has(criterion.status));
+export function updateAcceptanceTestRun(graph, taskIds = [], run = {}) {
+  if (!graph) return graph;
+  const selected = new Set((taskIds || []).map(String));
+  if (!selected.size) return graph;
+  const updatedAt = Date.now();
+  let changed = false;
+  const nodes = graph.nodes.map(node => {
+    if (!selected.has(String(node.id)) && !selected.has(String(node.planTaskId || ''))) return node;
+    changed = true;
+    const previousRuns = node.acceptanceTestRuns || [];
+    const normalizedRun = {
+      id: String(run.id || `test-${updatedAt}`),
+      status: ['running', 'passed', 'failed', 'unavailable'].includes(run.status) ? run.status : 'unavailable',
+      sourceRevision: Number(run.sourceRevision ?? graph.planRevision ?? 0),
+      taskCompletionKey: previousRuns.at(-1)?.id === String(run.id || '')
+        ? previousRuns.at(-1).taskCompletionKey ?? taskCompletionKey(node)
+        : taskCompletionKey(node),
+      startedAt: run.startedAt || (previousRuns.at(-1)?.id === String(run.id || '')
+        ? previousRuns.at(-1).startedAt
+        : updatedAt),
+      ...(run.finishedAt ? { finishedAt: run.finishedAt } : {}),
+      ...(run.command ? { command: String(run.command).slice(0, 500) } : {}),
+      ...(run.output ? { output: String(run.output).slice(-30000) } : {}),
+      ...(run.error ? { error: String(run.error).slice(0, 1000) } : {}),
+    };
+    const acceptanceTestRuns = previousRuns.at(-1)?.id === normalizedRun.id
+      ? [...previousRuns.slice(0, -1), { ...previousRuns.at(-1), ...normalizedRun }]
+      : [...previousRuns, normalizedRun];
+    return {
+      ...node,
+      acceptanceTestRuns: acceptanceTestRuns.slice(-12),
+      updatedAt,
+    };
+  });
+  return changed ? { ...graph, nodes, updatedAt } : graph;
 }
 
 export function createTaskGraph(chatId, title = 'Workflow') {
   return {
-    version: 2,
+    version: 3,
+    ticketSchemaVersion: 1,
     chatId,
     title,
     workflowState: 'idle',
@@ -130,6 +117,7 @@ export function lockTaskGraphPlan(graph) {
   return {
     ...graph,
     workflowState: 'executing',
+    revisionStatus: null,
     planOwner: 'user',
     changeRequest: null,
     planHistory: [...(graph.planHistory || []), ...(graph.previousApprovedPlan
@@ -155,11 +143,6 @@ export function lockTaskGraphPlan(graph) {
   };
 }
 
-/**
- * Open a user-owned draft from the current immutable contract. Runtime progress
- * is retained, while recoverable/open work becomes editable and startable in
- * the next plan revision. Agents never call this transition.
- */
 export function beginUserPlanEdit(graph) {
   if (!graph) return graph;
   const snapshot = graph.approvedPlan || graph.previousApprovedPlan;
@@ -207,6 +190,27 @@ export function beginUserPlanEdit(graph) {
   };
 }
 
+export function beginPMPlanRevision(graph, { taskId = '', note = '', problem = '' } = {}) {
+  if (!graph) return graph;
+  const revisionDraft = beginUserPlanEdit(graph);
+  const requestedAt = Date.now();
+  return {
+    ...revisionDraft,
+    workflowState: 'planning',
+    revisionStatus: 'revision_required',
+    changeRequest: {
+      ...(revisionDraft.changeRequest || {}),
+      reason: 'pm-proposed-revision',
+      taskIds: taskId ? [taskId] : [],
+      requestedAt,
+      requestedBy: 'user-via-problem-dialog',
+      note: String(note || '').trim().slice(0, 5000),
+      problem: String(problem || '').trim().slice(0, 2000),
+    },
+    updatedAt: requestedAt,
+  };
+}
+
 export function markTaskGraphUserOwned(graph) {
   if (!graph) return graph;
   return {
@@ -219,7 +223,7 @@ export function markTaskGraphUserOwned(graph) {
 
 export function retryTaskNode(graph, nodeId) {
   const node = graph?.nodes?.find(candidate => candidate.id === nodeId);
-  if (!node || !['failed', 'timed_out', 'blocked', 'interrupted', 'waiting_user', 'waiting_pm', 'waiting_group', 'provider_paused', 'retryable'].includes(node.status)) return graph;
+  if (!node || !['failed', 'timed_out', 'blocked', 'interrupted', 'waiting_user', 'waiting_pm', 'waiting_group', 'provider_paused', 'retryable', 'stale_dependency'].includes(node.status)) return graph;
   return updateTaskNodeStatus(graph, nodeId, 'planned', {
     error: undefined,
     blockedReason: undefined,
@@ -232,11 +236,34 @@ export function retryTaskNode(graph, nodeId) {
   });
 }
 
-/**
- * Discard a planning draft and restore the last approved workflow contract.
- * Runtime progress is merged back into matching tasks so restoring the plan
- * never turns completed work into open work again.
- */
+export function appendTaskRecoveryNote(graph, nodeId, {
+  text = '',
+  author = 'User',
+  mode = 'runtime-recovery',
+  problem = '',
+} = {}) {
+  if (!graph?.nodes?.some(node => node.id === nodeId)) return graph;
+  const createdAt = Date.now();
+  const normalizedText = String(text || '').trim().slice(0, 5000);
+  const normalizedProblem = String(problem || '').trim().slice(0, 2000);
+  return {
+    ...graph,
+    nodes: graph.nodes.map(node => node.id === nodeId ? {
+      ...node,
+      recoveryNotes: [...(node.recoveryNotes || []), {
+        id: `recovery-note-${createdAt}-${Math.random().toString(36).slice(2, 7)}`,
+        author: String(author || 'User').slice(0, 100),
+        mode: mode === 'plan-revision' ? 'plan-revision' : 'runtime-recovery',
+        text: normalizedText,
+        problem: normalizedProblem,
+        createdAt,
+      }].slice(-30),
+      updatedAt: createdAt,
+    } : node),
+    updatedAt: createdAt,
+  };
+}
+
 export function restoreTaskGraphSnapshot(graph) {
   const snapshot = graph?.previousApprovedPlan || graph?.approvedPlan;
   if (!graph || !snapshot?.nodes || !snapshot?.edges) return graph;
@@ -341,6 +368,7 @@ const WORKFLOW_CONTRACT_FIELDS = [
   { field: 'model', label: 'Modell', compare: node => node?.modelOverride || node?.model || '', value: node => node?.modelOverride || node?.model || 'Agentenstandard' },
   { field: 'nodeType', label: 'Aufgabentyp', value: node => inferTaskNodeType(node || {}) },
   { field: 'planOrder', label: 'Reihenfolge', compare: node => Number(node?.planOrder) || 0, value: node => String((Number(node?.planOrder) || 0) + 1) },
+  { field: 'priority', label: 'Priorität', value: node => ['critical', 'high', 'medium', 'low'].includes(node?.priority) ? node.priority : 'medium' },
   {
     field: 'acceptanceCriteria',
     label: 'Abnahmekriterien',
@@ -355,11 +383,6 @@ const WORKFLOW_CONTRACT_FIELDS = [
   },
 ];
 
-/**
- * Compare a planning draft with the last approved snapshot. Runtime-only state
- * (status, timestamps, evidence, execution log and canvas positions) is omitted
- * deliberately so normal execution progress never appears as a plan change.
- */
 export function buildWorkflowChangeSet(graph) {
   const baseline = graph?.previousApprovedPlan;
   if (!graph?.changeRequest || !baseline) {
@@ -487,6 +510,7 @@ export function buildWorkflowChangeSet(graph) {
 }
 
 export function validateApprovedTaskExecution(graph, task) {
+  if (['paused', 'pausing'].includes(graph?.nodes?.find(node => node.id === task?.graphNodeId)?.status)) return { ok: false, reason: 'Die Aufgabe ist vom User pausiert.' };
   if (!graph?.approvedPlan) return { ok: true, mode: 'free' };
   const recoverySource = String(task?.source || '');
   if (task?.runtimeRecovery === true && recoverySource.startsWith('timeout-recovery')) {
@@ -494,14 +518,15 @@ export function validateApprovedTaskExecution(graph, task) {
     const originalNode = graph.approvedPlan.nodes?.find(node => node.id === originalNodeId);
     if (!originalNode) return { ok: false, reason: 'Die Timeout-Recovery gehört zu keiner freigegebenen Originalaufgabe.' };
     const liveOriginalNode = graph.nodes?.find(node => node.id === originalNodeId);
-    if (!liveOriginalNode || (liveOriginalNode.status !== 'timed_out' && !liveOriginalNode.recoveryStatus)) {
-      return { ok: false, reason: 'Die Originalaufgabe befindet sich nicht in einer aktiven Timeout-Recovery.' };
+    if (!liveOriginalNode || !['failed', 'timed_out', 'blocked', 'interrupted', 'waiting_user', 'waiting_pm', 'retryable'].includes(liveOriginalNode.status) && !liveOriginalNode.recoveryStatus) {
+      return { ok: false, reason: 'Die Originalaufgabe befindet sich nicht in einer aktiven Recovery.' };
     }
     if (!task.recovery?.originalAgentId || task.recovery.originalAgentId !== originalNode.agentId) {
       return { ok: false, reason: 'Die Timeout-Recovery verweist auf eine abweichende Agentenzuordnung.' };
     }
-    if (recoverySource === 'timeout-recovery-step' && task.agent?.id !== originalNode.agentId) {
-      return { ok: false, reason: 'Der Recovery-Teilschritt ist nicht dem ursprünglichen Agenten zugewiesen.' };
+    const allowedRecoveryAgentIds = new Set(task.recovery?.allowedAgentIds || [originalNode.agentId]);
+    if (recoverySource === 'timeout-recovery-step' && !allowedRecoveryAgentIds.has(task.agent?.id)) {
+      return { ok: false, reason: 'Der Recovery-Teilschritt ist keinem vom PM ausgewählten Gruppenagenten zugewiesen.' };
     }
     if (recoverySource === 'timeout-recovery' && task.agent?.id !== task.recovery?.pmAgentId) {
       return { ok: false, reason: 'Die Timeout-Recovery ist nicht dem zuständigen PM zugewiesen.' };
@@ -516,6 +541,9 @@ export function validateApprovedTaskExecution(graph, task) {
     return { ok: false, reason: 'Die Agentenzuordnung weicht vom freigegebenen Workflow ab.' };
   }
   const approvedModel = approvedNode.modelOverride || approvedNode.model || '';
+  if (approvedNode.provider && task?.agent?.provider && approvedNode.provider !== task.agent.provider) {
+    return { ok: false, reason: 'Die Provider-Zuordnung weicht vom freigegebenen Workflow ab.' };
+  }
   const actualModel = task?.modelOverride || task?.agent?.model || '';
   if (approvedModel && actualModel && approvedModel !== actualModel) {
     return { ok: false, reason: 'Die Modellzuordnung weicht vom freigegebenen Workflow ab.' };
@@ -646,6 +674,8 @@ export function addPlanningTask(graph, { rootNodeId, agent, title = null, nodeTy
     nodeType: isReview ? 'review' : 'task',
     planRootId: rootNodeId,
     planTaskId,
+    ticketId: planTaskId,
+    priority: 'medium',
     planOrder: executable.length,
     acceptanceCriteria: isReview ? [] : normalizeAcceptanceCriteria([], {
       taskId: planTaskId,
@@ -706,7 +736,8 @@ export function updatePlanningTask(graph, nodeId, updates = {}) {
   const delegation = updates.delegation == null
     ? normalizeDelegationPolicy(node.delegation)
     : normalizeDelegationPolicy(updates.delegation);
-  const contractChanged = title !== node.title || objective !== node.objective ||
+  const priority = ['critical', 'high', 'medium', 'low'].includes(updates.priority) ? updates.priority : (node.priority || 'medium');
+  const contractChanged = title !== node.title || objective !== node.objective || priority !== (node.priority || 'medium') ||
     (updates.nodeType && updates.nodeType !== inferTaskNodeType(node)) ||
     (updates.acceptanceCriteria && JSON.stringify(acceptanceContract(updates.acceptanceCriteria)) !== JSON.stringify(acceptanceContract(node.acceptanceCriteria))) ||
     (updates.delegation && JSON.stringify(delegation) !== JSON.stringify(normalizeDelegationPolicy(node.delegation)));
@@ -715,6 +746,7 @@ export function updatePlanningTask(graph, nodeId, updates = {}) {
     ...updates,
     title,
     objective,
+    priority,
     delegation,
     ...(contractChanged ? {
       status: 'planned',
@@ -803,12 +835,16 @@ export function splitPlanningTask(graph, nodeId) {
     objective: secondTitle,
     status: 'planned',
     planTaskId: `${node.planTaskId || 'task'}-part-${suffix}`,
+    ticketId: `${node.planTaskId || 'task'}-part-${suffix}`,
     planOrder: (node.planOrder || 0) + 0.5,
     createdAt: Date.now(),
   });
   nextGraph = {
     ...nextGraph,
     edges: nextGraph.edges.filter(edge => !(edge.from === nodeId && ['dependency', 'review'].includes(edge.kind))),
+    // Manually drawn routes (including junctions) must also wait for part 2.
+    flowEdges: (nextGraph.flowEdges || []).map(edge => edge.from === nodeId
+      ? { ...edge, from: secondId, id: `flow:${secondId}->${edge.to}` } : edge),
   };
   nextGraph = addTaskEdge(nextGraph, { from: nodeId, to: secondId, kind: 'dependency', planRootId: node.planRootId });
   for (const edge of outgoingBlocking) nextGraph = addTaskEdge(nextGraph, { ...edge, id: undefined, from: secondId });
@@ -839,10 +875,6 @@ function planTaskIdentity(task) {
   return `${type}:${normalizedPlanTaskTitle(task?.title || task?.objective)}`;
 }
 
-/**
- * Reuse an existing plan task when the PM emits the same work under a new ID,
- * and collapse duplicates inside the newly emitted plan before edges are built.
- */
 export function deduplicateMaterializedPlanTasks(graph, rootNodeId, tasks = []) {
   const validTasks = tasks.filter(task => task?.id && task?.agentId && task?.agentName);
   const incomingIds = new Set(validTasks.map(task => String(task.id)));
@@ -900,11 +932,6 @@ export function deduplicateMaterializedPlanTasks(graph, rootNodeId, tasks = []) 
   }));
 }
 
-/**
- * Materialize a de-duplicated PM draft while preserving runtime state only for
- * an unchanged task contract. A PM may replace a user-owned draft only through
- * the explicit planning-revision path; an actively approved plan is immutable.
- */
 export function materializeTaskPlan(graph, {
   rootNodeId,
   tasks = [],
@@ -966,7 +993,7 @@ export function materializeTaskPlan(graph, {
     const plannedModelOverride = existing?.agentId === task.agentId ? existing.modelOverride : undefined;
     const contractUnchanged = Boolean(existing) &&
       String(existing.title || '') === String(task.title || '') &&
-      String(existing.objective || existing.title || '') === String(task.title || '') &&
+      String(existing.objective || existing.title || '') === String(task.description || task.title || '') &&
       existing.agentId === task.agentId &&
       inferTaskNodeType(existing) === plannedNodeType &&
       (existing.modelOverride || '') === (plannedModelOverride || '') &&
@@ -975,7 +1002,7 @@ export function materializeTaskPlan(graph, {
     const node = {
       id: nodeId,
       title: task.title,
-      objective: task.title,
+      objective: task.description || task.title,
       agentId: task.agentId,
       agentName: task.agentName,
       status: contractUnchanged ? existing.status : 'planned',
@@ -984,12 +1011,15 @@ export function materializeTaskPlan(graph, {
       modelOverride: plannedModelOverride,
       planRootId: rootNodeId,
       planTaskId: task.id,
+      ticketId: task.id,
+      priority: ['critical', 'high', 'medium', 'low'].includes(task.priority) ? task.priority : (existing?.priority || 'medium'),
       planOrder: task.order || 0,
       requestedAgentName: task.requestedAgentName || task.agentName,
       acceptanceCriteria: contractUnchanged
         ? mergeAcceptanceCriteria(existing?.acceptanceCriteria, normalizedCriteria)
         : normalizedCriteria,
       delegation: normalizedDelegation,
+      expertLoanApproval: contractUnchanged ? existing?.expertLoanApproval : undefined,
       createdAt: existing?.createdAt || Date.now() + (task.order || 0),
       ...(!contractUnchanged ? {
         preparationAttemptedAt: undefined,
@@ -1040,6 +1070,98 @@ export function materializeTaskPlan(graph, {
   };
 }
 
+export function materializeRuntimeRecoveryPlan(graph, {
+  rootNodeId,
+  controllerNodeId,
+  recovery,
+  tasks = [],
+} = {}) {
+  if (!graph?.approvedPlan || !rootNodeId || !recovery?.originalGraphNodeId || !tasks.length) return graph;
+  const approvedOriginal = graph.approvedPlan.nodes?.find(node => node.id === recovery.originalGraphNodeId);
+  if (!approvedOriginal) return graph;
+  const batchId = recovery.batchId || `recovery-${Date.now().toString(36)}`;
+  const validTasks = tasks.filter(task => task?.id && task?.agentId && task?.agentName).slice(0, 12);
+  if (!validTasks.length) return graph;
+  const taskIds = new Set(validTasks.map(task => String(task.id)));
+  const graphNodeId = taskId => `${recovery.originalGraphNodeId}:recovery:${recovery.attempt || 1}:${taskId}`;
+  let nextGraph = graph;
+
+  for (const task of validTasks) {
+    const nodeId = graphNodeId(task.id);
+    const existing = nextGraph.nodes.find(node => node.id === nodeId);
+    const stepRecovery = {
+      ...recovery,
+      batchId,
+      mode: 'step',
+      stepId: task.id,
+      currentStep: task.description || task.title,
+      allowedAgentIds: [...new Set(validTasks.map(candidate => candidate.agentId))],
+      controllerGraphNodeId: controllerNodeId || recovery.controllerGraphNodeId || null,
+    };
+    nextGraph = upsertTaskNode(nextGraph, {
+      id: nodeId,
+      title: task.title,
+      objective: task.description || task.title,
+      agentId: task.agentId,
+      agentName: task.agentName,
+      status: existing?.status && FINISHED_DEPENDENCY_STATUSES.has(existing.status) ? existing.status : 'planned',
+      source: 'timeout-recovery-step',
+      nodeType: 'recovery',
+      runtimeRecovery: true,
+      recovery: stepRecovery,
+      planRootId: rootNodeId,
+      planTaskId: `recovery-${recovery.attempt || 1}-${task.id}`,
+      ticketId: `recovery-${recovery.attempt || 1}-${task.id}`,
+      priority: ['critical', 'high', 'medium', 'low'].includes(task.priority) ? task.priority : 'high',
+      planOrder: task.order || 0,
+      parentNodeId: recovery.originalGraphNodeId,
+      acceptanceCriteria: normalizeAcceptanceCriteria(task.acceptanceCriteria, {
+        taskId: `recovery-${task.id}`,
+        fallbackText: `Der Recovery-Schritt „${task.title}“ ist vollständig und überprüfbar.`,
+      }),
+      createdAt: existing?.createdAt || Date.now() + (task.order || 0),
+    });
+    if (controllerNodeId && nextGraph.nodes.some(node => node.id === controllerNodeId)) {
+      nextGraph = addTaskEdge(nextGraph, {
+        from: controllerNodeId,
+        to: nodeId,
+        kind: 'dependency',
+        recoveryBatchId: batchId,
+      });
+    }
+  }
+
+  for (const task of validTasks) {
+    const targetNodeId = graphNodeId(task.id);
+    for (const dependencyId of [...new Set(task.dependsOn || [])]) {
+      if (!taskIds.has(String(dependencyId))) continue;
+      nextGraph = addTaskEdge(nextGraph, {
+        from: graphNodeId(dependencyId),
+        to: targetNodeId,
+        kind: 'dependency',
+        recoveryBatchId: batchId,
+      });
+    }
+  }
+
+  return {
+    ...nextGraph,
+    nodes: nextGraph.nodes.map(node => node.id === recovery.originalGraphNodeId ? {
+      ...node,
+      recoveryStatus: 'step',
+      recoveryPlan: {
+        batchId,
+        attempt: recovery.attempt || 1,
+        controllerNodeId: controllerNodeId || null,
+        taskIds: validTasks.map(task => graphNodeId(task.id)),
+        createdAt: Date.now(),
+      },
+      updatedAt: Date.now(),
+    } : node),
+    updatedAt: Date.now(),
+  };
+}
+
 export function addTaskEdge(graph, edge) {
   if (!edge?.from || !edge?.to || edge.from === edge.to) return graph;
   const kind = edge.kind || 'delegation';
@@ -1049,27 +1171,9 @@ export function addTaskEdge(graph, edge) {
   if (exists) return graph;
   return {
     ...graph,
-    edges: [...graph.edges, { id: edge.id || `${kind}:${edge.from}->${edge.to}`, kind, ...edge }],
+    edges: [...graph.edges, { ...edge, id: edge.id || `${kind}:${edge.from}->${edge.to}`, kind }],
     updatedAt: Date.now(),
   };
-}
-
-function directedPathExists(graph, startNodeId, targetNodeId) {
-  const outgoing = new Map();
-  for (const edge of workflowTopologyEdges(graph)) {
-    if (!outgoing.has(edge.from)) outgoing.set(edge.from, []);
-    outgoing.get(edge.from).push(edge.to);
-  }
-  const queue = [startNodeId];
-  const visited = new Set();
-  while (queue.length > 0) {
-    const nodeId = queue.shift();
-    if (nodeId === targetNodeId) return true;
-    if (visited.has(nodeId)) continue;
-    visited.add(nodeId);
-    queue.push(...(outgoing.get(nodeId) || []));
-  }
-  return false;
 }
 
 export function validateTaskDependency(graph, prerequisiteId, taskId) {
@@ -1160,50 +1264,6 @@ export function removeTaskDependency(graph, prerequisiteId, taskId) {
   return { ...graph, edges, flowEdges, updatedAt: Date.now() };
 }
 
-export function inferTaskNodeType(node = {}) {
-  if (node.nodeType) return node.nodeType;
-  if (node.source === 'team-synthesis') return 'review';
-  if (String(node.source || '').startsWith('timeout-recovery')) return 'recovery';
-  if (node.source === 'user-answer') return 'continuation';
-  if (node.source === 'user' && !node.parentNodeId) return 'request';
-  return 'task';
-}
-
-export function isWorkflowBlockingEdge(edge = {}) {
-  return edge.kind === 'dependency' || edge.kind === 'review';
-}
-
-export function workflowTopologyEdges(graph) {
-  return [
-    ...(graph?.edges || []).filter(isWorkflowBlockingEdge),
-    ...(graph?.flowEdges || []).map(edge => ({ ...edge, kind: 'flow' })),
-  ];
-}
-
-/** Return every task whose result can reach the target through blocking workflow edges. */
-export function workflowDependencyAncestorIds(graph, nodeId) {
-  const nodeIds = new Set((graph?.nodes || []).map(node => node.id));
-  if (!nodeIds.has(nodeId)) return new Set();
-  const incomingByTarget = new Map();
-  for (const edge of workflowTopologyEdges(graph)) {
-    if (!incomingByTarget.has(edge.to)) incomingByTarget.set(edge.to, []);
-    incomingByTarget.get(edge.to).push(edge.from);
-  }
-  const ancestors = new Set();
-  const visitedEndpoints = new Set([nodeId]);
-  const pendingEndpoints = [nodeId];
-  while (pendingEndpoints.length > 0) {
-    const endpointId = pendingEndpoints.pop();
-    for (const sourceId of incomingByTarget.get(endpointId) || []) {
-      if (nodeIds.has(sourceId)) ancestors.add(sourceId);
-      if (visitedEndpoints.has(sourceId)) continue;
-      visitedEndpoints.add(sourceId);
-      pendingEndpoints.push(sourceId);
-    }
-  }
-  return ancestors;
-}
-
 const TREE_TYPE_ORDER = { request: 0, task: 1, continuation: 2, recovery: 3, review: 4 };
 
 function compareTreeNodes(left, right) {
@@ -1244,11 +1304,6 @@ function lowestCommonTreeAncestor(nodeIds, primaryParentByNode) {
   return chains[0].find(candidate => chains.every(chain => chain.includes(candidate))) || null;
 }
 
-/**
- * Project the persisted DAG into one deterministic display tree. Delegation is
- * the hierarchy; dependencies and multi-result reviews remain visible as
- * auxiliary links instead of moving a task into the wrong agent branch.
- */
 export function projectTaskTree(graph) {
   const nodes = [...(graph?.nodes || [])].sort(compareTreeNodes);
   const nodeById = new Map(nodes.map(node => [node.id, node]));
@@ -1361,9 +1416,24 @@ export function updateTaskNodeStatus(graph, nodeId, status, extra = {}) {
   const graphWithConnections = restoreApprovedConnections(graph);
   return {
     ...graphWithConnections,
-    nodes: graphWithConnections.nodes.map(node => node.id === nodeId
-      ? { ...node, status, ...extra, updatedAt: Date.now() }
-      : node),
+      nodes: graphWithConnections.nodes.map(node => {
+        if (node.id !== nodeId) return node;
+        if (node.userPausedAt && ['paused', 'pausing'].includes(node.status) && status !== 'paused') return node;
+      const changedAt = Date.now();
+      const transition = node.status === status ? [] : [{
+        from: node.status || null,
+        to: status,
+        at: changedAt,
+        ...(extra.error || extra.errorMessage ? { note: String(extra.error || extra.errorMessage).slice(0, 1000) } : {}),
+      }];
+      return {
+        ...node,
+        status,
+        ...extra,
+        ticketAttempts: [...(node.ticketAttempts || []), ...transition].slice(-30),
+        updatedAt: changedAt,
+      };
+    }),
     updatedAt: Date.now(),
   };
 }
@@ -1410,7 +1480,7 @@ export function submitTaskEvidence(graph, nodeId, submissions = [], { author = '
   };
 }
 
-export function applyAcceptanceDecisions(graph, decisions = [], { reviewer = 'PM', userOnly = false } = {}) {
+export function applyAcceptanceDecisions(graph, decisions = [], { reviewer = 'PM', userOnly = false, allowManualOverride = false } = {}) {
   if (!graph || !Array.isArray(decisions) || !decisions.length) return graph;
   const reviewedAt = Date.now();
   const decisionsByTask = new Map();
@@ -1432,12 +1502,14 @@ export function applyAcceptanceDecisions(graph, decisions = [], { reviewer = 'PM
     let changed = false;
     const acceptanceCriteria = node.acceptanceCriteria.map(criterion => {
       const decision = taskDecisions.get(criterion.id);
-      if (!decision || (userOnly && criterion.verification !== 'user') || (!userOnly && criterion.verification === 'user')) return criterion;
+      if (!decision || (userOnly && criterion.verification !== 'user' && !allowManualOverride) || (!userOnly && criterion.verification === 'user')) return criterion;
       changed = true;
       const evidence = decision.note ? [...(criterion.evidence || []), {
         id: `${criterion.id}-review-${reviewedAt}`,
         summary: decision.note,
-        kind: userOnly ? 'user-review' : 'review',
+        kind: userOnly
+          ? (criterion.verification === 'user' ? 'user-review' : 'user-override')
+          : 'review',
         author: String(reviewer || 'PM').slice(0, 80),
         createdAt: reviewedAt,
       }].slice(-8) : criterion.evidence;
@@ -1452,12 +1524,23 @@ export function applyAcceptanceDecisions(graph, decisions = [], { reviewer = 'PM
     if (!changed) return node;
     const accepted = requiredCriteriaAccepted(acceptanceCriteria);
     const failed = acceptanceCriteria.some(criterion => criterion.required !== false && criterion.status === 'failed');
-    const reviewableStatus = ['agent_done', 'blocked', 'completed'].includes(node.status);
+    const reviewableStatus = ['agent_done', 'blocked', 'completed', 'retryable'].includes(node.status);
     return {
       ...node,
       acceptanceCriteria,
-      ...(accepted && reviewableStatus ? { status: 'completed', pmApprovedAt: reviewedAt, acceptanceBlocked: false } : {}),
-      ...(failed && reviewableStatus ? { status: 'blocked', acceptanceBlocked: true } : {}),
+      ...(accepted && reviewableStatus ? {
+        status: 'completed',
+        pmApprovedAt: reviewedAt,
+        acceptanceBlocked: false,
+        blockedReason: undefined,
+        reworkRequestedAt: undefined,
+      } : {}),
+      ...(failed && reviewableStatus ? {
+        status: 'retryable',
+        acceptanceBlocked: true,
+        blockedReason: 'acceptance-rework',
+        reworkRequestedAt: reviewedAt,
+      } : {}),
       updatedAt: reviewedAt,
     };
   });
@@ -1471,15 +1554,18 @@ export function summarizeAcceptance(graph, planRootId = null) {
   const criteria = nodes.flatMap(node => (node.acceptanceCriteria || []).map(criterion => ({ node, criterion })));
   const required = criteria.filter(item => item.criterion.required !== false);
   const unmet = required.filter(item => !ACCEPTED_CRITERION_STATUSES.has(item.criterion.status));
+  const missingCriteria = nodes.filter(node => (
+    inferTaskNodeType(node) !== 'request' && !(node.acceptanceCriteria || []).length
+  ));
   return {
     total: criteria.length,
-    required: required.length,
+    required: required.length + missingCriteria.length,
     passed: required.length - unmet.length,
     submitted: required.filter(item => item.criterion.status === 'submitted').length,
     failed: required.filter(item => item.criterion.status === 'failed').length,
-    userPending: unmet.filter(item => item.criterion.verification === 'user').length,
-    ready: unmet.length === 0,
-    unmet: unmet.map(item => ({
+    userPending: unmet.filter(item => item.criterion.verification === 'user').length + missingCriteria.length,
+    ready: unmet.length === 0 && missingCriteria.length === 0,
+    unmet: [...unmet.map(item => ({
       taskId: item.node.planTaskId || item.node.id,
       nodeId: item.node.id,
       taskTitle: item.node.title,
@@ -1487,7 +1573,15 @@ export function summarizeAcceptance(graph, planRootId = null) {
       text: item.criterion.text,
       status: item.criterion.status,
       verification: item.criterion.verification,
-    })),
+    })), ...missingCriteria.map(node => ({
+      taskId: node.planTaskId || node.id,
+      nodeId: node.id,
+      taskTitle: node.title,
+      criterionId: `${node.planTaskId || node.id}-manual-release`,
+      text: 'Manuelle Gesamtfreigabe erforderlich, da keine Abnahmekriterien definiert wurden.',
+      status: 'open',
+      verification: 'user',
+    }))],
   };
 }
 
@@ -1495,347 +1589,19 @@ export function approveAgentDoneTasks(graph) {
   if (!graph) return graph;
   return {
     ...graph,
-    nodes: graph.nodes.map(node => node.status === 'agent_done' && requiredCriteriaAccepted(node.acceptanceCriteria || [])
+    nodes: graph.nodes.map(node => node.status === 'agent_done' && (
+      ['request', 'review'].includes(inferTaskNodeType(node)) || requiredCriteriaAccepted(node.acceptanceCriteria || [])
+    )
       ? { ...node, status: 'completed', pmApprovedAt: Date.now(), updatedAt: Date.now() }
       : node),
     updatedAt: Date.now(),
   };
 }
 
-function referencedFiles(value) {
-  const matches = String(value || '').match(/[A-Za-z0-9_.\-/\\]+\.(?:js|jsx|ts|tsx|css|scss|html|json|md|py|go|rs|java|sql|yaml|yml)/gi) || [];
-  return new Set(matches.map(match => match.replace(/\\/g, '/').toLowerCase()));
-}
+export { isTaskNodeReady, findDependencyPreparationCandidateIds, inferHandoffDependency, validateParallelSelection, validateWorkflowPlan, inspectWorkflowPlan, findSafeAutoParallelTaskIds, orderTasksForParallelSelection, runTaskBatch, graphNodeDepths } from './workflow-scheduling.mjs';
 
-function hasPath(graph, from, to) {
-  const visited = new Set();
-  const stack = [from];
-  while (stack.length) {
-    const current = stack.pop();
-    if (current === to) return true;
-    if (visited.has(current)) continue;
-    visited.add(current);
-    for (const edge of workflowTopologyEdges(graph).filter(candidate => candidate.from === current)) stack.push(edge.to);
-  }
-  return false;
-}
+export { ACCEPTANCE_STATUS, normalizeAcceptanceCriteria } from './workflow-acceptance.mjs';
 
-function upstreamTaskNodeIds(graph, endpointId, visited = new Set()) {
-  if (visited.has(endpointId)) return new Set();
-  visited.add(endpointId);
-  const pointIds = new Set((graph?.flowPoints || []).map(point => point.id));
-  const result = new Set();
-  for (const edge of workflowTopologyEdges(graph).filter(candidate => candidate.to === endpointId)) {
-    if (pointIds.has(edge.from)) {
-      for (const taskId of upstreamTaskNodeIds(graph, edge.from, visited)) result.add(taskId);
-    } else {
-      result.add(edge.from);
-    }
-  }
-  return result;
-}
+export { inferTaskNodeType, isWorkflowBlockingEdge, workflowTopologyEdges, workflowDependencyAncestorIds, workflowDependentTaskIds } from './workflow-topology.mjs';
 
-export function isTaskNodeReady(graph, nodeId) {
-  const node = graph?.nodes?.find(candidate => candidate.id === nodeId);
-  if (!node || !ELIGIBLE_PARALLEL_STATUSES.has(node.status)) return false;
-  const parentIds = [...upstreamTaskNodeIds(graph, nodeId)];
-  return parentIds.every(parentId => {
-    const parent = graph.nodes.find(candidate => candidate.id === parentId);
-    return parent && FINISHED_DEPENDENCY_STATUSES.has(parent.status);
-  });
-}
-
-/**
- * Finds approved tasks that can do bounded, dependency-independent preparation
- * while a direct predecessor is still running. A task is offered at most once;
- * completion still requires the unchanged dependency graph.
- */
-export function findDependencyPreparationCandidateIds(graph, {
-  activeNodeIds = [],
-  activeAgentIds = [],
-  queuedNodeIds = [],
-  limit = 2,
-} = {}) {
-  if (!graph?.approvedPlan || limit <= 0) return [];
-  const activeNodes = new Set(activeNodeIds);
-  const occupiedAgents = new Set(activeAgentIds);
-  const queuedNodes = new Set(queuedNodeIds);
-  const candidates = [];
-  for (const node of [...(graph.nodes || [])].sort((left, right) => (left.planOrder || 0) - (right.planOrder || 0))) {
-    if (candidates.length >= limit) break;
-    if (
-      inferTaskNodeType(node) !== 'task' ||
-      node.runtimeRecovery ||
-      !PREPARATION_CANDIDATE_STATUSES.has(node.status) ||
-      node.preparationAttemptedAt ||
-      node.preparationCompletedAt ||
-      queuedNodes.has(node.id) ||
-      !node.agentId ||
-      occupiedAgents.has(node.agentId)
-    ) continue;
-    const unfinishedParentIds = [...upstreamTaskNodeIds(graph, node.id)].filter(parentId => {
-      const parent = graph.nodes.find(candidate => candidate.id === parentId);
-      return !parent || !FINISHED_DEPENDENCY_STATUSES.has(parent.status);
-    });
-    if (!unfinishedParentIds.length || !unfinishedParentIds.some(parentId => activeNodes.has(parentId))) continue;
-    const candidateFiles = referencedFiles(node.objective || node.title);
-    const conflictsWithActiveTask = [...activeNodes].some(activeNodeId => {
-      const activeNode = graph.nodes.find(candidate => candidate.id === activeNodeId);
-      if (!activeNode) return false;
-      const activeFiles = referencedFiles(activeNode.objective || activeNode.title);
-      return [...candidateFiles].some(file => activeFiles.has(file));
-    });
-    if (conflictsWithActiveTask) continue;
-    candidates.push(node.id);
-    occupiedAgents.add(node.agentId);
-  }
-  return candidates;
-}
-
-export function inferHandoffDependency(summary, earlierTasks = []) {
-  if (!earlierTasks.length) return null;
-  const text = String(summary || '');
-  const hasSequentialCue = /\b(?:danach|anschließend|anschliessend|nachdem|auf\s+basis|baut\s+auf|after|afterwards|subsequently|once\s+.+\s+is\s+done)\b/i.test(text);
-  if (!hasSequentialCue) return null;
-  const explicitlyNamed = [...earlierTasks].reverse().find(task =>
-    task?.agent?.name && new RegExp(`\\b${task.agent.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(text)
-  );
-  return (explicitlyNamed || earlierTasks.at(-1))?.graphNodeId || null;
-}
-
-export function validateParallelSelection(graph, nodeIds) {
-  const selectedIds = [...new Set(nodeIds || [])];
-  const nodes = selectedIds.map(id => graph?.nodes?.find(node => node.id === id)).filter(Boolean);
-  if (nodes.length < 2) return { ok: false, reason: 'Wähle mindestens zwei Aufgaben aus.', messageKey: 'Wähle mindestens zwei Aufgaben aus.' };
-  const nonExecutable = nodes.find(node => ['request', 'review'].includes(inferTaskNodeType(node)));
-  if (nonExecutable) return { ok: false, reason: `„${nonExecutable.title}“ ist keine parallel ausführbare Fachaufgabe.`, messageKey: '„{title}“ ist keine parallel ausführbare Fachaufgabe.', messageValues: { title: nonExecutable.title } };
-  const invalid = nodes.find(node => !ELIGIBLE_PARALLEL_STATUSES.has(node.status));
-  if (invalid) return { ok: false, reason: `„${invalid.title}“ ist nicht startbereit.`, messageKey: '„{title}“ ist nicht startbereit.', messageValues: { title: invalid.title } };
-  const waitingForDependency = nodes.find(node => !isTaskNodeReady(graph, node.id));
-  if (waitingForDependency) {
-    return { ok: false, reason: `„${waitingForDependency.title}“ wartet noch auf eine vorherige Aufgabe.`, messageKey: '„{title}“ wartet noch auf eine vorherige Aufgabe.', messageValues: { title: waitingForDependency.title } };
-  }
-  const agentIds = nodes.map(node => node.agentId).filter(Boolean);
-  if (new Set(agentIds).size !== agentIds.length) {
-    return { ok: false, reason: 'Ein Agent kann nicht zwei Aufgaben gleichzeitig bearbeiten.', messageKey: 'Ein Agent kann nicht zwei Aufgaben gleichzeitig bearbeiten.' };
-  }
-
-  for (let left = 0; left < nodes.length; left += 1) {
-    for (let right = left + 1; right < nodes.length; right += 1) {
-      if (hasPath(graph, nodes[left].id, nodes[right].id) || hasPath(graph, nodes[right].id, nodes[left].id)) {
-        return { ok: false, reason: 'Ausgewählte Aufgaben hängen voneinander ab.', messageKey: 'Ausgewählte Aufgaben hängen voneinander ab.' };
-      }
-      const leftFiles = referencedFiles(nodes[left].objective || nodes[left].title);
-      const rightFiles = referencedFiles(nodes[right].objective || nodes[right].title);
-      if ([...leftFiles].some(file => rightFiles.has(file))) {
-        return {
-          ok: false,
-          reason: `Möglicher Dateikonflikt zwischen „${nodes[left].title}“ und „${nodes[right].title}“.`,
-          messageKey: 'Möglicher Dateikonflikt zwischen „{left}“ und „{right}“.',
-          messageValues: { left: nodes[left].title, right: nodes[right].title },
-        };
-      }
-    }
-  }
-  return { ok: true, nodes };
-}
-
-export function validateWorkflowPlan(graph) {
-  const nodes = graph?.nodes || [];
-  const flowPoints = graph?.flowPoints || [];
-  const nodeIds = new Set([...nodes.map(node => node.id), ...flowPoints.map(point => point.id)]);
-  const executable = nodes.filter(node => !['request', 'review'].includes(inferTaskNodeType(node)));
-  const assignedNodes = nodes.filter(node => inferTaskNodeType(node) !== 'request');
-  if (!executable.length) {
-    return { ok: false, reason: 'Der Workflow enthält keine ausführbare Aufgabe.', messageKey: 'Der Workflow enthält keine ausführbare Aufgabe.' };
-  }
-  const reviewNodes = nodes.filter(node => inferTaskNodeType(node) === 'review');
-  const incomplete = assignedNodes.find(node => !node.title?.trim() || !node.agentId);
-  if (incomplete) {
-    return { ok: false, reason: `„${incomplete.title || incomplete.id}“ benötigt ein Ziel und einen Agenten.`, messageKey: '„{title}“ benötigt ein Ziel und einen Agenten.', messageValues: { title: incomplete.title || incomplete.id }, taskIds: [incomplete.id] };
-  }
-  const incompleteDelegation = executable.find(node => {
-    const delegation = normalizeDelegationPolicy(node.delegation);
-    return delegation.mode !== 'never' && delegation.requiredCapabilities.length === 0;
-  });
-  if (incompleteDelegation) {
-    return {
-      ok: false,
-      reason: `„${incompleteDelegation.title}“ benötigt für die Delegation mindestens eine Fähigkeit.`,
-      messageKey: '„{title}“ benötigt für die Delegation mindestens eine Fähigkeit.',
-      messageValues: { title: incompleteDelegation.title },
-      taskIds: [incompleteDelegation.id],
-    };
-  }
-
-  const blockingEdges = workflowTopologyEdges(graph);
-  const danglingEdge = blockingEdges.find(edge => !nodeIds.has(edge.from) || !nodeIds.has(edge.to));
-  if (danglingEdge) {
-    return {
-      ok: false,
-      reason: 'Der Workflow enthält eine Verbindung zu einer nicht vorhandenen Aufgabe.',
-      messageKey: 'Der Workflow enthält eine Verbindung zu einer nicht vorhandenen Aufgabe.',
-      taskIds: [danglingEdge.from, danglingEdge.to].filter(nodeId => nodeIds.has(nodeId)),
-      edgeId: danglingEdge.id,
-    };
-  }
-
-  const topologyItems = [...nodes, ...flowPoints];
-  const indegree = new Map(topologyItems.map(node => [node.id, 0]));
-  const outgoing = new Map(topologyItems.map(node => [node.id, []]));
-  for (const edge of blockingEdges) {
-    indegree.set(edge.to, (indegree.get(edge.to) || 0) + 1);
-    outgoing.get(edge.from).push(edge.to);
-  }
-  const queue = topologyItems.filter(node => indegree.get(node.id) === 0).map(node => node.id);
-  let visited = 0;
-  while (queue.length) {
-    const nodeId = queue.shift();
-    visited += 1;
-    for (const childId of outgoing.get(nodeId) || []) {
-      indegree.set(childId, indegree.get(childId) - 1);
-      if (indegree.get(childId) === 0) queue.push(childId);
-    }
-  }
-  if (visited !== topologyItems.length) {
-    const cycleTaskIds = topologyItems.filter(node => (indegree.get(node.id) || 0) > 0).map(node => node.id);
-    return { ok: false, reason: 'Der Workflow enthält einen Abhängigkeitszyklus.', messageKey: 'Der Workflow enthält einen Abhängigkeitszyklus.', taskIds: cycleTaskIds };
-  }
-
-  for (const point of flowPoints) {
-    const incoming = blockingEdges.filter(edge => edge.to === point.id).length;
-    const outgoingCount = blockingEdges.filter(edge => edge.from === point.id).length;
-    if (point.type === 'fork' && (incoming < 1 || outgoingCount < 2)) {
-      return { ok: false, reason: 'Ein Fork benötigt mindestens einen Eingang und zwei Ausgänge.', messageKey: 'Ein Fork benötigt mindestens einen Eingang und zwei Ausgänge.', taskIds: [point.id] };
-    }
-    if (point.type === 'join' && (incoming < 2 || outgoingCount < 1)) {
-      return { ok: false, reason: 'Ein Join benötigt mindestens zwei Eingänge und einen Ausgang.', messageKey: 'Ein Join benötigt mindestens zwei Eingänge und einen Ausgang.', taskIds: [point.id] };
-    }
-  }
-
-  for (const reviewNode of reviewNodes) {
-    if (workflowTopologyEdges(graph).some(edge => {
-      const source = nodes.find(node => node.id === edge.from);
-      const sourcePoint = flowPoints.find(point => point.id === edge.from);
-      return edge.to === reviewNode.id && (sourcePoint || inferTaskNodeType(source) !== 'request');
-    })) continue;
-    return { ok: false, reason: `„${reviewNode.title}“ benötigt mindestens eine eingehende Verbindung.`, messageKey: '„{title}“ benötigt mindestens eine eingehende Verbindung.', messageValues: { title: reviewNode.title }, taskIds: [reviewNode.id] };
-  }
-  return { ok: true };
-}
-
-function workflowPlanRepairSuggestion(validation) {
-  const suggestions = {
-    'Der Workflow enthält keine ausführbare Aufgabe.': 'Lege mindestens eine ausführbare Fachaufgabe an und weise ihr einen Agenten zu.',
-    '„{title}“ benötigt ein Ziel und einen Agenten.': 'Ergänze für die markierte Aufgabe einen eindeutigen Titel und einen verfügbaren Agenten.',
-    '„{title}“ benötigt für die Delegation mindestens eine Fähigkeit.': 'Ergänze mindestens eine frei benannte benötigte Fähigkeit oder stelle die Delegation auf „Nie delegieren“.',
-    'Der Workflow enthält eine Verbindung zu einer nicht vorhandenen Aufgabe.': 'Entferne die ungültige Verbindung oder verbinde sie erneut mit einem vorhandenen Workflow-Element.',
-    'Der Workflow enthält einen Abhängigkeitszyklus.': 'Entferne mindestens eine Abhängigkeit aus dem markierten Zyklus, sodass wieder eine eindeutige Ausführungsrichtung entsteht.',
-    'Ein Fork benötigt mindestens einen Eingang und zwei Ausgänge.': 'Verbinde den Fork mit einem Vorgänger und mindestens zwei unabhängigen Folgepfaden.',
-    'Ein Join benötigt mindestens zwei Eingänge und einen Ausgang.': 'Verbinde den Join mit mindestens zwei Vorgängerpfaden und einer Folgeaufgabe.',
-    '„{title}“ benötigt mindestens eine eingehende Verbindung.': 'Verbinde die Abnahme mit mindestens einer Aufgabe, deren Ergebnis geprüft werden soll.',
-  };
-  return suggestions[validation.messageKey] || 'Prüfe die markierten Workflow-Elemente und korrigiere ihre Aufgabenangaben oder Verbindungen.';
-}
-
-/** Build a read-only, deterministic feasibility report for the task window. */
-export function inspectWorkflowPlan(graph) {
-  const validation = validateWorkflowPlan(graph);
-  const executable = (graph?.nodes || []).filter(node => !['request', 'review'].includes(inferTaskNodeType(node)));
-  const reviewNodes = (graph?.nodes || []).filter(node => inferTaskNodeType(node) === 'review');
-  const missingAcceptance = executable.filter(node => !(node.acceptanceCriteria || []).some(criterion => criterion.text?.trim()));
-  const openExecutable = executable.filter(node => !['agent_done', 'completed'].includes(node.status));
-  const readyParallelTaskIds = findSafeAutoParallelTaskIds(
-    graph,
-    openExecutable.map(node => ({ graphNodeId: node.id })),
-  );
-  const issues = validation.ok ? [] : [{
-    messageKey: validation.messageKey || validation.reason,
-    messageValues: validation.messageValues,
-    taskIds: validation.taskIds || [],
-  }];
-  const warnings = [];
-  const suggestions = [];
-  if (!validation.ok) {
-    suggestions.push({
-      messageKey: workflowPlanRepairSuggestion(validation),
-      messageValues: validation.messageValues,
-      taskIds: validation.taskIds || [],
-    });
-  }
-  if (missingAcceptance.length > 0) {
-    warnings.push({
-      messageKey: '{count} Aufgaben haben keine prüfbaren Abnahmekriterien.',
-      messageValues: { count: missingAcceptance.length },
-      taskIds: missingAcceptance.map(node => node.id),
-    });
-    suggestions.push({
-      messageKey: 'Ergänze für diese Aufgaben mindestens ein konkretes, überprüfbares Abnahmekriterium.',
-      taskIds: missingAcceptance.map(node => node.id),
-    });
-  }
-  if (reviewNodes.length === 0 && executable.length > 0) {
-    warnings.push({ messageKey: 'Es ist keine abschließende Abnahme eingeplant.' });
-    suggestions.push({ messageKey: 'Füge bei prüfpflichtigen Ergebnissen eine Abnahme hinzu und verbinde sie mit den zu prüfenden Aufgaben.' });
-  }
-  if (readyParallelTaskIds.length >= 2) {
-    suggestions.push({
-      messageKey: '{count} startbereite Aufgaben können parallel ausgeführt werden.',
-      messageValues: { count: readyParallelTaskIds.length },
-      taskIds: readyParallelTaskIds,
-    });
-  }
-  return {
-    ok: validation.ok,
-    issues,
-    warnings,
-    suggestions,
-    taskIds: [...new Set([...issues, ...warnings].flatMap(entry => entry.taskIds || []))],
-    readyParallelTaskIds,
-  };
-}
-
-/**
- * Greedily builds the largest safe parallel batch in stable queue order.
- * Every dependency-ready task is a candidate. Resource conflicts (same agent or
- * likely same file) keep tasks in the sequential queue; dependencies are the
- * only plan-level ordering rule.
- */
-export function findSafeAutoParallelTaskIds(graph, tasks = []) {
-  const candidates = tasks.map(task => task?.graphNodeId).filter(nodeId => {
-    const node = graph?.nodes?.find(candidate => candidate.id === nodeId);
-    return node && !['request', 'review'].includes(inferTaskNodeType(node)) && isTaskNodeReady(graph, nodeId);
-  });
-  let best = [];
-  for (const seed of candidates) {
-    const batch = [seed];
-    for (const nodeId of candidates) {
-      if (nodeId === seed) continue;
-      if (validateParallelSelection(graph, [...batch, nodeId]).ok) batch.push(nodeId);
-    }
-    if (batch.length > best.length) best = batch;
-  }
-  return best.length >= 2 ? best : [];
-}
-
-export function orderTasksForParallelSelection(tasks, nodeIds) {
-  const selectedIds = new Set(nodeIds || []);
-  return [...(tasks || [])].sort((left, right) =>
-    Number(selectedIds.has(right?.graphNodeId)) - Number(selectedIds.has(left?.graphNodeId))
-  );
-}
-
-export async function runTaskBatch(tasks, executeTask) {
-  return Promise.all((tasks || []).map(task => executeTask(task)));
-}
-
-export function graphNodeDepths(graph) {
-  const endpointIds = [...(graph?.nodes || []).map(node => node.id), ...(graph?.flowPoints || []).map(point => point.id)];
-  const depths = new Map(endpointIds.map(id => [id, 0]));
-  for (let pass = 0; pass < endpointIds.length; pass += 1) {
-    for (const edge of workflowTopologyEdges(graph)) {
-      depths.set(edge.to, Math.max(depths.get(edge.to) || 0, (depths.get(edge.from) || 0) + 1));
-    }
-  }
-  return depths;
-}
+export { invalidateTaskRecoveryBranch } from './workflow-recovery.mjs';

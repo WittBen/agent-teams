@@ -305,18 +305,41 @@ class AgentAPIServer {
       const providerConnections = this.getProviderConnections();
       const providerSecrets = this.getProviderSecrets();
       const responses = [];
+      const { resolveQualityPolicy, runQualityCascade, assessTaskComplexity, usesNativeCli, resolveGroupAgent } = await import('./quality-cascade.mjs');
+      const { selectAgentHistory } = await import('./agent-context.mjs');
 
-      for (const agent of targetAgents) {
+
+      for (const originalAgent of targetAgents) {
+        const agent = resolveGroupAgent(originalAgent, group);
         try {
-          const text = await callLLMDirect({
-            apiKeys, providerConnections, providerSecrets, agent, history,
-            userMessage: null, groupContext, projectPath: group?.projectPath || '',
-            language: this.store.get('language') || 'de',
+          const coordinator = Boolean(group && (agent.isSystemAgent || /\bpm\b|project manager|product manager|projektleiter|projektmanager|produktmanager/i.test(agent.role || '')));
+          const scopedHistory = selectAgentHistory(history, { agentId: agent.id, coordinator, direct: !group });
+          if (!coordinator && group) scopedHistory.push(userMsg);
+          const complexity = assessTaskComplexity({ objective: message });
+          const policy = resolveQualityPolicy({
+            globalConfig: this.store.get('qualityRouting') || {}, groupConfig: group?.qualityRouting || {},
+            agentConfig: agent.qualityRouting || {}, agent, complexity,
           });
+          const result = await runQualityCascade({
+            project: group?.projectPath || chatId,
+            learning: params => require('./learning-store').operateLearning(this.store, params),
+            agent, policy, history: scopedHistory, objective: message, complexity,
+            canEscalate: () => !(group?.projectPath && usesNativeCli(agent, apiKeys)),
+            call: ({ agent: modelAgent, history: modelHistory, phase }) => callLLMDirect({
+              apiKeys, providerConnections, providerSecrets, agent: {
+                ...modelAgent,
+                systemPrompt: `${agent.systemPrompt || ''}\n${policy.acceptanceCriteria || ''}`,
+              }, history: modelHistory,
+              userMessage: null, groupContext: coordinator ? groupContext : '',
+              projectPath: phase === 'escalated' ? '' : group?.projectPath || '',
+              language: this.store.get('language') || 'de',
+            }),
+          });
+          const text = result.reply;
           const agentMsg = { id: Date.now() + Math.random(), agentId: agent.id, senderName: agent.name, text, ts: Date.now() };
           this.addMessage(chatId, agentMsg);
           history = [...history, agentMsg];
-          responses.push({ agentId: agent.id, agentName: agent.name, model: agent.model, provider: agent.provider, text });
+          responses.push({ agentId: agent.id, agentName: agent.name, model: result.selectedAgent.model, provider: result.selectedAgent.provider, text, quality: { outcome: result.outcome, unresolved: result.unresolved } });
           if (!waitForAll) break;
         } catch (e) {
           responses.push({ agentId: agent.id, agentName: agent.name, error: e.message });

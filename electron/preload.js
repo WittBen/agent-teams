@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   maximize: () => ipcRenderer.send('window-maximize'),
   close: () => ipcRenderer.send('window-close'),
   appStateGet: (key) => ipcRenderer.invoke('app-state-get', key),
+  learningHarness: (params) => ipcRenderer.invoke('learning-harness', params),
   appStateSet: (key, value) => ipcRenderer.invoke('app-state-set', key, value),
   appStateDelete: (key) => ipcRenderer.invoke('app-state-delete', key),
   providerCredentialsStatus: () => ipcRenderer.invoke('provider-credentials-status'),
@@ -16,6 +17,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   exportUserData: () => ipcRenderer.invoke('user-data-export'),
   exportWorkflowFile: (document, suggestedName) => ipcRenderer.invoke('workflow-file-export', { document, suggestedName }),
   importWorkflowFile: () => ipcRenderer.invoke('workflow-file-import'),
+  reconcileTaskTickets: (chatId, graph) => ipcRenderer.invoke('task-tickets-reconcile', { chatId, graph }),
+  saveTaskTickets: (chatId, graph, reason = 'sync') => ipcRenderer.invoke('task-tickets-save', { chatId, graph, reason }),
+  archiveTaskTickets: (chatId) => ipcRenderer.invoke('task-tickets-archive', { chatId }),
+  syncTaskTicketRequests: (requests) => ipcRenderer.invoke('task-ticket-requests-sync', { requests }),
   deleteAllUserData: () => ipcRenderer.invoke('user-data-delete-all'),
   openUserDataFolder: () => ipcRenderer.invoke('user-data-open-folder'),
   pickMemoryFile: (params) => ipcRenderer.invoke('pick-memory-file', params),
@@ -23,6 +28,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   memoryLocalOperation: (params) => ipcRenderer.invoke('memory-local-operation', params),
   // CLI credential detection
   llmCall: (params) => ipcRenderer.invoke('llm-call', params),
+  llmCancel: (requestId) => ipcRenderer.invoke('llm-cancel', requestId),
+  onLlmProgress: (listener) => {
+    const wrapped = (_, progress) => listener(progress);
+    ipcRenderer.on('llm-progress', wrapped);
+    return () => ipcRenderer.removeListener('llm-progress', wrapped);
+  },
   codexCall: (params) => ipcRenderer.invoke('codex-call', params),
   codexCancel: (requestId) => ipcRenderer.invoke('codex-cancel', requestId),
   onCodexProgress: (listener) => {
@@ -30,7 +41,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('codex-progress', wrapped);
     return () => ipcRenderer.removeListener('codex-progress', wrapped);
   },
-  codexStatus: () => ipcRenderer.invoke('codex-status'),
+  codexStatus: (options = {}) => ipcRenderer.invoke('codex-status', options),
   codexLogin: () => ipcRenderer.invoke('codex-login'),
   claudeCall: (params) => ipcRenderer.invoke('claude-call', params),
   claudeCancel: (requestId) => ipcRenderer.invoke('claude-cancel', requestId),

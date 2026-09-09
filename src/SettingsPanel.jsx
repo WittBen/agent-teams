@@ -1,0 +1,1056 @@
+import Icon from './Icon.jsx';
+import LearningHarnessPanel from './LearningHarnessPanel.jsx';
+import TeamPortabilityDialog from './TeamPortabilityDialog.jsx';
+import React, { useState } from 'react';
+import { useStore, uuidv4 } from './store.jsx';
+import { PROVIDER_MODELS } from './llm.js';
+import { PROVIDER_PRESETS, createProviderConnection, getProviderModels, getProviderOptions, normalizeProviderConnections, parseProviderModels } from './provider-catalog.js';
+import { SUPPORTED_LANGUAGES, useI18n } from './i18n.jsx';
+import McpServerList from './McpConfig.jsx';
+import { isRoleUsed, normalizeRoleName } from './agent-roles.js';
+import { normalizeConversationLimits } from './conversation-limits.js';
+
+
+export function KeyInput({ label, value, onChange, show, setShow, placeholder, envVar, configured = false, source = '', onRemove }) {
+  const { t } = useI18n();
+  return (
+    <div className="form-group">
+      <label className="form-label">{label}</label>
+      <div style={{ position: 'relative' }}>
+        <input
+          className="form-input"
+          type={show ? 'text' : 'password'}
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          placeholder={configured ? t('Neuen Schlüssel eingeben, um den gespeicherten zu ersetzen') : placeholder}
+          autoComplete="off"
+          style={{ paddingRight: 40 }}
+        />
+        <button
+          type="button"
+          onClick={e => { e.stopPropagation(); setShow(!show); }}
+          style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', fontSize: 14 }}>
+          {show ? '🙈' : '👁️'}
+        </button>
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+        {envVar && <>{t('Umgebungsvariable:')} <code style={{ background: 'var(--bg-tertiary)', padding: '1px 5px', borderRadius: 3 }}>{envVar}</code></>}
+        {value.trim()
+          ? <span style={{ color: 'var(--accent)', marginLeft: envVar ? 8 : 0 }}>✓ {t('Key gesetzt')}</span>
+          : configured
+            ? <span style={{ color: 'var(--accent)', marginLeft: envVar ? 8 : 0 }}>✓ {t('Sicher konfiguriert')}{source ? ` (${source})` : ''}</span>
+            : <span style={{ color: '#e67e22', marginLeft: envVar ? 8 : 0 }}>{t('Nicht konfiguriert')}</span>}
+        {configured && source !== 'environment' && onRemove && (
+          <button type="button" className="btn btn-secondary" onClick={onRemove} style={{ marginLeft: 8, padding: '2px 7px', fontSize: 10 }}>
+            {t('Schlüssel entfernen')}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function SettingsPanel({ onClose }) {
+  const { language, setLanguage, t } = useI18n();
+  const {
+    apiKeys, setApiKeys, kbPath, setKbPath, mcpServers, setMcpServers,
+    agents, agentRoles, setAgentRoles,
+    providerConnections, setProviderConnections,
+    conversationLimits, setConversationLimits,
+    qualityRouting, setQualityRouting, qualityStats, clearQualityStats,
+  } = useStore();
+  const [openaiKey, setOpenaiKey] = useState('');
+  const [anthropicKey, setAnthropicKey] = useState('');
+  const [showOpenai, setShowOpenai] = useState(false);
+  const [showAnthropic, setShowAnthropic] = useState(false);
+  const [localProviderConnections, setLocalProviderConnections] = useState(
+    normalizeProviderConnections(providerConnections),
+  );
+  const [providerKeyDrafts, setProviderKeyDrafts] = useState({});
+  const [visibleProviderKeys, setVisibleProviderKeys] = useState({});
+  const [removedProviderIds, setRemovedProviderIds] = useState([]);
+  const [providerPresetId, setProviderPresetId] = useState('openrouter');
+  const [cliStatus, setCliStatus] = useState(apiKeys?.claudeCli
+    ? { claudeCli: true, connected: true, subscriptionType: apiKeys.claudeSubscriptionType }
+    : null);
+  const [codexStatus, setCodexStatus] = useState(null);
+  const codexLoginStartedAtRef = React.useRef(0);
+  const [credentialError, setCredentialError] = useState('');
+  const [externalApi, setExternalApi] = useState({ enabled: false, port: 3001, allowedOrigins: [], running: false, token: '' });
+  const [dataActionMessage, setDataActionMessage] = useState('');
+  const [localKbPath, setLocalKbPath] = useState(kbPath || '');
+  const [localMcpServers, setLocalMcpServers] = useState(Array.isArray(mcpServers) ? mcpServers : []);
+  const [localAgentRoles, setLocalAgentRoles] = useState((agentRoles || []).map(role => ({ ...role })));
+  const [localConversationLimits, setLocalConversationLimits] = useState(
+    normalizeConversationLimits(conversationLimits),
+  );
+  const [localQualityRouting, setLocalQualityRouting] = useState({
+    enabled: false,
+    strategy: 'balanced',
+    maxEscalations: 1,
+    escalationProvider: 'same',
+    escalationModel: '',
+    ...(qualityRouting || {}),
+  });
+  const [activeTab, setActiveTab] = useState('general');
+  const [showPortability, setShowPortability] = useState(false);
+  const normalizedLocalRoleNames = localAgentRoles.map(role => normalizeRoleName(role.name).toLowerCase());
+  const hasInvalidRoles = localAgentRoles.length === 0
+    || normalizedLocalRoleNames.some(name => !name)
+    || new Set(normalizedLocalRoleNames).size !== normalizedLocalRoleNames.length;
+  const hasInvalidProviders = localProviderConnections.some(provider => (
+    !provider.name.trim() || !provider.baseUrl.trim() || parseProviderModels(provider.models).length === 0
+  ));
+
+  React.useEffect(() => {
+    const handler = (e) => { if (e.key === 'Escape' && !showPortability) onClose(); };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [onClose, showPortability]);
+
+  const refreshCodexStatus = React.useCallback(async () => {
+    if (!window.electronAPI?.codexStatus) {
+      setCodexStatus({ installed: false, connected: false, error: t('Nur in der Electron-App verfügbar.') });
+      return;
+    }
+    setCodexStatus(current => ({ ...current, loading: true, error: '' }));
+    try {
+      const status = await window.electronAPI.codexStatus({ force: true });
+      const enabled = apiKeys?.codexCli !== false;
+      setCodexStatus({
+        ...status,
+        loading: false,
+        available: status.connected,
+        enabled,
+        connected: status.connected && enabled,
+      });
+    } catch (error) {
+      setCodexStatus(current => ({
+        ...current,
+        installed: false,
+        connected: false,
+        loading: false,
+        error: error.message || t('Codex-Verbindung konnte nicht geprüft werden.'),
+      }));
+    }
+  }, [apiKeys?.codexCli, t]);
+
+  const refreshClaudeStatus = React.useCallback(async () => {
+    if (!window.electronAPI?.claudeStatus) return;
+    setCliStatus(current => ({ ...current, loading: true, error: '' }));
+    try {
+      const status = await window.electronAPI.claudeStatus();
+      const enabled = !!apiKeys?.claudeCli;
+      setCliStatus(current => ({
+        ...current,
+        ...status,
+        loading: false,
+        available: status.connected,
+        connected: status.connected && enabled,
+        claudeCli: status.connected && enabled,
+      }));
+    } catch (error) {
+      setCliStatus(current => ({ ...current, loading: false, error: error.message }));
+    }
+  }, [apiKeys?.claudeCli]);
+
+  React.useEffect(() => {
+    refreshCodexStatus();
+    refreshClaudeStatus();
+    window.electronAPI?.externalApiStatus?.().then(status => setExternalApi(current => ({ ...current, ...status }))).catch(() => undefined);
+  }, [refreshCodexStatus, refreshClaudeStatus]);
+
+  React.useEffect(() => {
+    if (!codexStatus?.loginPending || !window.electronAPI?.codexStatus) return undefined;
+    if (!codexLoginStartedAtRef.current) codexLoginStartedAtRef.current = Date.now();
+    let cancelled = false;
+    let timer = null;
+    const poll = async () => {
+      try {
+        const nextStatus = await window.electronAPI.codexStatus({ force: true });
+        if (cancelled) return;
+        if (nextStatus?.connected) {
+          await setApiKeys({ codexCli: true });
+          if (cancelled) return;
+          codexLoginStartedAtRef.current = 0;
+          setCodexStatus({
+            ...nextStatus,
+            connected: true,
+            available: true,
+            enabled: true,
+            loading: false,
+            loginStarted: false,
+            loginPending: false,
+          });
+          return;
+        }
+        if (nextStatus?.authenticated && nextStatus?.networkReachable === false) {
+          codexLoginStartedAtRef.current = 0;
+          setCodexStatus({
+            ...nextStatus,
+            connected: false,
+            available: false,
+            loading: false,
+            loginStarted: false,
+            loginPending: false,
+            error: nextStatus.error || t('Codex ist angemeldet, aber der OpenAI-Dienst ist nicht erreichbar.'),
+          });
+          return;
+        }
+        if (nextStatus?.loginError && !nextStatus?.loginPending) {
+          codexLoginStartedAtRef.current = 0;
+          setCodexStatus({
+            ...nextStatus,
+            connected: false,
+            available: false,
+            loading: false,
+            loginStarted: false,
+            loginPending: false,
+            error: nextStatus.loginError,
+          });
+          return;
+        }
+        if (Date.now() - codexLoginStartedAtRef.current >= 120000) {
+          codexLoginStartedAtRef.current = 0;
+          setCodexStatus(current => ({
+            ...current,
+            connected: false,
+            available: false,
+            loading: false,
+            loginStarted: false,
+            loginPending: false,
+            error: t('Die Codex-Anmeldung wurde nicht innerhalb von zwei Minuten bestätigt. Bitte erneut versuchen oder `codex login` im Terminal ausführen.'),
+          }));
+          return;
+        }
+        setCodexStatus(current => ({
+          ...current,
+          ...nextStatus,
+          connected: false,
+          available: false,
+          loading: false,
+          loginStarted: true,
+          loginPending: true,
+          status: nextStatus?.status || current?.status,
+        }));
+        timer = setTimeout(poll, 1500);
+      } catch (error) {
+        if (cancelled) return;
+        codexLoginStartedAtRef.current = 0;
+        setCodexStatus(current => ({
+          ...current,
+          connected: false,
+          loading: false,
+          loginPending: false,
+          error: error.message || t('Codex-Verbindung konnte nicht geprüft werden.'),
+        }));
+      }
+    };
+    timer = setTimeout(poll, 1500);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [codexStatus?.loginPending, setApiKeys, t]);
+
+  const handleImportClaudeCLI = async () => {
+    setCliStatus({ loading: true });
+    try {
+      const status = await window.electronAPI?.claudeStatus();
+      if (!status?.installed) { setCliStatus({ error: status?.error || t('Claude Code CLI nicht gefunden.') }); return; }
+      if (!status.connected) { setCliStatus({ error: t('Claude Code ist nicht angemeldet. Bitte zuerst `claude` starten und anmelden.') }); return; }
+      await setApiKeys({ claudeCli: true, claudeSubscriptionType: status.subscriptionType || '' });
+      setCliStatus({ ...status, claudeCli: true });
+    } catch (e) { setCliStatus({ error: e.message }); }
+  };
+
+  const handleImportOpenAICLI = async () => {
+    try {
+      const status = await window.electronAPI?.importOpenAICredentials();
+      if (status) await setApiKeys({});
+    } catch (error) { setCredentialError(error.message); }
+  };
+
+  const handleConnectCodexCLI = async () => {
+    setCodexStatus(current => ({ ...current, loading: true }));
+    try {
+      const status = await window.electronAPI?.codexStatus({ force: true });
+      if (!status?.installed) {
+        setCodexStatus({ ...status, connected: false, available: false, loading: false, error: status?.error || t('Codex CLI wurde nicht gefunden.') });
+        return;
+      }
+      if (!status.connected) {
+        const result = await window.electronAPI?.codexLogin();
+        if (!result?.ok) {
+          setCodexStatus({ ...status, connected: false, available: false, loading: false, error: result?.error || t('Anmeldung konnte nicht gestartet werden.') });
+          return;
+        }
+        setCodexStatus({
+          ...status,
+          connected: false,
+          available: false,
+          loading: false,
+          loginStarted: true,
+          loginPending: true,
+          status: result.message,
+        });
+        codexLoginStartedAtRef.current = Date.now();
+        return;
+      }
+      await setApiKeys({ codexCli: true });
+      setCodexStatus({ ...status, connected: true, available: true, enabled: true, loading: false });
+    } catch (error) {
+      setCodexStatus(current => ({ ...current, connected: false, loading: false, error: error.message }));
+    }
+  };
+
+  const handleDisconnectCodexCLI = async () => {
+    await setApiKeys({ codexCli: false });
+    setCodexStatus(current => ({
+      ...current,
+      connected: false,
+      available: current?.available ?? current?.connected ?? false,
+      enabled: false,
+      loading: false,
+      error: '',
+    }));
+  };
+
+  const handleSave = async () => {
+    if (hasInvalidRoles || hasInvalidProviders) return;
+    setCredentialError('');
+    try {
+      await setProviderConnections(localProviderConnections);
+      const credentialUpdates = {};
+      if (openaiKey.trim()) credentialUpdates.openai = openaiKey.trim();
+      if (anthropicKey.trim()) credentialUpdates.anthropic = anthropicKey.trim();
+      const providerUpdates = Object.fromEntries([
+        ...Object.entries(providerKeyDrafts).filter(([, value]) => String(value || '').trim()),
+        ...removedProviderIds.map(id => [id, '']),
+      ]);
+      if (Object.keys(providerUpdates).length) credentialUpdates.providers = providerUpdates;
+      if (Object.keys(credentialUpdates).length) await setApiKeys(credentialUpdates);
+    } catch (error) {
+      setCredentialError(error.message);
+      setActiveTab('providers');
+      return;
+    }
+    setKbPath(localKbPath.trim());
+    setMcpServers(localMcpServers);
+    setAgentRoles(localAgentRoles);
+    setConversationLimits(localConversationLimits);
+    setQualityRouting(localQualityRouting);
+    onClose();
+  };
+
+  const removeCredential = async (provider) => {
+    setCredentialError('');
+    try {
+      await setApiKeys({ [provider]: '' });
+      if (provider === 'openai') setOpenaiKey('');
+      if (provider === 'anthropic') setAnthropicKey('');
+    } catch (error) { setCredentialError(error.message); }
+  };
+
+  const removeProviderCredential = async (providerId) => {
+    setCredentialError('');
+    try {
+      await setApiKeys({ providers: { [providerId]: '' } });
+      setProviderKeyDrafts(current => ({ ...current, [providerId]: '' }));
+    } catch (error) { setCredentialError(error.message); }
+  };
+
+  const addProviderConnection = () => {
+    const connection = createProviderConnection(providerPresetId, `api-${uuidv4()}`);
+    if (!connection) return;
+    setLocalProviderConnections(current => [...current, connection]);
+  };
+
+  const updateProviderConnection = (providerId, updates) => {
+    setLocalProviderConnections(current => current.map(provider => (
+      provider.id === providerId ? { ...provider, ...updates } : provider
+    )));
+  };
+
+  const removeProviderConnection = (providerId) => {
+    const usedByAgent = agents.some(agent => agent.provider === providerId);
+    const usedForEscalation = localQualityRouting.escalationProvider === providerId
+      || agents.some(agent => agent.qualityRouting?.escalationProvider === providerId);
+    if (usedByAgent || usedForEscalation) return;
+    setLocalProviderConnections(current => current.filter(provider => provider.id !== providerId));
+    setRemovedProviderIds(current => [...new Set([...current, providerId])]);
+  };
+
+  const configureExternalApi = async (updates) => {
+    try {
+      const result = await window.electronAPI?.externalApiConfigure?.({
+        enabled: updates.enabled ?? externalApi.enabled,
+        port: updates.port ?? externalApi.port,
+        allowedOrigins: updates.allowedOrigins ?? externalApi.allowedOrigins,
+      });
+      if (result) setExternalApi(current => ({ ...current, ...result }));
+    } catch (error) {
+      setExternalApi(current => ({ ...current, error: error.message, running: false }));
+    }
+  };
+
+  const addGlobalRole = () => {
+    const id = `role-custom-${Date.now().toString(36)}-${localAgentRoles.length + 1}`;
+    setLocalAgentRoles(current => [...current, { id, name: '' }]);
+  };
+
+  const updateGlobalRole = (id, name) => {
+    setLocalAgentRoles(current => current.map(role => role.id === id ? { ...role, name } : role));
+  };
+
+  const removeGlobalRole = (role) => {
+    if (isRoleUsed(role, agents)) return;
+    setLocalAgentRoles(current => current.filter(item => item.id !== role.id));
+  };
+
+  const handleGlobalEscalationProvider = (nextProvider) => {
+    const recommendedModel = {
+      openai: 'o1-mini',
+      anthropic: 'claude-opus-4-5',
+      codex: 'gpt-5.6-sol',
+    }[nextProvider] || getProviderModels(nextProvider, localProviderConnections, PROVIDER_MODELS).at(-1) || '';
+    setLocalQualityRouting(current => ({
+      ...current,
+      escalationProvider: nextProvider,
+      escalationModel: recommendedModel,
+    }));
+  };
+
+  // Reusable card style
+  const card = {
+    background: 'var(--bg-tertiary)', borderRadius: 10,
+    border: '1px solid var(--border)', padding: '14px 16px', marginBottom: 12,
+  };
+
+
+
+  return (
+    <div className="settings-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="settings-panel">
+        {/* Header */}
+        <div className="settings-header">
+          <button className="icon-btn" onClick={onClose} style={{ fontSize: 16 }} aria-label={t('Zurück')}><Icon name="arrowLeft" /></button>
+          <div className="settings-title"><Icon name="settings" /> {t('Einstellungen')}</div>
+        </div>
+
+        {/* Tab Bar */}
+        <div className="settings-tabs">
+          <button className={activeTab === 'general' ? 'active' : ''} onClick={() => setActiveTab('general')}><Icon name="globe" /> {t('Allgemein')}</button>
+          <button className={activeTab === 'roles' ? 'active' : ''} onClick={() => setActiveTab('roles')}><Icon name="users" /> {t('Rollen')}</button>
+          <button className={activeTab === 'providers' ? 'active' : ''} onClick={() => setActiveTab('providers')}><Icon name="key" /> {t('API-Zugang')}</button>
+          <button className={activeTab === 'folders' ? 'active' : ''} onClick={() => setActiveTab('folders')}><Icon name="folder" /> {t('Ordner')}</button>
+          <button className={activeTab === 'mcp' ? 'active' : ''} onClick={() => setActiveTab('mcp')}><Icon name="plug" /> MCP</button>
+          <button className={activeTab === 'security' ? 'active' : ''} onClick={() => setActiveTab('security')}><Icon name="shield" /> {t('Sicherheit')}</button>
+          <button className={activeTab === 'info' ? 'active' : ''} onClick={() => setActiveTab('info')}><Icon name="info" /> {t('Info')}</button>
+        </div>
+
+        <div className="settings-content">
+
+          {/* ── TAB: General ─────────────────────────────────────────── */}
+          {activeTab === 'general' && (
+            <>
+            <div style={card}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                <span style={{ fontSize: 20 }}><Icon name="transfer" size={20} /></span>
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 14 }}>{t('Agenten und Gruppen')}</div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+                    {t('Agenten und Gruppen als Datei teilen oder aus einer Datei hinzufügen.')}
+                  </div>
+                </div>
+              </div>
+              <button className="btn btn-secondary" onClick={() => setShowPortability(true)}>{t('Importieren / Exportieren')}</button>
+            </div>
+            <div style={card}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                <span style={{ fontSize: 20 }}><Icon name="globe" size={20} /></span>
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 14 }}>{t('App-Sprache')}</div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+                    {t('Die Sprache wird sofort angewendet und für den nächsten Start gespeichert.')}
+                  </div>
+                </div>
+              </div>
+              <label className="form-label">{t('Sprache')}</label>
+              <select className="form-select" value={language} onChange={event => setLanguage(event.target.value)}>
+                {SUPPORTED_LANGUAGES.map(option => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </div>
+            <div style={card}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                <Icon name="workflow" size={20} />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 600, fontSize: 14 }}>{t('Gruppenchat-Limits')}</div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+                    {t('Begrenzt einen automatischen Lauf, nicht den gespeicherten Chat. Beim Fortsetzen beginnt ein neues geprüftes Laufsegment.')}
+                  </div>
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 10 }}>
+                <div style={{ flex: 1 }}>
+                  <label className="form-label">{t('Agenten-Tasks pro Lauf')}</label>
+                  <input
+                    className="form-input"
+                    type="number"
+                    min="0"
+                    max="50"
+                    value={localConversationLimits.maxTurns}
+                    onChange={event => setLocalConversationLimits(current => normalizeConversationLimits({
+                      ...current,
+                      maxTurns: event.target.value,
+                    }))}
+                  />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <label className="form-label">{t('Tasks je Agent und Lauf')}</label>
+                  <input
+                    className="form-input"
+                    type="number"
+                    min="0"
+                    max={localConversationLimits.maxTurns === 0 ? 50 : localConversationLimits.maxTurns}
+                    value={localConversationLimits.maxTurnsPerAgent}
+                    onChange={event => setLocalConversationLimits(current => normalizeConversationLimits({
+                      ...current,
+                      maxTurnsPerAgent: event.target.value,
+                    }))}
+                  />
+                </div>
+              </div>
+              <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 7 }}>
+                {t('0 bedeutet unbegrenzt; beide Grenzen werden unabhängig voneinander angewendet.')}
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 12 }}>
+                <button type="button" role="switch"
+                  aria-checked={localConversationLimits.pmReviewOnLimit}
+                  aria-label={t('PM prüft beim Erreichen des Limits')}
+                  className={`toggle-switch ${localConversationLimits.pmReviewOnLimit ? 'on' : ''}`}
+                  onClick={() => setLocalConversationLimits(current => ({
+                    ...current,
+                    pmReviewOnLimit: !current.pmReviewOnLimit,
+                  }))}
+                >
+                  <div className="toggle-knob" />
+                </button>
+                <div>
+                  <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{t('PM prüft beim Erreichen des Limits')}</div>
+                  <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>
+                    {t('Der PM darf abschließen oder den nächsten Schritt verkleinern; offene Arbeit bleibt fortsetzbar.')}
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div style={card}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                <Icon name="memory" size={20} />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 600, fontSize: 14 }}>{t('Quality Cascading')}</div>
+                  <p className="expertise-placement-note">{t('Prüft strukturelle Vollständigkeit und konfigurierte Nachweise, nicht die faktische Richtigkeit. Fachliche Prüfung und erforderliche Freigaben bleiben notwendig.')}</p>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+                    {t('Beginnt günstig und wechselt höchstens einmal auf eine stärkere Modellstufe, wenn belastbare Qualitätsregeln dies verlangen.')}
+                  </div>
+                </div>
+                <button type="button" role="switch" aria-checked={localQualityRouting.enabled}
+                  aria-label={t('Quality Cascading')}
+                  className={`toggle-switch ${localQualityRouting.enabled ? 'on' : ''}`}
+                  onClick={() => setLocalQualityRouting(current => ({ ...current, enabled: !current.enabled }))}>
+                  <div className="toggle-knob" />
+                </button>
+              </div>
+              <label className="form-label">{t('Strategie')}</label>
+              <select className="form-select" value={localQualityRouting.strategy}
+                onChange={event => setLocalQualityRouting(current => ({ ...current, strategy: event.target.value }))}
+                disabled={!localQualityRouting.enabled}>
+                <option value="cost">{t('Kostenfokus – immer günstig beginnen')}</option>
+                <option value="balanced">{t('Ausgewogen – riskante Aufgaben direkt stark')}</option>
+                <option value="quality">{t('Qualitätsfokus – direkt starke Modellstufe')}</option>
+              </select>
+              <div style={{ display: 'flex', gap: 10, marginTop: 10 }}>
+                <div style={{ flex: 1 }}>
+                  <label className="form-label">{t('Eskalations-Anbieter')}</label>
+                  <select className="form-select" value={localQualityRouting.escalationProvider}
+                    onChange={event => handleGlobalEscalationProvider(event.target.value)} disabled={!localQualityRouting.enabled}>
+                    <option value="same">{t('Gleicher Anbieter')}</option>
+                    {getProviderOptions(localProviderConnections).map(option => (
+                      <option key={option.id} value={option.id}>{option.name}</option>
+                    ))}
+                  </select>
+                </div>
+                {localQualityRouting.escalationProvider !== 'same' && (
+                  <div style={{ flex: 1.25 }}>
+                    <label className="form-label">{t('Stärkeres Modell')}</label>
+                    <select className="form-select" value={localQualityRouting.escalationModel}
+                      onChange={event => setLocalQualityRouting(current => ({ ...current, escalationModel: event.target.value }))}
+                      disabled={!localQualityRouting.enabled}>
+                      {getProviderModels(localQualityRouting.escalationProvider, localProviderConnections, PROVIDER_MODELS, localQualityRouting.escalationModel).map(option => (
+                        <option key={option} value={option}>{option}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8, lineHeight: 1.45 }}>
+                {t('Pro Agenten-Task ist maximal eine Eskalation erlaubt. Im Chat kann dies mit Schnell, Automatisch oder Gründlich überschrieben werden.')}
+              </div>
+              <div className="quality-stats">
+                <span>{t('Läufe')}: {qualityStats?.runs || 0}</span>
+                <span>{t('Eskalationen')}: {qualityStats?.escalations || 0}</span>
+                <span>{t('Direkt stark')}: {qualityStats?.directStrong || 0}</span>
+                <span>≈ {(qualityStats?.estimatedInputTokens || 0) + (qualityStats?.estimatedOutputTokens || 0)} {t('Tokens')}</span>
+                <button type="button" className="btn btn-secondary" onClick={clearQualityStats}>{t('Statistik löschen')}</button>
+              </div>
+              <LearningHarnessPanel enabled={localQualityRouting.learningEnabled !== false}
+                onChange={learningEnabled => setLocalQualityRouting(current => ({ ...current, learningEnabled }))} />
+            </div>
+            </>
+          )}
+
+          {/* ── TAB: Agent roles ────────────────────────────────────── */}
+          {activeTab === 'roles' && (
+            <div style={card}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                <span style={{ fontSize: 20 }}><Icon name="users" size={20} /></span>
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 14 }}>{t('Globale Agentenrollen')}</div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+                    {t('Agenten wählen ihre Rolle aus diesem zentralen Katalog. Umbenennungen gelten automatisch überall.')}
+                  </div>
+                </div>
+              </div>
+              <div className="role-catalog-list">
+                {localAgentRoles.map(role => {
+                  const used = isRoleUsed(role, agents);
+                  const usageCount = agents.filter(agent => agent.roleId === role.id).length;
+                  return (
+                    <div className="role-catalog-row" key={role.id}>
+                      <input
+                        className="form-input"
+                        value={role.name}
+                        onChange={event => updateGlobalRole(role.id, event.target.value)}
+                        aria-label={t('Rollenname')}
+                      />
+                      {used && <span className="role-usage">{t('{count} Agent(en)', { count: usageCount })}</span>}
+                      <button
+                        type="button"
+                        className="btn btn-secondary role-delete-btn"
+                        onClick={() => removeGlobalRole(role)}
+                        disabled={used}
+                        title={used ? t('Diese Rolle wird noch verwendet und kann nicht gelöscht werden.') : t('Rolle löschen')}
+                      >🗑️</button>
+                    </div>
+                  );
+                })}
+              </div>
+              <button type="button" className="btn btn-secondary" onClick={addGlobalRole}>＋ {t('Rolle hinzufügen')}</button>
+              {hasInvalidRoles && (
+                <div className="role-catalog-error">{t('Jede Rolle benötigt einen eindeutigen Namen.')}</div>
+              )}
+            </div>
+          )}
+
+          {/* ── TAB: Providers ───────────────────────────────────────── */}
+          {activeTab === 'providers' && (<>
+
+            {/* Anthropic API + CLI */}
+            <div style={card} data-testid="anthropic-auth-group">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                <span style={{ fontSize: 18 }}>🟣</span>
+                <span style={{ fontWeight: 600, fontSize: 14 }}>Anthropic</span>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 10 }}>
+                <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                    <span><Icon name="key" size={20} /></span>
+                    <strong style={{ fontSize: 13 }}>Anthropic API-Key</strong>
+                  </div>
+                  <KeyInput label={t('API Key (manuell)')} value={anthropicKey} onChange={setAnthropicKey}
+                    show={showAnthropic} setShow={setShowAnthropic} placeholder="sk-ant-..." envVar="ANTHROPIC_API_KEY"
+                    configured={apiKeys?.anthropicConfigured} source={apiKeys?.anthropicSource}
+                    onRemove={() => removeCredential('anthropic')} />
+                </div>
+
+                <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                    <span>⌨️</span>
+                    <strong style={{ fontSize: 13 }}>Claude Code CLI</strong>
+                    {cliStatus?.connected && <span style={{ marginLeft: 'auto', color: 'var(--accent)', fontSize: 11 }}>✓ {t('Verbunden')}</span>}
+                  </div>
+                  <div style={{ background: 'var(--bg-primary)', borderRadius: 6, padding: '8px 10px', fontSize: 10, color: 'var(--text-secondary)', lineHeight: 1.5, marginBottom: 10 }}>
+                    {t('Anmeldung: Öffne ein Terminal, starte')} <code>claude</code> {t('und wähle beim ersten Start dein Claude.ai- oder Anthropic-Console-Konto. Schließe die Anmeldung im Browser ab und prüfe danach hier den Status.')}
+                  </div>
+                  {cliStatus?.connected ? (
+                    <>
+                      <div style={{ fontSize: 11, color: 'var(--accent)', marginBottom: 8 }}>
+                        {cliStatus.version || cliStatus.subscriptionType || t('angemeldet')}
+                      </div>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <button className="btn btn-secondary" style={{ flex: 1, fontSize: 11 }}
+                          onClick={() => {
+                            setApiKeys({ claudeCli: false, claudeSubscriptionType: '' });
+                            setCliStatus(null);
+                          }}>{t('Trennen')}</button>
+                        <button className="btn btn-secondary" style={{ flex: 1, fontSize: 11 }}
+                          onClick={refreshClaudeStatus} disabled={cliStatus?.loading}>
+                          {cliStatus?.loading ? `⏳ ${t('Prüfe…')}` : `↻ ${t('Status prüfen')}`}
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <button className="btn btn-primary" style={{ flex: 1, fontSize: 11 }}
+                          onClick={handleImportClaudeCLI} disabled={cliStatus?.loading}>
+                          {cliStatus?.loading ? `⏳ ${t('Prüfe Anmeldung…')}` : `🔗 ${t('Claude Code CLI verbinden')}`}
+                        </button>
+                        <button className="btn btn-secondary" style={{ flex: 1, fontSize: 11 }}
+                          onClick={refreshClaudeStatus} disabled={cliStatus?.loading}>
+                          {cliStatus?.loading ? `⏳ ${t('Prüfe…')}` : `↻ ${t('Status prüfen')}`}
+                        </button>
+                      </div>
+                      {cliStatus?.error && <div style={{ color: '#e88', fontSize: 11, marginTop: 8 }}>{cliStatus.error}</div>}
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* OpenAI API + CLI */}
+            <div style={card} data-testid="openai-auth-group">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                <span style={{ fontSize: 18 }}>🟢</span>
+                <span style={{ fontWeight: 600, fontSize: 14 }}>OpenAI</span>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 10 }}>
+                <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                    <span><Icon name="key" size={20} /></span>
+                    <strong style={{ fontSize: 13 }}>OpenAI API-Key</strong>
+                  </div>
+                  <KeyInput label={t('API Key (manuell)')} value={openaiKey} onChange={setOpenaiKey}
+                    show={showOpenai} setShow={setShowOpenai} placeholder="sk-..." envVar="OPENAI_API_KEY"
+                    configured={apiKeys?.openaiConfigured} source={apiKeys?.openaiSource}
+                    onRemove={() => removeCredential('openai')} />
+                  <button className="btn btn-secondary" style={{ fontSize: 11, marginTop: -4, width: '100%' }} onClick={handleImportOpenAICLI}>
+                    🔍 {t('Aus Umgebungsvariable laden')}
+                  </button>
+                </div>
+
+                <div style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 12 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                    <span>⌨️</span>
+                    <strong style={{ fontSize: 13 }}>Codex CLI</strong>
+                    {codexStatus?.connected && <span style={{ marginLeft: 'auto', color: 'var(--accent)', fontSize: 11 }}>✓ {t('Verbunden')}</span>}
+                  </div>
+                  <div style={{ background: 'var(--bg-primary)', borderRadius: 6, padding: '8px 10px', fontSize: 10, color: 'var(--text-secondary)', lineHeight: 1.5, marginBottom: 10 }}>
+                    {t('Anmeldung: Öffne ein Terminal, führe')} <code>codex login</code> {t('aus und schließe die ChatGPT-Anmeldung im geöffneten Browser ab. Prüfe danach hier den Status.')}
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.45, marginBottom: 8 }}>
+                    {t('Nutzt codex exec mit der lokalen codex login-Sitzung. Zugangsdaten bleiben bei der Codex-CLI.')}
+                  </div>
+                  {(codexStatus?.loading || codexStatus?.loginPending) && codexStatus?.status && (
+                    <div style={{ color: '#e6a23c', fontSize: 11, marginBottom: 8 }} role="status">
+                      ⏳ {codexStatus.status}
+                    </div>
+                  )}
+                  {codexStatus?.connected ? (
+                    <>
+                      <div style={{ fontSize: 11, color: 'var(--accent)', marginBottom: 8 }}>
+                        {codexStatus.version || t('angemeldet')}
+                      </div>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <button className="btn btn-secondary" style={{ flex: 1, fontSize: 11 }}
+                          onClick={handleDisconnectCodexCLI}>{t('Trennen')}</button>
+                        <button className="btn btn-secondary" style={{ flex: 1, fontSize: 11 }}
+                          onClick={refreshCodexStatus} disabled={codexStatus?.loading}>
+                          {codexStatus?.loading ? `⏳ ${t('Prüfe…')}` : `↻ ${t('Status prüfen')}`}
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <button className="btn btn-primary" style={{ flex: 1, fontSize: 11 }} onClick={handleConnectCodexCLI}
+                          disabled={codexStatus?.loading || codexStatus?.loginPending || codexStatus?.installed === false}>
+                          {codexStatus?.loginPending ? `⏳ ${t('Anmeldung läuft…')}` : `🔗 ${t('Codex CLI verbinden')}`}
+                        </button>
+                        <button className="btn btn-secondary" style={{ flex: 1, fontSize: 11 }} onClick={refreshCodexStatus} disabled={codexStatus?.loading}>
+                          {codexStatus?.loading ? `⏳ ${t('Prüfe…')}` : `↻ ${t('Status prüfen')}`}
+                        </button>
+                      </div>
+                      {codexStatus && !codexStatus.loading && (
+                        <div style={{ color: codexStatus.installed ? '#e6a23c' : '#e88', fontSize: 11, marginTop: 8 }}>
+                          {codexStatus.error || (codexStatus.installed
+                            ? codexStatus.enabled === false && codexStatus.available
+                              ? t('Codex CLI wurde von der App getrennt.')
+                              : codexStatus.loginStarted && codexStatus.status
+                                ? codexStatus.status
+                                : t('Codex CLI ist installiert, aber nicht angemeldet.')
+                            : t('Codex CLI wurde nicht gefunden.'))}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div style={card}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                <span style={{ fontSize: 18 }}>🔌</span>
+                <span style={{ fontWeight: 600, fontSize: 14 }}>{t('Weitere API-Anbieter')}</span>
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.45, marginBottom: 12 }}>
+                {t('Füge vorkonfigurierte oder eigene Anbieter hinzu. API-Schlüssel bleiben getrennt von der Provider-Konfiguration verschlüsselt gespeichert.')}
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <select className="form-select" value={providerPresetId} onChange={event => setProviderPresetId(event.target.value)} style={{ flex: 1 }}>
+                  {PROVIDER_PRESETS.map(preset => (
+                    <option key={preset.id} value={preset.id}>{preset.emoji} {t(preset.name)}</option>
+                  ))}
+                </select>
+                <button type="button" className="btn btn-primary" onClick={addProviderConnection}>{t('Anbieter hinzufügen')}</button>
+              </div>
+            </div>
+
+            {localProviderConnections.map(connection => {
+              const usedBy = agents.filter(agent => agent.provider === connection.id);
+              const usedForEscalation = localQualityRouting.escalationProvider === connection.id
+                || agents.some(agent => agent.qualityRouting?.escalationProvider === connection.id);
+              const providerInUse = usedBy.length > 0 || usedForEscalation;
+              const keyConfigured = Boolean(apiKeys?.providerConfigured?.[connection.id]);
+              return (
+                <div key={connection.id} style={card}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+                    <span style={{ fontSize: 18 }}>{connection.emoji || '🔌'}</span>
+                    <strong style={{ flex: 1 }}>{connection.name || t('Unbenannter Anbieter')}</strong>
+                    <button type="button" className="btn btn-secondary"
+                      disabled={providerInUse}
+                      title={usedBy.length
+                        ? t('Dieser Anbieter wird noch von {count} Agent(en) verwendet.', { count: usedBy.length })
+                        : usedForEscalation
+                          ? t('Dieser Anbieter wird noch für Quality Cascading verwendet.')
+                          : t('Anbieter entfernen')}
+                      onClick={() => removeProviderConnection(connection.id)}>
+                      {t('Entfernen')}
+                    </button>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                    <div className="form-group" style={{ marginBottom: 0 }}>
+                      <label className="form-label">{t('Anzeigename')}</label>
+                      <input className="form-input" value={connection.name}
+                        onChange={event => updateProviderConnection(connection.id, { name: event.target.value })} />
+                    </div>
+                    <div className="form-group" style={{ marginBottom: 0 }}>
+                      <label className="form-label">{t('API-Protokoll')}</label>
+                      <select className="form-select" value={connection.protocol}
+                        onChange={event => updateProviderConnection(connection.id, { protocol: event.target.value })}>
+                        <option value="openai">{t('OpenAI-kompatibel')}</option>
+                        <option value="anthropic">Anthropic Messages</option>
+                        <option value="gemini">Google Gemini</option>
+                      </select>
+                    </div>
+                  </div>
+                  <div className="form-group" style={{ marginTop: 10 }}>
+                    <label className="form-label">{t('API-Base-URL')}</label>
+                    <input className="form-input" value={connection.baseUrl}
+                      placeholder="https://api.example.com/v1"
+                      onChange={event => updateProviderConnection(connection.id, { baseUrl: event.target.value })} />
+                    <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 4 }}>
+                      {t('HTTPS ist erforderlich; HTTP ist nur für localhost erlaubt.')}
+                    </div>
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">{t('Modelle (eine Zeile je Modell)')}</label>
+                    <textarea className="form-textarea" rows={Math.min(5, Math.max(2, connection.models.length))}
+                      value={connection.models.join('\n')}
+                      onChange={event => updateProviderConnection(connection.id, { models: parseProviderModels(event.target.value) })} />
+                  </div>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--text-secondary)', marginBottom: 10 }}>
+                    <input type="checkbox" checked={connection.requiresApiKey !== false}
+                      onChange={event => updateProviderConnection(connection.id, { requiresApiKey: event.target.checked })} />
+                    {t('API-Key erforderlich')}
+                  </label>
+                  <KeyInput label={t('API Key (manuell)')}
+                    value={providerKeyDrafts[connection.id] || ''}
+                    onChange={value => setProviderKeyDrafts(current => ({ ...current, [connection.id]: value }))}
+                    show={Boolean(visibleProviderKeys[connection.id])}
+                    setShow={value => setVisibleProviderKeys(current => ({ ...current, [connection.id]: value }))}
+                    placeholder={connection.requiresApiKey === false ? t('Optional, falls der lokale Server einen Token verlangt') : 'sk-…'}
+                    configured={keyConfigured}
+                    onRemove={() => removeProviderCredential(connection.id)} />
+                  {usedBy.length > 0 && (
+                    <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: -8 }}>
+                      {t('Verwendet von: {names}', { names: usedBy.map(agent => agent.name).join(', ') })}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+            {hasInvalidProviders && <div className="role-catalog-error">{t('Jeder API-Anbieter benötigt einen Namen, eine Base-URL und mindestens ein Modell.')}</div>}
+            {credentialError && <div className="role-catalog-error">{credentialError}</div>}
+            {!apiKeys?.encryptionAvailable && window.electronAPI && (
+              <div className="role-catalog-error">{t('Der Betriebssystem-Schlüsselspeicher ist nicht verfügbar. Manuelle Schlüssel werden aus Sicherheitsgründen nicht unverschlüsselt gespeichert.')}</div>
+            )}
+
+          </>)}
+
+          {/* ── TAB: Folders ─────────────────────────────────────────── */}
+          {activeTab === 'folders' && (<>
+
+            <div style={card}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                <span style={{ fontSize: 20 }}>📚</span>
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 14 }}>{t('Wissensbasis')}</div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{t('Ordner mit Markdown- oder Textdateien (global für alle Gruppen)')}</div>
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <input className="form-input" value={localKbPath} onChange={e => setLocalKbPath(e.target.value)}
+                  placeholder={t('Noch kein Ordner gewählt')} style={{ flex: 1, fontSize: 12 }} readOnly />
+                <button className="btn btn-primary" style={{ flexShrink: 0 }}
+                  onClick={async () => { const r = await window.electronAPI?.pickFolder(t('Wissensbasis-Ordner')); if (r) setLocalKbPath(r); }}>
+                  📂 {t('Wählen')}
+                </button>
+              </div>
+              {localKbPath && (
+                <div style={{ fontSize: 11, color: 'var(--accent)', marginTop: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  ✓ {localKbPath}
+                  <button style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 11, marginLeft: 'auto' }}
+                    onClick={() => setLocalKbPath('')}>✕ {t('Entfernen')}</button>
+                </div>
+              )}
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 8, lineHeight: 1.5 }}>
+                {t('Agenten durchsuchen .md und .txt Dateien automatisch. Projekt-Ordner werden pro Gruppe im Gruppen-Modal konfiguriert.')}
+              </div>
+            </div>
+          </>)}
+
+          {/* ── TAB: Global MCP ─────────────────────────────────────── */}
+          {activeTab === 'mcp' && (
+            <div style={card}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                <span style={{ fontSize: 20 }}><Icon name="plug" size={20} /></span>
+                <div>
+                  <div style={{ fontWeight: 600, fontSize: 14 }}>{t('Globale MCP-Server')}</div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+                    {t('Aktive Server stehen automatisch allen Gruppen und deren Agenten zur Verfügung.')}
+                  </div>
+                </div>
+              </div>
+              <McpServerList servers={localMcpServers} onChange={setLocalMcpServers} compact />
+            </div>
+          )}
+
+          {/* ── TAB: Security ───────────────────────────────────────── */}
+          {activeTab === 'security' && (<>
+            <div style={card}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                <span style={{ fontSize: 20 }}>🔐</span>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 600, fontSize: 14 }}>{t('Externe REST-API')}</div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+                    {t('Standardmäßig deaktiviert. Bei Aktivierung ist für jeden Zugriff ein geheimes Bearer-Token erforderlich.')}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className={`toggle-switch ${externalApi.enabled ? 'on' : ''}`}
+                  role="switch"
+                  aria-checked={externalApi.enabled}
+                  onClick={() => configureExternalApi({ enabled: !externalApi.enabled })}
+                >
+                  <span className="toggle-knob" />
+                </button>
+              </div>
+              <label className="form-label">{t('Lokaler Port')}</label>
+              <input className="form-input" type="number" min="1024" max="65535" value={externalApi.port}
+                onChange={event => setExternalApi(current => ({ ...current, port: Number(event.target.value) }))}
+                disabled={externalApi.enabled} />
+              <label className="form-label" style={{ marginTop: 10 }}>{t('Erlaubte Browser-Origins (optional, eine pro Zeile)')}</label>
+              <textarea className="form-input" rows="3"
+                value={(externalApi.allowedOrigins || []).join('\n')}
+                onChange={event => setExternalApi(current => ({ ...current, allowedOrigins: event.target.value.split(/\r?\n/).map(value => value.trim()).filter(Boolean) }))}
+                disabled={externalApi.enabled}
+                placeholder="http://127.0.0.1:8080" />
+              {!externalApi.enabled && (
+                <button type="button" className="btn btn-secondary" style={{ marginTop: 10 }} onClick={() => configureExternalApi({ enabled: false })}>
+                  {t('API-Konfiguration speichern')}
+                </button>
+              )}
+              <div style={{ fontSize: 11, color: externalApi.running ? 'var(--accent)' : 'var(--text-muted)', marginTop: 10 }}>
+                {externalApi.enabled
+                  ? externalApi.running ? `✓ ${t('API läuft auf')} http://127.0.0.1:${externalApi.port}` : `⚠ ${externalApi.error || t('API konnte nicht gestartet werden')}`
+                  : t('API ist deaktiviert')}
+              </div>
+              {externalApi.enabled && (
+                <button type="button" className="btn btn-secondary" style={{ marginTop: 10 }}
+                  onClick={async () => {
+                    const result = await window.electronAPI?.externalApiRegenerateToken?.();
+                    if (result) setExternalApi(current => ({ ...current, ...result }));
+                  }}>
+                  {t('Neues Zugriffstoken erzeugen')}
+                </button>
+              )}
+              {externalApi.token && (
+                <div style={{ marginTop: 10 }}>
+                  <label className="form-label">{t('Zugriffstoken – jetzt kopieren, es wird später nicht erneut angezeigt')}</label>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <input className="form-input" value={externalApi.token} readOnly />
+                    <button type="button" className="btn btn-primary" onClick={() => navigator.clipboard.writeText(externalApi.token)}>{t('Kopieren')}</button>
+                  </div>
+                </div>
+              )}
+            </div>
+            <div style={card}>
+              <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 6 }}>🗂️ {t('Lokale Daten')}</div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5, marginBottom: 10 }}>
+                {t('Der Export enthält keine API-Schlüssel oder Zugriffstoken. Externe Projektdateien und separat ausgewählte Memory-Dateien werden nicht verändert.')}
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                <button type="button" className="btn btn-secondary" onClick={async () => {
+                  const result = await window.electronAPI?.exportUserData?.();
+                  if (result?.ok) setDataActionMessage(t('Export gespeichert: {path}', { path: result.filePath }));
+                  else if (result?.error) setDataActionMessage(result.error);
+                }}>{t('Daten exportieren')}</button>
+                <button type="button" className="btn btn-secondary" onClick={() => window.electronAPI?.openUserDataFolder?.()}>{t('Speicherordner öffnen')}</button>
+                <button type="button" className="btn btn-danger" onClick={() => window.electronAPI?.deleteAllUserData?.()}>{t('Alle lokalen App-Daten löschen')}</button>
+              </div>
+              {dataActionMessage && <div style={{ fontSize: 11, color: 'var(--accent)', marginTop: 10, wordBreak: 'break-all' }}>{dataActionMessage}</div>}
+            </div>
+          </>)}
+
+          {/* ── TAB: Info ────────────────────────────────────────────── */}
+          {activeTab === 'info' && (<>
+            <div style={card}>
+              <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8 }}>🤖 Agent Teams</div>
+              <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.7 }}>
+                <p>{t('Lokale Desktop-App für KI-Agenten-Teams. Manuell gespeicherte API-Schlüssel werden mit dem Betriebssystem-Schlüsselspeicher geschützt und ausschließlich für direkte Anfragen an den gewählten Anbieter verwendet.')}</p>
+                <br />
+                <p><strong>{t('Externe API:')}</strong> {externalApi.enabled ? t('aktiviert und token-geschützt') : t('deaktiviert')}</p>
+                <br />
+                <p style={{ fontSize: 11 }}>
+                  <strong>{t('Umgebungsvariablen:')}</strong><br />
+                  <code>OPENAI_API_KEY</code>, <code>ANTHROPIC_API_KEY</code>
+                </p>
+              </div>
+            </div>
+          </>)}
+
+        </div>
+
+        <div className="settings-actions">
+          <button className="btn btn-secondary" style={{ flex: 1 }} onClick={onClose}>{t('Abbrechen')}</button>
+          <button className="btn btn-primary" style={{ flex: 2 }} onClick={handleSave} disabled={hasInvalidRoles || hasInvalidProviders}><Icon name="save" /> {t('Speichern')}</button>
+        </div>
+      </div>
+      {showPortability && <TeamPortabilityDialog onClose={() => setShowPortability(false)} />}
+    </div>
+  );
+}

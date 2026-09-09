@@ -1,3 +1,11 @@
+import { canPauseTask } from './workflow-task-pause.mjs';
+import ExpertiseHelpPanel from './ExpertiseHelpPanel';
+import { acceptanceTaskState } from './acceptance-scheduling.mjs';
+import ChatOptionsMenu from './ChatOptionsMenu';
+import EntityIcon from './EntityIcon';
+import Icon from './Icon';
+import { workflowAttention } from './workflow-attention.mjs';
+import MarkdownMessage from './MarkdownMessage';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ACCEPTANCE_STATUS,
@@ -20,9 +28,10 @@ import {
   groupRequestColor,
 } from './cross-group';
 import { normalizeDelegationPolicy } from './delegation';
+import { TICKET_PRIORITY, ticketIdForTask } from './task-ticket';
 import WorkflowProblemDialog from './WorkflowProblemDialog';
 
-const PLANNABLE_STATUSES = new Set(['planned', 'queued', 'prepared', 'interrupted', 'retryable']);
+const PLANNABLE_STATUSES = new Set(['planned', 'queued', 'prepared', 'interrupted', 'retryable', 'stale_dependency']);
 const RECOVERABLE_STATUSES = new Set(['failed', 'timed_out', 'blocked', 'interrupted', 'waiting_user', 'waiting_pm', 'provider_paused', 'retryable']);
 const BLOCKED_REASON_LABELS = {
   'delegation-no-target-expert': 'Es wurde keine erreichbare Zielgruppe mit ausreichender Kompetenzabdeckung gefunden.',
@@ -30,28 +39,53 @@ const BLOCKED_REASON_LABELS = {
   'pm-consultation': 'Die Aufgabe wartet auf die Einschätzung des PM.',
   'unplanned-handoff': 'Der Agent hat eine nicht im freigegebenen Plan enthaltene Übergabe vorgeschlagen.',
   'acceptance-pending': 'Mindestens ein erforderliches Abnahmekriterium ist noch offen.',
+  'acceptance-rework': 'Die unabhängige Prüfung hat mindestens ein erforderliches Kriterium abgelehnt. Das bestehende Ticket wird nachgebessert.',
   'quality-recovery': 'Die Aufgabe erfüllt auch nach der Qualitätseskalation nicht alle automatisch prüfbaren Kriterien und wird deshalb geteilt.',
   'pm-recovery-needs-user': 'Der PM konnte innerhalb des freigegebenen Plans keine sichere Lösung bestätigen und benötigt eine Entscheidung des Users.',
+  'upstream-recovery': 'Ein fachlich vorgelagertes Ticket wird repariert. Dieses Ergebnis und seine Abnahme werden danach erneut geprüft.',
   'contract-violation': 'Die angeforderte Ausführung weicht vom freigegebenen Aufgabenplan ab.',
   'repeat-limit': 'Eine wiederholte Übergabe wurde zum Schutz vor einer Schleife blockiert.',
   'scope-repeat': 'Eine bereits erledigte Aufgabe sollte ohne neuen konkreten Defekt erneut ausgeführt werden.',
 };
 const NODE_TYPES = {
-  request: { label: 'Anforderung', icon: '🎯', color: '#53bdeb' },
-  task: { label: 'Teilaufgabe', icon: '▣', color: '#8696a0' },
-  continuation: { label: 'Fortsetzung', icon: '↪', color: '#c084fc' },
-  recovery: { label: 'Recovery', icon: '🧭', color: '#fb923c' },
-  review: { label: 'Prüfung', icon: '◆', color: '#00a884' },
+  request: { label: 'Anforderung', icon: 'target', color: 'var(--accent)' },
+  task: { label: 'Teilaufgabe', icon: 'plan', color: '#8696a0' },
+  continuation: { label: 'Fortsetzung', icon: 'transfer', color: '#c084fc' },
+  recovery: { label: 'Recovery', icon: 'workflow', color: '#fb923c' },
+  review: { label: 'Prüfung', icon: 'shield', color: 'var(--workflow-success)' },
 };
 const EDGE_STYLES = {
-  delegation: { color: '#647985', dash: '', label: 'Ablauf' },
-  dependency: { color: '#e6a23c', dash: '7 5', label: 'Abhängigkeit' },
-  review: { color: '#00a884', dash: '3 4', label: 'Abnahme' },
+  delegation: { color: 'var(--text-muted)', dash: '', label: 'Ablauf' },
+  dependency: { color: 'var(--workflow-warning)', dash: '7 5', label: 'Abhängigkeit' },
+  review: { color: 'var(--workflow-success)', dash: '3 4', label: 'Abnahme' },
   handoff: { color: '#c084fc', dash: '6 4', label: 'Übergabe' },
 };
 
-const WORKFLOW_WORKSPACE_TABS = new Set(['workflow', 'collaboration']);
+const WORKFLOW_WORKSPACE_TABS = new Set(['workflow', 'tests', 'collaboration']);
 const WORKFLOW_TAB_STORAGE_PREFIX = 'agent-teams:workflow-tab:';
+
+function acceptanceCriterionDraft(criteria = []) {
+  return criteria.map(criterion => {
+    const prefix = criterion.verification === 'automatic'
+      ? '[auto] '
+      : criterion.verification === 'user' ? '[user] ' : '[review] ';
+    return `${prefix}${criterion.text}`;
+  }).join('\n');
+}
+
+function parseAcceptanceCriterionDraft(value = '') {
+  return String(value).split('\n').map(line => line.trim()).filter(Boolean).map(line => {
+    const match = line.match(/^\[(auto|automatic|user|review|reviewer)\]\s*/i);
+    const token = match?.[1]?.toLowerCase();
+    return {
+      text: match ? line.slice(match[0].length).trim() : line,
+      verification: token === 'auto' || token === 'automatic'
+        ? 'automatic'
+        : token === 'user' ? 'user' : 'reviewer',
+      required: true,
+    };
+  }).filter(criterion => criterion.text);
+}
 
 function workflowTabStorageKey(chatId) {
   return `${WORKFLOW_TAB_STORAGE_PREFIX}${String(chatId || 'workflow').slice(0, 200)}`;
@@ -130,6 +164,13 @@ function GroupRequestBranch({ request, byParent, onRetry, visited = new Set() })
   const status = CROSS_GROUP_REQUEST_STATUS[request.status] || CROSS_GROUP_REQUEST_STATUS.queued;
   const color = groupRequestColor({ id: request.targetGroupId, name: request.targetGroupName });
   const steps = request.runtimePlan?.steps || [];
+  let displayAnswer = request.answer;
+  if (request.delegationReason === 'expertise-discovery' && request.answer) {
+    try {
+      const response = JSON.parse(request.answer);
+      displayAnswer = `${request.targetAgentName || t('Kein passender Experte bestätigt')}\n${response.reason || ''}`;
+    } catch { displayAnswer = t('Die Expertenantwort konnte nicht ausgewertet werden.'); }
+  }
   const expanded = !['answered', 'cancelled'].includes(request.status) || children.length > 0;
   return <div className="workflow-group-request-branch" style={{ '--group-request-color': color }}>
     <details className={`workflow-group-request ${request.status}`} defaultOpen={expanded}>
@@ -147,7 +188,7 @@ function GroupRequestBranch({ request, byParent, onRetry, visited = new Set() })
       </ol>}
       {request.answer && <section className="workflow-request-answer">
         <strong>✓ {t('Ergebnis')}</strong>
-        <p>{request.answer}</p>
+        <p>{displayAnswer}</p>
       </section>}
       {request.error && <div className="workflow-request-error" role="alert">⚠ {request.error}</div>}
     </details>
@@ -165,18 +206,102 @@ function GroupWorkView({ trees, onRetry }) {
   const problemCount = requests.filter(request => ['failed', 'timed_out', 'cancelled'].includes(request.status)).length;
   return <section className="workflow-collaboration-view" role="tabpanel" id="workflow-tabpanel-collaboration" aria-labelledby="workflow-tab-collaboration">
     <header className="workflow-collaboration-head">
-      <div><strong>⇄ {t('Gruppenarbeit')}</strong><span>{t('PM-Pläne, Agentenaufgaben und Unteranfragen werden hier vollständig dargestellt.')}</span></div>
+      <div><strong><Icon name="users" size={16} /> {t('Gruppenarbeit')}</strong><span>{t('PM-Pläne, Agentenaufgaben und Unteranfragen werden hier vollständig dargestellt.')}</span></div>
       <div className="workflow-collaboration-counts"><span className="active">● {activeCount} {t('aktiv')}</span><span className="done">✓ {completedCount} {t('beantwortet')}</span>{problemCount > 0 && <span className="error">⚠ {problemCount} {t('Probleme')}</span>}</div>
     </header>
-    {trees.length === 0 ? <div className="workflow-collaboration-empty"><span>⇄</span><strong>{t('Noch keine Gruppenarbeit')}</strong><p>{t('Sobald eine Aufgabe delegiert oder eine andere Gruppe befragt wird, erscheint der vollständige Ablauf hier.')}</p></div> : (
+    {trees.length === 0 ? <div className="workflow-collaboration-empty"><span><Icon name="users" size={24} /></span><strong>{t('Noch keine Gruppenarbeit')}</strong><p>{t('Sobald eine Aufgabe delegiert oder eine andere Gruppe befragt wird, erscheint der vollständige Ablauf hier.')}</p></div> : (
       <div className="workflow-collaboration-canvas">
         {trees.map(tree => <section className="workflow-collaboration-tree" key={tree.root.id}>
-          <header><span>{tree.root.kind === 'task_delegation' ? t('Delegierte Aufgabe') : t('Informationsanfrage')}</span><small>{new Date(tree.root.createdAt).toLocaleString()}</small></header>
+          <header><span>{tree.root.delegationReason === 'expertise-discovery' ? t('Expertensuche') : tree.root.kind === 'task_delegation' ? t('Delegierte Aufgabe') : t('Informationsanfrage')}</span><small>{new Date(tree.root.createdAt).toLocaleString()}</small></header>
           <GroupRequestBranch request={tree.root} byParent={tree.byParent} onRetry={onRetry} />
         </section>)}
       </div>
     )}
   </section>;
+}
+
+function AcceptanceTestView({ nodes, testConfigured, onRun, onDecisionRequest, questions, problems, onQuestion, onHelp, onRetry, onConfigure, onPreview, planning, onAcceptSuggestion }) {
+  const { t } = useI18n();
+  const tickets = (nodes || []).filter(node => (
+    inferTaskNodeType(node) !== 'request'
+  ));
+  const runnable = tickets.filter(node => (
+    ['agent_done', 'completed', 'retryable'].includes(node.status) &&
+    (node.acceptanceCriteria || []).some(criterion => criterion.verification === 'automatic' && !['passed', 'waived'].includes(criterion.status))
+  ));
+  const states = { decision: 'Deine Prüfung erforderlich', failed: 'Nachbesserung erforderlich', unavailable: 'Automatische Prüfung nicht verfügbar', running: 'Prüfung läuft', automatic: 'Automatische Prüfung ausstehend', review: 'Fachliche Prüfung ausstehend', waiting: 'Wartet auf Aufgabenabschluss', done: 'Vollständig geprüft' };
+  const order = Object.keys(states);
+  const sortedTickets = [...tickets].sort((a, b) => order.indexOf(acceptanceTaskState(a)) - order.indexOf(acceptanceTaskState(b)));
+  const count = state => tickets.filter(node => acceptanceTaskState(node) === state).length;
+  const pending = tickets.filter(node => !['waiting', 'done'].includes(acceptanceTaskState(node))).length;
+  return <section className="workflow-test-view" role="tabpanel" id="workflow-tabpanel-tests" aria-labelledby="workflow-tab-tests">
+    <header className="workflow-test-head">
+      <div><strong><Icon name="test" size={16} /> {t('Prüfungen & Abnahme')}</strong><span>{t('Automatische Prüfungen starten nach dem Aufgabenabschluss. Manuelle Freigaben und fachliche Prüfungen werden separat angezeigt.')}</span></div>
+      <button type="button" disabled={!testConfigured || runnable.length === 0 || tickets.some(node => acceptanceTaskState(node) === 'running')} onClick={() => onRun?.(runnable.map(node => node.id))}>▶ {t('Offene Tests starten')}</button>
+    </header>
+    <div className="workflow-test-summary" role="status">
+      <strong>{pending ? t('{count} Aufgaben benötigen eine Prüfung', { count: pending }) : t('Aktuell keine Aufgaben zur Prüfung offen')}</strong>
+      <span>{t('Deine Freigabe: {user} · Läuft: {running} · Wartet auf Abschluss: {waiting} · Geprüft: {done}', { user: count('decision'), running: count('running'), waiting: count('waiting'), done: count('done') })}</span>
+    </div>
+    {!testConfigured && <div className="workflow-test-notice">⚠ {t('Kein automatischer Prüfbefehl konfiguriert. Manuelle und fachliche Abnahmen bleiben verfügbar.')} <button type="button" className="btn btn-secondary" onClick={onConfigure}>{t('Prüfbefehl einrichten')}</button></div>}
+    {tickets.length === 0 ? <div className="workflow-collaboration-empty"><span><Icon name="test" size={24} /></span><strong>{t('Noch keine Aufgaben vorhanden')}</strong><p>{t('Sobald der PM Aufgaben erstellt, siehst du hier deren Prüfstatus.')}</p></div> : (
+      <div className="workflow-test-grid">{sortedTickets.map(node => {
+        const state = acceptanceTaskState(node);
+        const question = questions.get(node.id);
+        const problem = problems.get(node.id);
+        const needsHelp = !!problem || ['failed', 'unavailable'].includes(state) || RECOVERABLE_STATUSES.has(node.status);
+        const latestRun = (node.acceptanceTestRuns || []).at(-1);
+        const autoCriteria = (node.acceptanceCriteria || []).filter(criterion => criterion.verification === 'automatic');
+        const canRun = ['agent_done', 'completed', 'retryable'].includes(node.status) && autoCriteria.some(criterion => !['passed', 'waived'].includes(criterion.status));
+        return <article className={`workflow-test-card ${state}`} key={node.id}>
+          <header><div><small>{ticketIdForTask(node)}</small><strong>{node.title}</strong></div><span>{t(states[state])}</span></header>
+          {!(node.acceptanceCriteria || []).length && <p className="workflow-test-notice">{t('Keine Prüfkriterien definiert. Nach dem Aufgabenabschluss ist eine manuelle Gesamtfreigabe erforderlich.')}</p>}
+          <ul>{(node.acceptanceCriteria || []).map(criterion => <li key={criterion.id}><i style={{ background: (ACCEPTANCE_STATUS[criterion.status] || ACCEPTANCE_STATUS.open).color }} /><span>{criterion.text}<small>{t(criterion.verification === 'automatic' ? 'Automatisch' : criterion.verification === 'user' ? 'User-Freigabe' : 'Fachliche Prüfung')} · {t((ACCEPTANCE_STATUS[criterion.status] || ACCEPTANCE_STATUS.open).label)}</small></span>{['agent_done', 'completed', 'retryable', 'blocked'].includes(node.status) && !['passed', 'waived'].includes(criterion.status) && <button type="button" onClick={() => onDecisionRequest?.(node, criterion)}>{criterion.verification === 'user' ? t('Prüfen') : t('Ausnahme')}</button>}</li>)}</ul>
+          {(question || needsHelp) && <div className="workflow-test-help">
+            <strong>{t(question ? 'Deine Antwort wird benötigt' : 'Nächster Schritt')}</strong>
+            <p>{question?.question || problem?.message || t(state === 'unavailable' ? 'Prüfe die Konfiguration oder starte den Test erneut. Falls die Aufgabe selbst fehlerhaft ist, kannst du eine Nachbesserung beauftragen.' : 'Beschreibe, was korrigiert werden soll. Der PM koordiniert die Nachbesserung; anschließend wird erneut geprüft.')}</p>
+            <div>
+              {problem?.suggestion && <button type="button" className="btn btn-primary" onClick={() => onAcceptSuggestion(node, problem.suggestion, problem)}>{t('Vorschlag übernehmen')}</button>}
+              {question && <button type="button" className="btn btn-primary" onClick={() => onQuestion(node.id)}>{t('Rückfrage beantworten')}</button>}
+              {needsHelp && !question && state !== 'unavailable' && <button type="button" className="btn btn-primary" onClick={() => onHelp(node, problem)}>{t('Problem lösen')}</button>}
+              {state === 'unavailable' && <button type="button" className="btn btn-secondary" onClick={onConfigure}>{t('Prüfkonfiguration öffnen')}</button>}
+              {RECOVERABLE_STATUSES.has(node.status) && !planning && !question && <button type="button" className="btn btn-secondary" onClick={() => onRetry(node.id)}>{t('Aufgabe erneut versuchen')}</button>}
+            </div>
+          </div>}
+          {['decision', 'review', 'failed'].includes(state) && <button type="button" className="btn btn-secondary" onClick={onPreview}>{t('Ergebnis / Vorschau öffnen')}</button>}
+          {latestRun?.error && <p className="workflow-test-error">{latestRun.error}</p>}
+          {latestRun?.output && <details><summary>{t('Letzte Testausgabe')}</summary><pre>{latestRun.output}</pre></details>}
+          {autoCriteria.length > 0 && <button type="button" disabled={!testConfigured || !canRun || latestRun?.status === 'running'} onClick={() => onRun?.([node.id])}>↻ {t(latestRun ? 'Tests erneut starten' : 'Tests starten')}</button>}
+        </article>;
+      })}</div>
+    )}
+  </section>;
+}
+
+function ManualAcceptanceDialog({ request, running, onSubmit, onClose }) {
+  const { t } = useI18n();
+  const [note, setNote] = useState('');
+  if (!request) return null;
+  const userCriterion = request.criterion.verification === 'user';
+  const submit = status => {
+    const normalized = note.trim();
+    if (!normalized) return;
+    onSubmit?.(status, normalized);
+  };
+  return <div className="workflow-question-overlay" role="presentation" onPointerDown={event => { if (event.target === event.currentTarget) onClose?.(); }}>
+    <section className="workflow-question-dialog workflow-acceptance-dialog" role="dialog" aria-modal="true" aria-labelledby="workflow-acceptance-title">
+      <header className="workflow-question-dialog-head"><div><span><Icon name="shield" /></span><div><strong id="workflow-acceptance-title">{t(userCriterion ? 'Manuelle Abnahme' : 'Begründete Ausnahmefreigabe')}</strong><small>{request.node.title}</small></div></div><button type="button" onClick={onClose} aria-label={t('Schließen')}>×</button></header>
+      <p>{request.criterion.text}</p>
+      <label htmlFor="workflow-acceptance-note">{t('Begründung / Prüfnachweis')}</label>
+      <textarea id="workflow-acceptance-note" autoFocus value={note} onChange={event => setNote(event.target.value)} placeholder={t('Was wurde geprüft und warum wird so entschieden?')} />
+      <div className="workflow-question-dialog-actions">
+        <button type="button" onClick={onClose}>{t('Abbrechen')}</button>
+        <button type="button" disabled={running || !note.trim()} onClick={() => submit('failed')}>✕ {t('Nicht bestanden')}</button>
+        {!userCriterion && <button type="button" className="waive" disabled={running || !note.trim()} onClick={() => submit('waived')}>⚠ {t('Ausnahme freigeben')}</button>}
+        {userCriterion && <button type="button" className="answer" disabled={running || !note.trim()} onClick={() => submit('passed')}>✓ {t('Freigeben')}</button>}
+      </div>
+    </section>
+  </div>;
 }
 
 function workflowConnectionPreviewPath(from, to) {
@@ -269,7 +394,7 @@ function WorkflowImportDialog({ draft, agentOptions, running, onMappingChange, o
   return <div className="workflow-import-overlay" onPointerDown={event => event.target === event.currentTarget && onClose?.()}>
     <section className="workflow-import-dialog" role="dialog" aria-modal="true" aria-labelledby="workflow-import-title">
       <header>
-        <div><span aria-hidden="true">⇧</span><div><strong id="workflow-import-title">{t('Workflow-Zuordnung prüfen')}</strong><small>{draft.fileName}</small></div></div>
+        <div><Icon name="transfer" size={16} /><div><strong id="workflow-import-title">{t('Workflow-Zuordnung prüfen')}</strong><small>{draft.fileName}</small></div></div>
         <button type="button" onClick={onClose} title={t('Import schließen')}>×</button>
       </header>
       <div className="workflow-import-summary">
@@ -290,7 +415,7 @@ function WorkflowImportDialog({ draft, agentOptions, running, onMappingChange, o
             onChange={event => onMappingChange?.(slot.id, event.target.value)}
           >
             <option value="">{t('Agent auswählen…')}</option>
-            {agentOptions.map(agent => <option key={agent.id} value={agent.id}>{agent.emoji || '🤖'} {agent.name}{agent.role ? ` · ${agent.role}` : ''}</option>)}
+            {agentOptions.map(agent => <option key={agent.id} value={agent.id}>{agent.name}{agent.role ? ` · ${agent.role}` : ''}</option>)}
           </select>
         </label>)}
       </div>
@@ -305,12 +430,14 @@ function WorkflowImportDialog({ draft, agentOptions, running, onMappingChange, o
   </div>;
 }
 
-function FlowNode({ node, position, graph, movable, selected, modelConfig, change, validationHighlighted, workflowProblem, active, pendingQuestion, groupRequests = [], connectionEnabled, connectionSource, connectionTargetState, onSelect, onQuestionOpen, onProblemOpen, onTimeoutRepair, onDragStart, onDragMove, onDragEnd, onConnectionStart, onConnectionMove, onConnectionEnd }) {
+function FlowNode({ node, position, graph, movable, selected, modelConfig, change, validationHighlighted, workflowProblem, active, pendingQuestion, groupRequests = [], connectionEnabled, connectionSource, connectionTargetState, onSelect, onQuestionOpen, onProblemOpen, onTimeoutRepair, onPauseTask, onResumeTask, onDragStart, onDragMove, onDragEnd, onConnectionStart, onConnectionMove, onConnectionEnd }) {
   const { t } = useI18n();
   const status = TASK_STATUS[node.status] || TASK_STATUS.planned;
   const completed = ['agent_done', 'completed'].includes(node.status);
   const recovering = Boolean(node.recoveryStatus);
   const timedOut = node.status === 'timed_out';
+  const staleDependency = node.status === 'stale_dependency';
+  const repairable = RECOVERABLE_STATUSES.has(node.status);
   const prepared = node.status === 'prepared';
   const waitingForGroup = node.status === 'waiting_group';
   const waitingForRecoveryDecision = node.recoveryStatus === 'user';
@@ -342,7 +469,7 @@ function FlowNode({ node, position, graph, movable, selected, modelConfig, chang
 
   return (
     <article
-      className={`workflow-node ${selected ? 'selected' : ''} ${ready ? 'ready' : 'waiting'} ${completed ? 'completed' : ''} ${prepared ? 'prepared' : ''} ${working ? 'working' : ''} ${timedOut ? 'timed-out' : ''} ${waitingForGroup ? 'cross-group-waiting' : ''} ${pendingQuestion || waitingForRecoveryDecision ? 'has-question' : ''} ${change ? 'change-highlight' : ''} ${validationHighlighted ? 'validation-highlight' : ''} ${connectionSource ? 'connection-source' : ''} ${connectionTargetState ? `connection-target-${connectionTargetState}` : ''}`}
+      className={`workflow-node ${selected ? 'selected' : ''} ${ready ? 'ready' : 'waiting'} ${completed ? 'completed' : ''} ${prepared ? 'prepared' : ''} ${working ? 'working' : ''} ${timedOut ? 'timed-out' : ''} ${staleDependency ? 'stale-dependency' : ''} ${waitingForGroup ? 'cross-group-waiting' : ''} ${pendingQuestion || waitingForRecoveryDecision ? 'has-question' : ''} ${change ? 'change-highlight' : ''} ${validationHighlighted ? 'validation-highlight' : ''} ${connectionSource ? 'connection-source' : ''} ${connectionTargetState ? `connection-target-${connectionTargetState}` : ''}`}
       data-workflow-node={node.id}
       data-workflow-endpoint={node.id}
       aria-busy={working}
@@ -385,7 +512,8 @@ function FlowNode({ node, position, graph, movable, selected, modelConfig, chang
         />
       )}
       <div className="workflow-node-head">
-        <span style={{ color: nodeType.color }}>{nodeType.icon} {t(nodeType.label)}</span>
+        <span style={{ color: nodeType.color }}><Icon name={nodeType.icon} size={14} /> {t(nodeType.label)}</span>
+        {typeName !== 'request' && <span className={`workflow-ticket-priority ${node.priority || 'medium'}`} title={t('Ticket-Priorität')}>{t(TICKET_PRIORITY[node.priority]?.label || TICKET_PRIORITY.medium.label)}</span>}
         {change && <span className="workflow-change-badge">{t(change.type === 'added' ? 'Neu' : 'Änderung')}</span>}
         {validationHighlighted && <span className="workflow-validation-badge">⚠ {t('Problem')}</span>}
         {recovering && <span className="workflow-recovery-badge">🧭 {t('PM-Recovery')}</span>}
@@ -397,12 +525,21 @@ function FlowNode({ node, position, graph, movable, selected, modelConfig, chang
           {recovering
             ? t(recoveryStatusText)
             : prepared && !ready ? t('Vorbereitet · wartet') : !ready && PLANNABLE_STATUSES.has(node.status) ? t('wartet') : t(status.label)}
-          {timedOut && !recovering && !active && (
+          {graph?.approvedPlan && (canPauseTask(node) || ['paused', 'pausing'].includes(node.status)) && (
+            <button type="button" className="workflow-timeout-fix-button"
+              disabled={node.status === 'pausing'}
+              title={t(node.status === 'paused' ? 'Aufgabe fortsetzen' : 'Aufgabe pausieren')}
+              aria-label={t(node.status === 'paused' ? 'Aufgabe fortsetzen' : 'Aufgabe pausieren')}
+              onPointerDown={event => event.stopPropagation()}
+              onClick={event => { event.stopPropagation(); if (node.status === 'paused') onResumeTask?.(node.id); else onPauseTask?.(node.id); }}
+            ><Icon name={node.status === 'paused' ? 'play' : 'pause'} size={14} /></button>
+          )}
+          {repairable && !recovering && !active && (
             <button
               type="button"
               className="workflow-timeout-fix-button"
-              title={t('Workflow-Fixer für diese Timeout-Aufgabe starten')}
-              aria-label={t('Workflow-Fixer für diese Timeout-Aufgabe starten')}
+              title={t('PM-Recovery für diese Aufgabe starten')}
+              aria-label={t('PM-Recovery für diese Aufgabe starten')}
               onPointerDown={event => event.stopPropagation()}
               onClick={event => {
                 event.stopPropagation();
@@ -431,7 +568,7 @@ function FlowNode({ node, position, graph, movable, selected, modelConfig, chang
         {executionEntry?.compliant != null && <span className={executionEntry.compliant ? 'workflow-compliant' : 'workflow-deviation'} title={t(executionEntry.compliant ? 'Planmäßig ausgeführt' : 'Abweichung vom freigegebenen Plan')}>{executionEntry.compliant ? '✓ Plan' : '⚠ Plan'}</span>}
       </div>
       {pendingQuestion && <button type="button" className="workflow-question-badge" title={t('Rückfrage von {agent}', { agent: pendingQuestion.agentName || node.agentName || 'Agent' })} aria-label={t('Rückfrage öffnen')} onPointerDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); onQuestionOpen(node.id); }}>?</button>}
-      {workflowProblem && !pendingQuestion && <button type="button" className="workflow-problem-badge" title={t('Workflow-Problem lösen')} aria-label={t('Workflow-Problem öffnen')} onPointerDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); onProblemOpen(node.id); }}>!</button>}
+      {workflowProblem && <button type="button" className={`workflow-problem-badge ${pendingQuestion ? 'beside-question' : ''}`} title={t('Workflow-Problem lösen')} aria-label={t('Workflow-Problem öffnen')} onPointerDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); onProblemOpen(node.id); }}>!</button>}
       {completed && <span className="workflow-completed-check" title={t('Aufgabe erledigt')} aria-label={t('Aufgabe erledigt')}>✓</span>}
     </article>
   );
@@ -484,12 +621,12 @@ function FlowPoint({ point, position, movable, selected, connectionEnabled, conn
   );
 }
 
-function WorkflowDetails({ node, graph, planning, collapsed, pinned, modelConfig, agentOptions, delegationEnabled, groupOptions, groupRequests = [], problems = [], problemSuggestions = [], change, baselineRevision, onTaskUpdate, onTaskDelete, onTaskSplit, onTaskMove, onAgentChange, onModelChange, onDependencyAdd, onDependencyRemove, onAcceptanceCriteriaChange, onAcceptanceDecision, onRetryTask, onToggleCollapsed, onTogglePinned, onClose }) {
+function WorkflowDetails({ node, graph, planning, collapsed, pinned, modelConfig, agentOptions, delegationEnabled, groupOptions, groupRequests = [], problems = [], problemSuggestions = [], change, baselineRevision, onTaskUpdate, onTaskDelete, onTaskSplit, onTaskMove, onAgentChange, onModelChange, onDependencyAdd, onDependencyRemove, onAcceptanceCriteriaChange, onAcceptanceDecisionRequest, onRetryTask, onToggleCollapsed, onTogglePinned, onClose, onAcceptSuggestion }) {
   const { t } = useI18n();
   const [dependencyDraft, setDependencyDraft] = useState('');
   const [titleDraft, setTitleDraft] = useState(node.title || '');
   const [objectiveDraft, setObjectiveDraft] = useState(node.objective || node.title || '');
-  const [criteriaDraft, setCriteriaDraft] = useState((node.acceptanceCriteria || []).map(criterion => criterion.text).join('\n'));
+  const [criteriaDraft, setCriteriaDraft] = useState(acceptanceCriterionDraft(node.acceptanceCriteria || []));
   const [capabilitiesDraft, setCapabilitiesDraft] = useState(normalizeDelegationPolicy(node.delegation).requiredCapabilities.join('\n'));
   const typeName = inferTaskNodeType(node);
   const delegation = normalizeDelegationPolicy(node.delegation);
@@ -513,7 +650,7 @@ function WorkflowDetails({ node, graph, planning, collapsed, pinned, modelConfig
     setDependencyDraft('');
     setTitleDraft(node.title || '');
     setObjectiveDraft(node.objective || node.title || '');
-    setCriteriaDraft((node.acceptanceCriteria || []).map(criterion => criterion.text).join('\n'));
+    setCriteriaDraft(acceptanceCriterionDraft(node.acceptanceCriteria || []));
     setCapabilitiesDraft(normalizeDelegationPolicy(node.delegation).requiredCapabilities.join('\n'));
   }, [node]);
 
@@ -534,7 +671,7 @@ function WorkflowDetails({ node, graph, planning, collapsed, pinned, modelConfig
           <ul>{problems.map((problem, index) => <li key={`${problem}-${index}`}>{problem}</li>)}</ul>
           {problemSuggestions.length > 0 && <div className="workflow-problem-suggestions">
             <strong>{t('Mögliche Lösung')}</strong>
-            <ul>{problemSuggestions.map((suggestion, index) => <li key={`${suggestion}-${index}`}>{suggestion}</li>)}</ul>
+            <ul>{problemSuggestions.map((suggestion, index) => <li key={`${suggestion}-${index}`}>{suggestion}<button type="button" className="btn btn-secondary" onClick={() => onAcceptSuggestion(node, suggestion)}>{t('Vorschlag übernehmen')}</button></li>)}</ul>
           </div>}
         </section>}
         {change && (
@@ -548,18 +685,28 @@ function WorkflowDetails({ node, graph, planning, collapsed, pinned, modelConfig
             ))}
           </section>
         )}
+        {typeName !== 'request' && <section>
+          <label>{t('Ticket')}</label>
+          <div className="workflow-detail-value workflow-ticket-id">#{ticketIdForTask(node)}</div>
+        </section>}
         <section>
           <label>{t('Aufgabe')}</label>
           {taskEditable ? <input className="form-input" value={titleDraft} onChange={event => setTitleDraft(event.target.value)} onBlur={() => onTaskUpdate?.(node.id, { title: titleDraft })} /> : <div className="workflow-detail-value">{node.title}</div>}
         </section>
         {taskEditable && <section><label>{t('Aufgabentyp')}</label><select className="form-select" value={typeName === 'review' ? 'review' : 'task'} onChange={event => onTaskUpdate?.(node.id, { nodeType: event.target.value })}><option value="task">{t('Fachaufgabe')}</option><option value="review">{t('Prüfung')}</option></select></section>}
+        {typeName !== 'request' && <section>
+          <label>{t('Priorität')}</label>
+          {taskEditable ? <select className="form-select" value={node.priority || 'medium'} onChange={event => onTaskUpdate?.(node.id, { priority: event.target.value })}>
+            {Object.entries(TICKET_PRIORITY).map(([value, config]) => <option key={value} value={value}>{t(config.label)}</option>)}
+          </select> : <div className="workflow-detail-value"><span className={`workflow-ticket-priority ${node.priority || 'medium'}`}>{t(TICKET_PRIORITY[node.priority]?.label || TICKET_PRIORITY.medium.label)}</span></div>}
+        </section>}
         <section>
           <label>{t('Ziel und erwartetes Ergebnis')}</label>
           {taskEditable ? <textarea className="form-textarea" rows={3} value={objectiveDraft} onChange={event => setObjectiveDraft(event.target.value)} onBlur={() => onTaskUpdate?.(node.id, { objective: objectiveDraft })} /> : <div className="workflow-detail-value">{node.objective || node.title}</div>}
         </section>
         {(node.interimResult || node.preparationError) && <section className="workflow-interim-details">
           <label>◫ {t('Zwischengespeicherter Arbeitsstand')}</label>
-          {node.interimResult && <div className="workflow-detail-value workflow-interim-result">{node.interimResult}</div>}
+          {node.interimResult && <MarkdownMessage className="workflow-detail-value workflow-interim-result">{node.interimResult}</MarkdownMessage>}
           {node.preparedFiles?.length > 0 && <small>{t('Zwischengespeicherte Dateientwürfe')}: {node.preparedFiles.join(', ')}</small>}
           {node.preparationError && <div className="workflow-detail-empty">⚠ {t('Vorbereitung nicht möglich')}: {node.preparationError}</div>}
           {node.interimConsumedAt && <small>✓ {t('Der Zwischenstand wurde in der Hauptausführung berücksichtigt.')}</small>}
@@ -575,15 +722,23 @@ function WorkflowDetails({ node, graph, planning, collapsed, pinned, modelConfig
             </div>;
           })}
         </section>}
+        {node.recoveryNotes?.length > 0 && <section className="workflow-recovery-details">
+          <label>📝 {t('Problem- und Recovery-Protokoll')}</label>
+          {[...node.recoveryNotes].reverse().map(note => <div className="workflow-recovery-step" key={note.id}>
+            <strong>{note.mode === 'plan-revision' ? t('Planrevision') : t('Ausführungs-Recovery')} · {note.author}</strong>
+            {note.problem && <span>{note.problem}</span>}
+            {note.text && <small>{note.text}</small>}
+          </div>)}
+        </section>}
         {groupRequests.length > 0 && <section className="workflow-task-group-results">
-          <label>⇄ {t('Gruppenarbeit und Ergebnisse')}</label>
+          <label><Icon name="users" size={16} /> {t('Gruppenarbeit und Ergebnisse')}</label>
           <div className="workflow-task-group-result-list">
             {groupRequests.map(request => {
               const requestStatus = CROSS_GROUP_REQUEST_STATUS[request.status] || CROSS_GROUP_REQUEST_STATUS.queued;
               const result = request.answer || request.interimReply || request.error || '';
               return <article key={request.id} className={request.status}>
                 <header><strong>{request.targetGroupEmoji || '💬'} {request.targetGroupName}</strong><small style={{ color: requestStatus.color }}>● {t(requestStatus.label)}</small></header>
-                <p>{result || t('Die Zielgruppe bearbeitet die Anfrage noch.')}</p>
+                <MarkdownMessage className="workflow-agent-result">{result || t('Die Zielgruppe bearbeitet die Anfrage noch.')}</MarkdownMessage>
                 {request.answeredByAgentName && <footer>{t('Beantwortet von {agent}', { agent: request.answeredByAgentName })}</footer>}
               </article>;
             })}
@@ -593,7 +748,7 @@ function WorkflowDetails({ node, graph, planning, collapsed, pinned, modelConfig
           <label>{t('Zuständiger Agent')}</label>
           {planning && typeName !== 'request' ? (
             <select className="form-select" value={node.agentId || ''} onChange={event => onAgentChange?.(node.id, event.target.value)}>
-              {agentOptions.map(agent => <option key={agent.id} value={agent.id}>{agent.emoji || '🤖'} {agent.name} · {agent.role}</option>)}
+              {agentOptions.map(agent => <option key={agent.id} value={agent.id}>{agent.name} · {agent.role}</option>)}
             </select>
           ) : <div className="workflow-detail-value">👤 {node.agentName || 'System'}</div>}
         </section>
@@ -605,8 +760,20 @@ function WorkflowDetails({ node, graph, planning, collapsed, pinned, modelConfig
             </select>
           ) : <div className="workflow-detail-value">🧠 {modelConfig?.currentModel || node.model || '–'}</div>}
         </section>
+        {node.lastRunMetrics && <section>
+          <label>⏱ {t('Letzte Codex-Laufzeit')}</label>
+          <div className="workflow-detail-value">
+            {t('Gesamt')}: {((node.lastRunMetrics.totalMs || 0) / 1000).toFixed(1)} s
+            {Number.isFinite(node.lastRunMetrics.firstEventMs) && <> · {t('Erste Aktivität')}: {(node.lastRunMetrics.firstEventMs / 1000).toFixed(1)} s</>}
+            {Number.isFinite(node.lastRunMetrics.firstTextMs) && <> · {t('Erster Text')}: {(node.lastRunMetrics.firstTextMs / 1000).toFixed(1)} s</>}
+            <br />
+            {t('Denktiefe')}: {node.lastRunMetrics.reasoningEffort || 'medium'}
+            {node.lastRunMetrics.resumed ? ` · ${t('Sitzung fortgesetzt')}` : ` · ${t('Neue Sitzung')}`}
+            {node.lastRunMetrics.promptCharacters ? ` · ${Math.round(node.lastRunMetrics.promptCharacters / 100) / 10}k ${t('Zeichen')}` : ''}
+          </div>
+        </section>}
         {typeName === 'task' && <section className="workflow-delegation-config">
-          <label>⇄ {t('Gruppenübergreifende Aufgabendelegation')}</label>
+          <label><Icon name="users" size={16} /> {t('Gruppenübergreifende Aufgabendelegation')}</label>
           {!delegationEnabled && <div className="workflow-detail-empty">{t('In den Gruppeneinstellungen ist die gruppenübergreifende Zusammenarbeit ausgeschaltet.')}</div>}
           {taskEditable ? <>
             <select className="form-select" disabled={!delegationEnabled} value={delegation.mode} onChange={event => onTaskUpdate?.(node.id, { delegation: { ...delegation, mode: event.target.value } })}>
@@ -624,7 +791,7 @@ function WorkflowDetails({ node, graph, planning, collapsed, pinned, modelConfig
                   ? [...delegation.allowedTargetGroupIds, group.id]
                   : delegation.allowedTargetGroupIds.filter(id => id !== group.id);
                 onTaskUpdate?.(node.id, { delegation: { ...delegation, allowedTargetGroupIds } });
-              }} /> {group.emoji || '💬'} {group.name}</label>)}
+              }} /> <EntityIcon value={group.emoji} group size={18} /> {group.name}</label>)}
             </div>}
           </> : <div className="workflow-detail-value">{delegation.mode === 'never'
             ? t('Nicht erlaubt')
@@ -663,7 +830,7 @@ function WorkflowDetails({ node, graph, planning, collapsed, pinned, modelConfig
         </section>
         <section>
           <label>🛡️ {t('Abnahmekriterien')}</label>
-          {taskEditable && <textarea className="form-textarea" rows={4} value={criteriaDraft} onChange={event => setCriteriaDraft(event.target.value)} onBlur={() => onAcceptanceCriteriaChange?.(node.id, criteriaDraft.split('\n').map(value => value.trim()).filter(Boolean))} placeholder={t('Ein Kriterium pro Zeile')} />}
+          {taskEditable && <><textarea className="form-textarea" rows={4} value={criteriaDraft} onChange={event => setCriteriaDraft(event.target.value)} onBlur={() => onAcceptanceCriteriaChange?.(node.id, parseAcceptanceCriterionDraft(criteriaDraft))} placeholder={t('[review], [auto] oder [user] · ein Kriterium pro Zeile')} /><small className="workflow-field-help">{t('[auto] nutzt den konfigurierten Prüfbefehl; [review] einen Prüfer; [user] deine manuelle Freigabe.')}</small></>}
           {!node.acceptanceCriteria?.length && <div className="workflow-detail-empty">{t('Keine Abnahmekriterien')}</div>}
           {!taskEditable && (node.acceptanceCriteria || []).map(criterion => {
             const criterionStatus = ACCEPTANCE_STATUS[criterion.status] || ACCEPTANCE_STATUS.open;
@@ -673,10 +840,9 @@ function WorkflowDetails({ node, graph, planning, collapsed, pinned, modelConfig
                 <div><i style={{ background: criterionStatus.color }} /><span>{criterion.text}</span></div>
                 <small style={{ color: criterionStatus.color }}>{t(criterionStatus.label)}</small>
                 {latestEvidence && <p>📎 {latestEvidence.author}: {latestEvidence.summary}</p>}
-                {criterion.verification === 'user' && ['agent_done', 'completed'].includes(node.status) && onAcceptanceDecision && (
+                {['agent_done', 'completed', 'retryable', 'blocked'].includes(node.status) && !['passed', 'waived'].includes(criterion.status) && onAcceptanceDecisionRequest && (
                   <div className="workflow-criterion-actions">
-                    <button type="button" onClick={() => onAcceptanceDecision(node.id, criterion.id, 'passed')}>✓ {t('Bestätigen')}</button>
-                    <button type="button" onClick={() => onAcceptanceDecision(node.id, criterion.id, 'failed')}>✕ {t('Ablehnen')}</button>
+                    <button type="button" onClick={() => onAcceptanceDecisionRequest(node, criterion)}>{criterion.verification === 'user' ? `🛡 ${t('Manuell prüfen')}` : `⚠ ${t('Ausnahme prüfen')}`}</button>
                   </div>
                 )}
               </div>
@@ -690,7 +856,7 @@ function WorkflowDetails({ node, graph, planning, collapsed, pinned, modelConfig
   );
 }
 
-export default function TaskGraphPanel({ graph, running, activeTaskIds = [], pendingQuestions = [], pendingDelegations = [], groupRequests = [], workflowProblems = [], delegationEnabled = false, groupOptions = [], resumeMode = false, canResumeWorkflow = false, resumeRetrySeconds = 0, canUndo = false, canDeleteWorkflow, workflowImport = null, workflowFileStatus = {}, awaitingSchedule, structureEditable = awaitingSchedule, canEditWorkflow = false, nodesMovable = true, preflightError = '', preflightTaskIds = [], onRestoreSnapshot, onUndo, onDeleteWorkflow, onWorkflowImport, onWorkflowExport, onWorkflowImportMapping, onWorkflowImportApply, onWorkflowImportCancel, onWorkflowFileStatusClear, onQuestionAnswer, onProblemResolve, onPauseWorkflow, onResumeWorkflow, onEditWorkflow, onRetryTask, onTimeoutRepair, onGroupRequestRetry, onDelegationDecision, onStartWorkflow, onTaskAdd, onTaskUpdate, onTaskDelete, onTaskSplit, onTaskMove, onFlowPointAdd, onFlowPointDelete, onAcceptanceDecision, modelOptionsByTask = {}, agentOptions = [], onAgentChange, onModelChange, onDependencyAdd, onDependencyRemove, onAcceptanceCriteriaChange, onNodePositionChange, onResetLayout, dragHandleProps = null }) {
+export default function TaskGraphPanel({ graph, running, activeTaskIds = [], pendingQuestions = [], pendingDelegations = [], groupRequests = [], workflowProblems = [], expertiseHelp = [], onSearchExpert, onCreateExpert, onAssignExpert, onConfigureExpertGroups, delegationEnabled = false, groupOptions = [], testConfigured = false, resumeMode = false, canResumeWorkflow = false, resumeRetrySeconds = 0, canUndo = false, canDeleteWorkflow, workflowImport = null, workflowFileStatus = {}, awaitingSchedule, structureEditable = awaitingSchedule, canEditWorkflow = false, nodesMovable = true, preflightError = '', preflightTaskIds = [], onRestoreSnapshot, onUndo, onDeleteWorkflow, onWorkflowImport, onWorkflowExport, onWorkflowImportMapping, onWorkflowImportApply, onWorkflowImportCancel, onWorkflowFileStatusClear, onQuestionAnswer, onProblemResolve, onPauseWorkflow, onPauseTask, onResumeTask, onResumeWorkflow, onEditWorkflow, onRetryTask, onTimeoutRepair, onGroupRequestRetry, onDelegationDecision, onStartWorkflow, onTaskAdd, onTaskUpdate, onTaskDelete, onTaskSplit, onTaskMove, onFlowPointAdd, onFlowPointDelete, onRunAcceptanceTests, onAcceptanceDecision, onConfigureTests, onOpenPreview, modelOptionsByTask = {}, agentOptions = [], onAgentChange, onModelChange, onDependencyAdd, onDependencyRemove, onAcceptanceCriteriaChange, onNodePositionChange, onResetLayout, dragHandleProps = null }) {
   const { t } = useI18n();
   const canvasRef = useRef(null);
   const stageRef = useRef(null);
@@ -716,6 +882,8 @@ export default function TaskGraphPanel({ graph, running, activeTaskIds = [], pen
   const [inspectionReport, setInspectionReport] = useState(null);
   const [openQuestionTaskId, setOpenQuestionTaskId] = useState(null);
   const [openProblemTaskId, setOpenProblemTaskId] = useState(null);
+  const [acceptanceProblem, setAcceptanceProblem] = useState(null);
+  const [acceptanceDecisionRequest, setAcceptanceDecisionRequest] = useState(null);
   const [delegationTargets, setDelegationTargets] = useState({});
   const [activeWorkspaceTab, setActiveWorkspaceTab] = useState(() => readWorkflowWorkspaceTab(graph?.chatId || 'workflow'));
   const layout = useMemo(() => buildWorkflowLayout(graph), [graph]);
@@ -735,6 +903,7 @@ export default function TaskGraphPanel({ graph, running, activeTaskIds = [], pen
   const activeCount = nodes.filter(node => ['running', 'waiting_user', 'waiting_group', 'delegation_pending'].includes(node.status) || node.recoveryStatus).length;
   const openCount = Math.max(0, nodes.length - completedCount - activeCount);
   const acceptance = useMemo(() => summarizeAcceptance(graph), [graph]);
+  const attention = workflowAttention(nodes, groupRequests, pendingDelegations);
   const changeSet = useMemo(() => buildWorkflowChangeSet(graph), [graph]);
   const displayedEdges = useMemo(() => [
     ...(graph?.edges || []).map(edge => ({ edge, change: changeSet.edgeChanges[`${edge.kind || 'delegation'}:${edge.from || ''}->${edge.to || ''}`] || null })),
@@ -1225,7 +1394,7 @@ export default function TaskGraphPanel({ graph, running, activeTaskIds = [], pen
     persistWorkflowWorkspaceTab(chatId, nextTab);
   };
   const handleWorkspaceTabKeyDown = event => {
-    const order = ['workflow', 'collaboration'];
+    const order = ['workflow', 'tests', 'collaboration'];
     const currentIndex = order.indexOf(activeWorkspaceTab);
     let nextTab = '';
     if (event.key === 'ArrowRight') nextTab = order[(currentIndex + 1) % order.length];
@@ -1239,25 +1408,29 @@ export default function TaskGraphPanel({ graph, running, activeTaskIds = [], pen
     window.requestAnimationFrame(() => tabList?.querySelector(`[data-workflow-tab="${nextTab}"]`)?.focus());
   };
 
+  const acceptSuggestion = (node, suggestion, existingProblem = null) => {
+    const text = String(suggestion || '').trim();
+    if (!text) return;
+    const canRepair = !structureEditable && RECOVERABLE_STATUSES.has(node.status) && (!existingProblem || existingProblem.kind === 'execution');
+    const problem = {
+      ...existingProblem, taskId: node.id, taskTitle: node.title,
+      kind: canRepair ? 'execution' : 'plan',
+      message: existingProblem?.message || text, suggestion: text,
+    };
+    onProblemResolve?.(node.id, text, problem, canRepair ? 'runtime-recovery' : 'plan-revision');
+  };
+
   return (
     <aside className="workflow-panel">
       <div {...(dragHandleProps || {})} className={dragHandleProps ? 'task-window-drag-handle workflow-header' : 'workflow-header'} title={dragHandleProps ? t('Zum Verschieben ziehen') : undefined}>
-        <div className="workflow-header-icon">🔀</div>
-        <div className="workflow-header-copy"><strong>{t('Workflow')}</strong><span>{t('Flowchart · {tasks} Aufgaben', { tasks: nodes.length })}{graph?.changeRequest ? ` · ${t('Änderungsentwurf · Version {version}', { version: graph.planRevision })}` : graph?.approvedPlan ? ` · ${t('Workflow gebunden · Version {version}', { version: graph.approvedPlan.revision })}` : ` · ${t('Freier Modus')}`}</span></div>
+        <div className="workflow-header-icon"><Icon name="workflow" size={20} /></div>
+        <div className="workflow-header-copy"><strong>{t('Workflow')}</strong><span>{t('{tasks} Aufgaben', { tasks: nodes.length })}{graph?.changeRequest ? ` · ${t('Änderungsentwurf · Version {version}', { version: graph.planRevision })}` : graph?.approvedPlan ? ` · ${t('Freigegebener Plan · Version {version}', { version: graph.approvedPlan.revision })}` : ` · ${t('Planentwurf')}`}</span></div>
         <div className="workflow-header-counts">
-          {acceptance.required > 0 && <span className="acceptance">🛡️ {acceptance.passed}/{acceptance.required}</span>}
-          <span className="done">✓ {completedCount}</span><span className="active">● {activeCount}</span><span className="open">○ {openCount}</span>
+          {acceptance.required > 0 && <span className="acceptance"><Icon name="shield" size={14} /> {t('Abnahme')} {acceptance.passed}/{acceptance.required}</span>}
+          <span className="done">{completedCount} {t('Erledigt')}</span><span className="active">{activeCount} {t('Aktiv')}</span><span className="open">{openCount} {t('Offen')}</span>
         </div>
-        <button
-          type="button"
-          className="workflow-file-button import"
-          onClick={onWorkflowImport}
-          disabled={running || workflowFileBusy}
-          title={t('Workflow-Datei als Planungsentwurf importieren')}
-          aria-label={t('Workflow importieren')}
-        >
-          <span aria-hidden="true">⇧</span><b>{t(workflowFileStatus?.busy === 'import' ? 'Importiere…' : 'Import')}</b>
-        </button>
+        <ChatOptionsMenu label="Datei" icon="folder" showLabel>
+          <div className="workflow-file-menu-actions">
         <button
           type="button"
           className="workflow-file-button export"
@@ -1266,19 +1439,21 @@ export default function TaskGraphPanel({ graph, running, activeTaskIds = [], pen
           title={t('Workflow ohne Laufzeitdaten exportieren')}
           aria-label={t('Workflow exportieren')}
         >
-          <span aria-hidden="true">⇩</span><b>{t(workflowFileStatus?.busy === 'export' ? 'Exportiere…' : 'Export')}</b>
+          <Icon name="transfer" size={16} /><b>{t(workflowFileStatus?.busy === 'export' ? 'Exportiere…' : 'Export')}</b>
         </button>
+
         <button
           type="button"
-          className="workflow-delete-button"
-          onClick={deleteWorkflow}
-          disabled={!workflowDeleteEnabled}
-          title={t(running ? 'Laufenden Workflow stoppen und samt Gruppenarbeit löschen' : 'Workflow, Gruppenarbeit und Fortsetzungsstand löschen')}
-          aria-label={t('Workflow löschen')}
+          className="workflow-file-button import"
+          onClick={onWorkflowImport}
+          disabled={running || workflowFileBusy}
+          title={t('Workflow-Datei als Planungsentwurf importieren')}
+          aria-label={t('Workflow importieren')}
         >
-          <span aria-hidden="true">🗑</span>
-          {t('Löschen')}
+          <Icon name="transfer" size={16} /><b>{t(workflowFileStatus?.busy === 'import' ? 'Importiere…' : 'Import')}</b>
         </button>
+          </div>
+        </ChatOptionsMenu>
         <button
           type="button"
           className="workflow-undo-button"
@@ -1287,7 +1462,7 @@ export default function TaskGraphPanel({ graph, running, activeTaskIds = [], pen
           title={t(canUndo ? 'Letzte Planänderung rückgängig machen' : 'Keine Planänderung zum Rückgängigmachen')}
           aria-label={t('Letzte Planänderung rückgängig machen')}
         >
-          <span aria-hidden="true">↶</span>
+          <Icon name="undo" size={16} />
           {t('Rückgängig')}
         </button>
         <button
@@ -1299,8 +1474,19 @@ export default function TaskGraphPanel({ graph, running, activeTaskIds = [], pen
           aria-label={workflowStartTitle}
           aria-pressed={running}
         >
-          <span aria-hidden="true">{running ? '■' : '▶'}</span>
-          {t(running ? 'Workflow unterbrechen' : resumeMode ? 'Workflow fortsetzen' : 'Workflow starten')}
+          <Icon name={running ? 'stop' : 'play'} size={16} />
+          {t(running ? 'Workflow unterbrechen' : resumeMode ? 'Workflow fortsetzen' : structureEditable ? 'Plan freigeben & starten' : 'Workflow starten')}
+        </button>
+        <button
+          type="button"
+          className="workflow-delete-button"
+          onClick={deleteWorkflow}
+          disabled={!workflowDeleteEnabled}
+          title={t(running ? 'Laufenden Workflow stoppen und samt Gruppenarbeit löschen' : 'Workflow, Gruppenarbeit und Fortsetzungsstand löschen')}
+          aria-label={t('Workflow löschen')}
+        >
+          <Icon name="trash" size={16} />
+          {t('Löschen')}
         </button>
       </div>
       {(workflowFileStatus?.message || workflowFileStatus?.error || workflowFileBusy) && <div className={`workflow-file-status ${workflowFileStatus?.error ? 'error' : workflowFileBusy ? 'busy' : 'success'}`} role={workflowFileStatus?.error ? 'alert' : 'status'}>
@@ -1309,30 +1495,12 @@ export default function TaskGraphPanel({ graph, running, activeTaskIds = [], pen
         {!workflowFileBusy && <button type="button" onClick={onWorkflowFileStatusClear} title={t('Hinweis schließen')}>×</button>}
       </div>}
       <div className="workflow-workspace-tabs" role="tablist" aria-label={t('Workflow-Ansicht')}>
-        <button type="button" role="tab" id="workflow-tab-main" data-workflow-tab="workflow" aria-controls="workflow-tabpanel-main" aria-selected={activeWorkspaceTab === 'workflow'} tabIndex={activeWorkspaceTab === 'workflow' ? 0 : -1} className={activeWorkspaceTab === 'workflow' ? 'active' : ''} onKeyDown={handleWorkspaceTabKeyDown} onClick={() => selectWorkspaceTab('workflow')}>🔀 {t('Hauptworkflow')}</button>
-        <button type="button" role="tab" id="workflow-tab-collaboration" data-workflow-tab="collaboration" aria-controls="workflow-tabpanel-collaboration" aria-selected={activeWorkspaceTab === 'collaboration'} tabIndex={activeWorkspaceTab === 'collaboration' ? 0 : -1} className={activeWorkspaceTab === 'collaboration' ? 'active' : ''} onKeyDown={handleWorkspaceTabKeyDown} onClick={() => selectWorkspaceTab('collaboration')}>⇄ {t('Gruppenarbeit')}<span>{groupRequests.length}</span></button>
+        <button type="button" role="tab" id="workflow-tab-main" data-workflow-tab="workflow" aria-controls="workflow-tabpanel-main" aria-selected={activeWorkspaceTab === 'workflow'} tabIndex={activeWorkspaceTab === 'workflow' ? 0 : -1} className={activeWorkspaceTab === 'workflow' ? 'active' : ''} onKeyDown={handleWorkspaceTabKeyDown} onClick={() => selectWorkspaceTab('workflow')}><Icon name="workflow" size={16} /> {t('Hauptworkflow')}</button>
+        <button type="button" role="tab" id="workflow-tab-tests" data-workflow-tab="tests" aria-controls="workflow-tabpanel-tests" aria-selected={activeWorkspaceTab === 'tests'} tabIndex={activeWorkspaceTab === 'tests' ? 0 : -1} className={`${activeWorkspaceTab === 'tests' ? 'active' : ''} ${attention.tests.decisions ? 'needs-decision' : attention.tests.open ? 'has-open-work' : ''}`} title={attention.tests.decisions ? t('Entscheidung erforderlich') : attention.tests.open ? t('Offene Aufgaben') : undefined} onKeyDown={handleWorkspaceTabKeyDown} onClick={() => selectWorkspaceTab('tests')}><Icon name="test" size={16} /> {t('Prüfungen')}<span>{attention.tests.open || acceptance.required}</span>{attention.tests.decisions > 0 && <b className="workflow-tab-alert">! {t('Entscheidung')}</b>}</button>
+        <button type="button" role="tab" id="workflow-tab-collaboration" data-workflow-tab="collaboration" aria-controls="workflow-tabpanel-collaboration" aria-selected={activeWorkspaceTab === 'collaboration'} tabIndex={activeWorkspaceTab === 'collaboration' ? 0 : -1} className={`${activeWorkspaceTab === 'collaboration' ? 'active' : ''} ${(attention.collaboration.decisions || expertiseHelp.length) ? 'needs-decision' : attention.collaboration.open ? 'has-open-work' : ''}`} title={attention.collaboration.decisions ? t('Entscheidung erforderlich') : attention.collaboration.open ? t('Offene Aufgaben') : undefined} onKeyDown={handleWorkspaceTabKeyDown} onClick={() => selectWorkspaceTab('collaboration')}><Icon name="users" size={16} /> {t('Gruppenarbeit')}<span>{attention.collaboration.open || expertiseHelp.length || groupRequests.length}</span>{(attention.collaboration.decisions > 0 || expertiseHelp.length > 0) && <b className="workflow-tab-alert">! {t('Entscheidung')}</b>}</button>
       </div>
-      <div className="workflow-main-view" role="tabpanel" id="workflow-tabpanel-main" aria-labelledby="workflow-tab-main" hidden={activeWorkspaceTab !== 'workflow'}>
-      {awaitingSchedule && <div className={`workflow-planning-note ${changeSet.active ? 'change-draft' : ''}`}>
-        <div>
-          <strong>{t(changeSet.active ? 'Änderungsentwurf – rot markierte Bereiche' : structureEditable ? 'Planungsmodus aktiv' : 'Ausführungsplanung pausiert')}</strong>
-          <span>{t(changeSet.active
-            ? 'Vergleich mit dem freigegebenen Snapshot {version}: {changed} markierte Aufgaben, {removed} entfernte Aufgaben. Laufzeitstatus werden nicht als Planänderung gewertet.'
-            : structureEditable
-              ? 'Knoten verschieben, Aufgaben auswählen oder Details und Abhängigkeiten bearbeiten. Es wird noch nichts ausgeführt.'
-              : 'Wähle nur die Ausführungsreihenfolge der offenen Aufgaben. Der freigegebene Workflow bleibt unverändert.',
-          { version: changeSet.baselineRevision || '–', changed: Object.keys(changeSet.nodeChanges).length, removed: changeSet.removedNodes.length })}</span>
-          {changeSet.removedNodes.length > 0 && <span className="workflow-removed-summary">{t('Entfernt')}: {changeSet.removedNodes.map(node => node.title || node.id).join(', ')}</span>}
-        </div>
-        {structureEditable && <div className="workflow-planning-actions">
-          <button type="button" className="workflow-check-plan" onClick={inspectPlan} disabled={running} title={t('Aufgabenplan auf Ausführbarkeit prüfen')}>✓ {t('Prüfen')}</button>
-          {changeSet.active && <button type="button" className="workflow-restore-snapshot" disabled={running} onClick={() => {
-            if (window.confirm(t('Den Änderungsentwurf verwerfen und Workflow-Snapshot {version} wiederherstellen?', { version: changeSet.baselineRevision || '–' }))) onRestoreSnapshot?.();
-          }} title={t('Aufgaben und Verbindungen aus dem letzten freigegebenen Snapshot wiederherstellen')}>↶ {t('Snapshot wiederherstellen')}</button>}
-        </div>}
-      </div>}
       {pendingDelegations.length > 0 && <div className="workflow-delegation-requests" aria-label={t('Offene Delegationsfreigaben')}>
-        <strong>⇄ {t('Delegation freigeben')}</strong>
+        <strong><Icon name="users" size={16} /> {t('Delegation freigeben')}</strong>
         <div>{pendingDelegations.map(waiting => {
           const proposal = waiting.proposal || {};
           const candidates = proposal.candidates || [];
@@ -1348,22 +1516,58 @@ export default function TaskGraphPanel({ graph, running, activeTaskIds = [], pen
           </article>;
         })}</div>
       </div>}
+      <div className="workflow-main-view" role="tabpanel" id="workflow-tabpanel-main" aria-labelledby="workflow-tab-main" hidden={activeWorkspaceTab !== 'workflow'}>
+      {awaitingSchedule && <div className={`workflow-planning-note ${changeSet.active ? 'change-draft' : ''}`}>
+        <div>
+          <strong>{t(changeSet.active ? 'Änderungsentwurf – rot markierte Bereiche' : structureEditable ? 'Planungsmodus aktiv' : 'Ausführungsplanung pausiert')}</strong>
+          <span>{t(changeSet.active
+            ? 'Vergleich mit dem freigegebenen Snapshot {version}: {changed} markierte Aufgaben, {removed} entfernte Aufgaben. Laufzeitstatus werden nicht als Planänderung gewertet.'
+            : structureEditable
+              ? 'Wähle eine Aufgabe für Details. Prüfe den Plan und starte ihn oben mit „Plan freigeben & starten“.'
+              : 'Wähle nur die Ausführungsreihenfolge der offenen Aufgaben. Der freigegebene Workflow bleibt unverändert.',
+          { version: changeSet.baselineRevision || '–', changed: Object.keys(changeSet.nodeChanges).length, removed: changeSet.removedNodes.length })}</span>
+          {changeSet.removedNodes.length > 0 && <span className="workflow-removed-summary">{t('Entfernt')}: {changeSet.removedNodes.map(node => node.title || node.id).join(', ')}</span>}
+        </div>
+        {structureEditable && <div className="workflow-planning-actions">
+          <button type="button" className="workflow-check-plan" onClick={inspectPlan} disabled={running} title={t('Aufgabenplan auf Ausführbarkeit prüfen')}>✓ {t('Prüfen')}</button>
+          {changeSet.active && <button type="button" className="workflow-restore-snapshot" disabled={running} onClick={() => {
+            if (window.confirm(t('Den Änderungsentwurf verwerfen und Workflow-Snapshot {version} wiederherstellen?', { version: changeSet.baselineRevision || '–' }))) onRestoreSnapshot?.();
+          }} title={t('Aufgaben und Verbindungen aus dem letzten freigegebenen Snapshot wiederherstellen')}>↶ {t('Snapshot wiederherstellen')}</button>}
+        </div>}
+      </div>}
+      {!awaitingSchedule && <div className="workflow-guidance">
+        <Icon name="info" size={16} />
+        <span>{t(running ? 'Der Workflow läuft. Wähle eine Aufgabe, um Fortschritt und Ergebnisse zu sehen.' : structureEditable ? 'Prüfe die Aufgaben und ihre Abhängigkeiten. Mit „Plan freigeben & starten“ beginnt die Ausführung.' : 'Wähle eine Aufgabe für Details. Offene Entscheidungen findest du unter Prüfungen und Gruppenarbeit.')}</span>
+      </div>}
       <div className="workflow-toolbar">
-        <div className="workflow-legend"><span><i className="mainline" />{t('Hauptlinie · links nach rechts')}</span>{Object.entries(EDGE_STYLES).filter(([kind]) => kind === 'dependency' || kind === 'review').map(([kind, style]) => <span key={kind}><i style={{ borderTopColor: style.color, borderTopStyle: style.dash ? 'dashed' : 'solid' }} />{t(style.label)}</span>)}{structureEditable && <span className={`workflow-connection-kind ${connectionKind}`}>{t('Aktiver Verbindungstyp')}: {t(connectionKind === 'review' ? 'Abnahme' : 'Abhängigkeit')}</span>}{structureEditable && <span className="workflow-connect-help">●→● {t('Vom rechten Anschluss zur Zielaufgabe ziehen')}</span>}</div>
+
         <div className="workflow-view-controls">
-          {canEditWorkflow && !structureEditable && <button type="button" className="workflow-add-task" onClick={onEditWorkflow} disabled={running}>✎ {t('Plan bearbeiten')}</button>}
-          {structureEditable && <button type="button" className="workflow-add-task" onClick={() => onTaskAdd?.()} title={t('Aufgabe hinzufügen')}>＋ {t('Aufgabe')}</button>}
-          {structureEditable && <button type="button" className="workflow-add-task" onClick={() => onTaskAdd?.(null, 'review')} title={t('Abnahme hinzufügen')}>◆ {t('Abnahme')}</button>}
-          {structureEditable && <button type="button" className="workflow-add-flow-point" onClick={() => onFlowPointAdd?.('fork')} title={t('Fork-Punkt erstellen')}>⑂ {t('Fork')}</button>}
-          {structureEditable && <button type="button" className="workflow-add-flow-point" onClick={() => onFlowPointAdd?.('join')} title={t('Join-Punkt erstellen')}>⑃ {t('Join')}</button>}
-          {structureEditable && <span className="workflow-toolbar-separator" aria-hidden="true" />}
-          {structureEditable && <button type="button" className={`workflow-connection-tool dependency ${connectionKind === 'dependency' ? 'active' : ''}`} aria-pressed={connectionKind === 'dependency'} onClick={() => setConnectionKind('dependency')} title={t('Neue Verbindungen als Abhängigkeit erstellen')}>⛓ {t('Abhängigkeit')}</button>}
-          {structureEditable && <button type="button" className={`workflow-connection-tool review ${connectionKind === 'review' ? 'active' : ''}`} aria-pressed={connectionKind === 'review'} onClick={() => setConnectionKind('review')} title={t('Neue Verbindungen als Abnahme erstellen')}>◆ {t('Abnahme-Verbindung')}</button>}
-          {structureEditable && <button type="button" className="workflow-delete-selection" onClick={deleteToolbarSelection} disabled={!canDeleteToolbarSelection} title={t(canDeleteToolbarSelection ? 'Ausgewählte Aufgabe oder Fork-/Join-Punkt löschen' : 'Wähle zuerst eine löschbare Aufgabe oder einen Fork-/Join-Punkt aus')}>× {t('Auswahl löschen')}</button>}
+          <div className="workflow-tool-group" role="group" aria-label={t('Ansicht')}>
+          <b className="workflow-tool-label">{t('Ansicht')}</b>
           <button type="button" onClick={() => setLegendOpen(current => !current)} title={t('Legende anzeigen')}>?</button>
           <button type="button" onClick={() => zoomBy(-.1)} title={t('Verkleinern')}>−</button><span>{Math.round(scale * 100)}%</span><button type="button" onClick={() => zoomBy(.1)} title={t('Vergrößern')}>+</button>
           <button type="button" onClick={fitView} title={t('Alles einpassen')}>⌗</button>
+          </div>
+          <div className="workflow-tool-group" role="group" aria-label={t('Plan bearbeiten')}>
+          <b className="workflow-tool-label">{t('Plan')}</b>
+          {canEditWorkflow && !structureEditable && <button type="button" className="workflow-add-task" onClick={onEditWorkflow} disabled={running}>✎ {t('Plan bearbeiten')}</button>}
+          {structureEditable && <button type="button" className="workflow-add-task" onClick={() => onTaskAdd?.()} title={t('Aufgabe hinzufügen')}>＋ {t('Aufgabe')}</button>}
+          {structureEditable && <button type="button" className="workflow-add-task" onClick={() => onTaskAdd?.(null, 'review')} title={t('Abnahme hinzufügen')}>◆ {t('Abnahme')}</button>}
           {freeMovementEnabled && <button type="button" onClick={() => { setDragPositions({}); onResetLayout?.(); }} title={t('Automatisch anordnen')}>↺</button>}
+          {structureEditable && <details className="workflow-advanced-tools">
+            <summary>{t('Verbindungen & Verzweigungen')} · {t(connectionKind === 'review' ? 'Abnahme' : 'Abhängigkeit')}</summary>
+            <div className="workflow-advanced-content">
+              <p>{t('Abhängigkeiten bestimmen die Reihenfolge. Das Verschieben von Karten ändert nur die Darstellung.')}</p>
+          {structureEditable && <button type="button" className="workflow-add-flow-point" onClick={() => onFlowPointAdd?.('fork')} title={t('Fork-Punkt erstellen')}>⑂ {t('Verzweigung')}</button>}
+          {structureEditable && <button type="button" className="workflow-add-flow-point" onClick={() => onFlowPointAdd?.('join')} title={t('Join-Punkt erstellen')}>⑃ {t('Zusammenführung')}</button>}
+
+          {structureEditable && <button type="button" className={`workflow-connection-tool dependency ${connectionKind === 'dependency' ? 'active' : ''}`} aria-pressed={connectionKind === 'dependency'} onClick={() => setConnectionKind('dependency')} title={t('Neue Verbindungen als Abhängigkeit erstellen')}>⛓ {t('Abhängigkeit')}</button>}
+          {structureEditable && <button type="button" className={`workflow-connection-tool review ${connectionKind === 'review' ? 'active' : ''}`} aria-pressed={connectionKind === 'review'} onClick={() => setConnectionKind('review')} title={t('Neue Verbindungen als Abnahme erstellen')}>◆ {t('Abnahme-Verbindung')}</button>}
+
+            </div>
+          </details>}
+          </div>
+          {structureEditable && <button type="button" className="workflow-delete-selection" onClick={deleteToolbarSelection} disabled={!canDeleteToolbarSelection} title={t(canDeleteToolbarSelection ? 'Ausgewählte Aufgabe oder Fork-/Join-Punkt löschen' : 'Wähle zuerst eine löschbare Aufgabe oder einen Fork-/Join-Punkt aus')}>× {t('Auswahl löschen')}</button>}
         </div>
       </div>
       {inspectionReport && <div className={`workflow-inspection-report ${inspectionReport.ok ? 'ok' : 'error'}`} role="status">
@@ -1373,22 +1577,22 @@ export default function TaskGraphPanel({ graph, running, activeTaskIds = [], pen
         </div>
         {inspectionReport.issues.length > 0 && <section><b>{t('Probleme')}</b><ul>{inspectionReport.issues.map((issue, index) => <li key={`issue-${index}`}>{t(issue.messageKey, issue.messageValues)}</li>)}</ul></section>}
         {inspectionReport.warnings.length > 0 && <section><b>{t('Hinweise')}</b><ul>{inspectionReport.warnings.map((warning, index) => <li key={`warning-${index}`}>{t(warning.messageKey, warning.messageValues)}</li>)}</ul></section>}
-        {inspectionReport.suggestions.length > 0 && <section><b>{t('Vorschläge')}</b><ul>{inspectionReport.suggestions.map((suggestion, index) => <li key={`suggestion-${index}`}>{t(suggestion.messageKey, suggestion.messageValues)}</li>)}</ul></section>}
+        {inspectionReport.suggestions.length > 0 && <section><b>{t('Vorschläge')}</b><ul>{inspectionReport.suggestions.map((suggestion, index) => <li key={`suggestion-${index}`}>{t(suggestion.messageKey, suggestion.messageValues)}{nodes.length > 0 && <button type="button" className="btn btn-secondary" onClick={() => acceptSuggestion(nodes.find(node => suggestion.taskIds?.includes(node.id)) || nodes[0], t(suggestion.messageKey, suggestion.messageValues), { kind: 'plan' })}>{t('Vorschlag übernehmen')}</button>}</li>)}</ul></section>}
       </div>}
       {legendOpen && <div className="workflow-legend-popover" role="dialog" aria-label={t('Workflow-Legende')}><div className="workflow-legend-head"><strong>{t('Workflow-Legende')}</strong><button type="button" onClick={() => setLegendOpen(false)}>✕</button></div><p>{t('Aufgaben ohne gegenseitige Abhängigkeit liegen auf parallelen Linien. Eine Verbindung verschiebt die Folgeaufgabe in eine spätere Phase.')}</p><div className="workflow-legend-grid"><span><i className="rail" />{t('Hauptlinie')}</span><small>{t('Abhängigkeitsbasierter Gesamtablauf')}</small><span><i className="fork" />{t('Fork / Join')}</span><small>{t('Unabhängige Aufgaben können gleichzeitig laufen')}</small><span><i className="dependency" />{t('Abhängigkeit')}</span><small>{t('Die Zielaufgabe wartet zwingend')}</small><span><i className="review" />{t('Prüfung')}</span><small>{t('Optionaler, frei definierbarer Prüfschritt')}</small><span><i className="change" />{t('Änderung')}</span><small>{t('Neue, vom User freizugebende Planversion')}</small></div><p>{t('Im Bearbeitungsmodus kannst du eine Verbindung vom rechten Anschluss einer Aufgabe auf eine Zielaufgabe ziehen. Die Zielaufgabe wartet anschließend auf den Abschluss des Vorgängers.')}</p><p className="workflow-legend-note">{t('Das Verschieben einer Karte wechselt nur die sichtbare Linie. Ausschließlich Abhängigkeiten bestimmen Reihenfolge und Parallelität.')}</p></div>}
       {connectionNotice && <div className={`workflow-connection-notice ${connectionNotice.type}`} role={connectionNotice.type === 'error' ? 'alert' : 'status'}>{connectionNotice.type === 'error' ? '⚠' : '✓'} {connectionNotice.text}</div>}
       <div className="workflow-body">
         <div ref={canvasRef} className="workflow-canvas" onContextMenu={handleCanvasContextMenu} onPointerDown={handleCanvasPointerDown} onPointerMove={handleCanvasPointerMove} onPointerUp={handleCanvasPointerEnd} onPointerCancel={handleCanvasPointerEnd} onWheel={event => { if (!event.ctrlKey) return; event.preventDefault(); zoomBy(event.deltaY > 0 ? -.08 : .08); }}>
-          {nodes.length === 0 ? <div className="workflow-empty">{t('Der Workflow entsteht, sobald der PM eine Anforderung plant.')}</div> : (
+          {nodes.length === 0 ? <div className="workflow-empty"><Icon name="workflow" size={36} /><strong>{t('Noch kein Aufgabenplan')}</strong><p>{t('Beschreibe dein Ziel im Gruppenchat. Der PM erstellt daraus Aufgaben, die du hier prüfen und anschließend freigeben kannst.')}</p></div> : (
             <div ref={stageRef} className="workflow-stage" style={{ width: layout.width, height: layout.height, transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${scale})` }}>
               {layout.layers.map(([rank, layerNodes]) => <span className="workflow-phase-label" key={rank} style={{ left: Math.min(...layerNodes.map(node => resolvedPosition(node.id).x)) + 4, top: Math.max(6, Math.min(...layerNodes.map(node => resolvedPosition(node.id).y)) - 22) }}>{rank === 0 ? t('Start') : t('Phase {phase}', { phase: rank })}</span>)}
               <svg className="workflow-edges" width={layout.width} height={layout.height} aria-hidden="true">
                 <defs>
                   {Object.entries(EDGE_STYLES).map(([kind, style]) => <marker key={kind} id={`workflow-arrow-${kind}`} markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill={style.color} /></marker>)}
-                  <marker id="workflow-arrow-change" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#ff5c6c" /></marker>
-                  <marker id="workflow-arrow-connection-pending" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#53bdeb" /></marker>
-                  <marker id="workflow-arrow-connection-valid" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#61d6a7" /></marker>
-                  <marker id="workflow-arrow-connection-invalid" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="#ff5c6c" /></marker>
+                  <marker id="workflow-arrow-change" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="var(--workflow-error)" /></marker>
+                  <marker id="workflow-arrow-connection-pending" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="var(--accent)" /></marker>
+                  <marker id="workflow-arrow-connection-valid" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="var(--workflow-success)" /></marker>
+                  <marker id="workflow-arrow-connection-invalid" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="var(--workflow-error)" /></marker>
                 </defs>
                 {layout.flowEdges.map(edge => <path className="workflow-manual-flow-edge" key={edge.id} d={workflowRailPath(railEndpoint(edge.from, 'from'), railEndpoint(edge.to, 'to'))} fill="none" markerEnd="url(#workflow-arrow-dependency)" />)}
                 {displayedEdges.filter(({ edge }) => edge.kind !== 'delegation').map(({ edge, change }) => {
@@ -1397,7 +1601,7 @@ export default function TaskGraphPanel({ graph, running, activeTaskIds = [], pen
                   if (!from || !to) return null;
                   const style = EDGE_STYLES[edge.kind] || EDGE_STYLES.delegation;
                   const markerKind = EDGE_STYLES[edge.kind] ? edge.kind : 'delegation';
-                  return <path className={change ? 'workflow-edge-change' : ''} key={`${change?.type || 'current'}:${edge.id || `${edge.kind}:${edge.from}->${edge.to}`}`} d={workflowEdgePath(from, to, layout.nodeWidth, layout.nodeHeight)} fill="none" stroke={change ? '#ff5c6c' : style.color} strokeWidth={change ? '3' : '2'} strokeDasharray={change?.type === 'removed' ? '3 5' : style.dash} opacity={change?.type === 'removed' ? '.68' : '1'} markerEnd={`url(#workflow-arrow-${change ? 'change' : markerKind})`} />;
+                  return <path className={change ? 'workflow-edge-change' : ''} key={`${change?.type || 'current'}:${edge.id || `${edge.kind}:${edge.from}->${edge.to}`}`} d={workflowEdgePath(from, to, layout.nodeWidth, layout.nodeHeight)} fill="none" stroke={change ? 'var(--workflow-error)' : style.color} strokeWidth={change ? '3' : '2'} strokeDasharray={change?.type === 'removed' ? '3 5' : style.dash} opacity={change?.type === 'removed' ? '.68' : '1'} markerEnd={`url(#workflow-arrow-${change ? 'change' : markerKind})`} />;
                 })}
                 {selectedDependency && (() => {
                   return <path className="workflow-edge-selected" d={workflowRailPath(endpointPosition(selectedDependency.from, 'from'), endpointPosition(selectedDependency.to, 'to'))} fill="none" />;
@@ -1429,7 +1633,7 @@ export default function TaskGraphPanel({ graph, running, activeTaskIds = [], pen
               />)}
               {selectedDependency && selectedDependencyPosition && structureEditable && <button type="button" className="workflow-edge-remove" style={{ left: selectedDependencyPosition.x, top: selectedDependencyPosition.y }} onPointerDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); removeSelectedDependency(); }} title={t('Nur die Verbindung entfernen; Aufgaben bleiben erhalten')}>× {t('Verbindung lösen')}</button>}
               {connectionDraft && connectionPreviewEnd && <div className={`workflow-connection-live-label ${connectionPreviewState}`} style={{ left: connectionPreviewEnd.x + 12, top: connectionPreviewEnd.y + 12 }}>{connectionDraft.targetId ? connectionDraft.validation?.ok ? t('Loslassen, um die Abhängigkeit zu erstellen') : t(connectionDraft.validation?.messageKey || connectionDraft.validation?.reason || 'Diese Abhängigkeit ist ungültig.', connectionDraft.validation?.messageValues) : t('Auf eine Zielaufgabe ziehen')}</div>}
-              {nodes.map(node => <FlowNode key={node.id} node={node} position={resolvedPosition(node.id)} graph={graph} movable={freeMovementEnabled} selected={selectedNodeId === node.id} modelConfig={modelOptionsByTask[node.id]} change={changeSet.nodeChanges[node.id]} validationHighlighted={validationNodeIds.has(node.id)} workflowProblem={workflowProblemByTask.get(node.id)} active={activeTaskIdSet.has(node.id)} pendingQuestion={pendingQuestionByTask.get(node.id)} groupRequests={groupRequestsByTask.get(node.id) || []} connectionEnabled={structureEditable} connectionSource={connectionDraft?.sourceId === node.id} connectionTargetState={connectionDraft?.targetId === node.id ? connectionPreviewState : ''} onSelect={selectNode} onQuestionOpen={setOpenQuestionTaskId} onProblemOpen={setOpenProblemTaskId} onTimeoutRepair={onTimeoutRepair} onDragStart={(nodeId, position, event) => handleElementDragStart(nodeId, position, event, true)} onDragMove={handleNodeDragMove} onDragEnd={handleNodeDragEnd} onConnectionStart={handleConnectionStart} onConnectionMove={handleConnectionMove} onConnectionEnd={handleConnectionEnd} />)}
+              {nodes.map(node => <FlowNode key={node.id} node={node} position={resolvedPosition(node.id)} graph={graph} movable={freeMovementEnabled} selected={selectedNodeId === node.id} modelConfig={modelOptionsByTask[node.id]} change={changeSet.nodeChanges[node.id]} validationHighlighted={validationNodeIds.has(node.id)} workflowProblem={workflowProblemByTask.get(node.id)} active={activeTaskIdSet.has(node.id)} pendingQuestion={pendingQuestionByTask.get(node.id)} groupRequests={groupRequestsByTask.get(node.id) || []} connectionEnabled={structureEditable} connectionSource={connectionDraft?.sourceId === node.id} connectionTargetState={connectionDraft?.targetId === node.id ? connectionPreviewState : ''} onSelect={selectNode} onQuestionOpen={setOpenQuestionTaskId} onProblemOpen={setOpenProblemTaskId} onTimeoutRepair={onTimeoutRepair} onPauseTask={onPauseTask} onResumeTask={onResumeTask} onDragStart={(nodeId, position, event) => handleElementDragStart(nodeId, position, event, true)} onDragMove={handleNodeDragMove} onDragEnd={handleNodeDragEnd} onConnectionStart={handleConnectionStart} onConnectionMove={handleConnectionMove} onConnectionEnd={handleConnectionEnd} />)}
             </div>
           )}
           {contextMenu && <div className="workflow-context-menu" role="menu" style={{ left: contextMenu.left, top: contextMenu.top }} onPointerDown={event => event.stopPropagation()}>
@@ -1448,13 +1652,25 @@ export default function TaskGraphPanel({ graph, running, activeTaskIds = [], pen
             </>}
           </div>}
         </div>
-        {selectedNode && <WorkflowDetails node={selectedNode} graph={graph} planning={structureEditable} collapsed={detailsCollapsed} pinned={detailsPinned} modelConfig={modelOptionsByTask[selectedNode.id]} agentOptions={agentOptions} delegationEnabled={delegationEnabled} groupOptions={groupOptions} groupRequests={groupRequestsByTask.get(selectedNode.id) || []} problems={selectedNodeProblems} problemSuggestions={selectedNodeProblemSuggestions} change={changeSet.nodeChanges[selectedNode.id]} baselineRevision={changeSet.baselineRevision} onTaskUpdate={onTaskUpdate} onTaskDelete={taskId => { onTaskDelete?.(taskId); closeDetails(); }} onTaskSplit={onTaskSplit} onTaskMove={onTaskMove} onAgentChange={onAgentChange} onModelChange={onModelChange} onDependencyAdd={onDependencyAdd} onDependencyRemove={onDependencyRemove} onAcceptanceCriteriaChange={onAcceptanceCriteriaChange} onAcceptanceDecision={onAcceptanceDecision} onRetryTask={onRetryTask} onToggleCollapsed={() => setDetailsCollapsed(current => !current)} onTogglePinned={() => setDetailsPinned(current => !current)} onClose={closeDetails} />}
+        {selectedNode && <WorkflowDetails onAcceptSuggestion={acceptSuggestion} node={selectedNode} graph={graph} planning={structureEditable} collapsed={detailsCollapsed} pinned={detailsPinned} modelConfig={modelOptionsByTask[selectedNode.id]} agentOptions={agentOptions} delegationEnabled={delegationEnabled} groupOptions={groupOptions} groupRequests={groupRequestsByTask.get(selectedNode.id) || []} problems={selectedNodeProblems} problemSuggestions={selectedNodeProblemSuggestions} change={changeSet.nodeChanges[selectedNode.id]} baselineRevision={changeSet.baselineRevision} onTaskUpdate={onTaskUpdate} onTaskDelete={taskId => { onTaskDelete?.(taskId); closeDetails(); }} onTaskSplit={onTaskSplit} onTaskMove={onTaskMove} onAgentChange={onAgentChange} onModelChange={onModelChange} onDependencyAdd={onDependencyAdd} onDependencyRemove={onDependencyRemove} onAcceptanceCriteriaChange={onAcceptanceCriteriaChange} onAcceptanceDecisionRequest={(node, criterion) => setAcceptanceDecisionRequest({ node, criterion })} onRetryTask={onRetryTask} onToggleCollapsed={() => setDetailsCollapsed(current => !current)} onTogglePinned={() => setDetailsPinned(current => !current)} onClose={closeDetails} />}
       </div>
-      {awaitingSchedule && <div className="workflow-footer">{preflightError ? <span>{preflightError}</span> : readyParallelNodeIds.length >= 2 && !validation.ok ? <span>{t(validation.messageKey || validation.reason, validation.messageValues)}</span> : <span>{t(structureEditable ? 'Der freigegebene Plan startet Workflow, Agenten und Chat gemeinsam.' : 'Die startbereiten Aufgaben werden im zugehörigen Chat ausgeführt.')}</span>}<button className="run-btn" onClick={startWorkflow} disabled={workflowStartDisabled}>{t(running ? 'Workflow unterbrechen' : structureEditable ? 'Planversion freigeben & Workflow starten' : 'Bereite Aufgaben starten')}</button></div>}
+      {awaitingSchedule && workflowStartDisabled && <div className="workflow-footer" role="status"><Icon name="info" size={16} /><span>{workflowStartTitle}</span></div>}
       </div>
-      {activeWorkspaceTab === 'collaboration' && <GroupWorkView trees={groupRequestTrees} onRetry={onGroupRequestRetry} />}
+      {activeWorkspaceTab === 'tests' && <AcceptanceTestView onAcceptSuggestion={acceptSuggestion} nodes={nodes} testConfigured={testConfigured} onRun={onRunAcceptanceTests} questions={pendingQuestionByTask} problems={workflowProblemByTask} onQuestion={setOpenQuestionTaskId} onConfigure={onConfigureTests} onPreview={onOpenPreview} onRetry={onRetryTask} planning={structureEditable} onHelp={(node, problem) => setAcceptanceProblem(problem ? { ...problem, kind: structureEditable ? 'plan' : problem.kind } : {
+        taskId: node.id, taskTitle: node.title, kind: structureEditable ? 'plan' : 'execution',
+        message: (node.acceptanceCriteria || []).filter(item => item.status === 'failed').map(item => item.text).join('\n') || node.acceptanceTestRuns?.at(-1)?.error || t('Die Prüfung benötigt eine Nachbesserung.'),
+      })} onDecisionRequest={(node, criterion) => setAcceptanceDecisionRequest({ node, criterion })} />}
+      {activeWorkspaceTab === 'collaboration' && <div className="expertise-collaboration-view">
+        <ExpertiseHelpPanel items={expertiseHelp} running={running} onSearch={onSearchExpert} onCreate={onCreateExpert} onAssign={onAssignExpert} onConfigure={onConfigureExpertGroups} />
+        <GroupWorkView trees={groupRequestTrees} onRetry={onGroupRequestRetry} />
+      </div>}
       {openQuestion && <WorkflowQuestionDialog question={{ ...openQuestion, taskTitle: openQuestionNode?.title || '' }} running={running} onAnswer={onQuestionAnswer} onClose={() => setOpenQuestionTaskId(null)} />}
-      {openProblem && <WorkflowProblemDialog problem={openProblem} running={running} onSubmit={onProblemResolve} onClose={() => setOpenProblemTaskId(null)} />}
+      {expertiseHelp.length > 0 && activeWorkspaceTab !== 'collaboration' && <button type="button" className="expertise-shortcut btn btn-secondary" onClick={() => selectWorkspaceTab('collaboration')}><Icon name="users" />{t('Fehlende Expertise klären')} ({expertiseHelp.length})</button>}
+      {(acceptanceProblem || openProblem) && <WorkflowProblemDialog problem={acceptanceProblem || openProblem} running={running} onSubmit={onProblemResolve} onClose={() => { setAcceptanceProblem(null); setOpenProblemTaskId(null); }} />}
+      {acceptanceDecisionRequest && <ManualAcceptanceDialog request={acceptanceDecisionRequest} running={false} onSubmit={(status, note) => {
+        onAcceptanceDecision?.(acceptanceDecisionRequest.node.id, acceptanceDecisionRequest.criterion.id, status, note);
+        setAcceptanceDecisionRequest(null);
+      }} onClose={() => setAcceptanceDecisionRequest(null)} />}
       {workflowImport && <WorkflowImportDialog draft={workflowImport} agentOptions={agentOptions} running={running} onMappingChange={onWorkflowImportMapping} onApply={onWorkflowImportApply} onClose={onWorkflowImportCancel} />}
     </aside>
   );

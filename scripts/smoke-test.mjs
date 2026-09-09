@@ -4,7 +4,7 @@ import http from 'node:http';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const require = createRequire(import.meta.url);
@@ -12,11 +12,14 @@ const require = createRequire(import.meta.url);
 const electronMainSource = await fs.readFile(path.join(root, 'electron/main.js'), 'utf8');
 const apiServerSource = await fs.readFile(path.join(root, 'electron/api-server.js'), 'utf8');
 const codexMainSource = await fs.readFile(path.join(root, 'electron/codex-main.js'), 'utf8');
+const llmStreamSource = await fs.readFile(path.join(root, 'electron/llm-stream.js'), 'utf8');
+const taskTicketStoreSource = await fs.readFile(path.join(root, 'electron/task-ticket-store.js'), 'utf8');
 const preloadSource = await fs.readFile(path.join(root, 'electron/preload.js'), 'utf8');
 const appSource = await fs.readFile(path.join(root, 'src/App.jsx'), 'utf8');
-const crossGroupCoordinatorSource = await fs.readFile(path.join(root, 'src/CrossGroupCoordinator.jsx'), 'utf8');
-const chatViewSource = await fs.readFile(path.join(root, 'src/ChatView.jsx'), 'utf8');
-const modalsSource = await fs.readFile(path.join(root, 'src/Modals.jsx'), 'utf8');
+const crossGroupCoordinatorSource = (await Promise.all(['src/cross-group-coordination.mjs', 'src/CrossGroupCoordinator.jsx'].map(file => fs.readFile(path.join(root, file), 'utf8')))).join('\n');
+const chatParts = await Promise.all(['src/chat-workflow-helpers.mjs', 'src/chat-view-ui.jsx', 'src/ChatView.jsx', 'src/useConversationRunner.js'].map(file => fs.readFile(path.join(root, file), 'utf8')));
+const chatViewSource = chatParts.slice(0, 2).join('\n') + '\n' + chatParts[2].replace(/const runAgents = useConversationRunner\([\s\S]*?\);/, () => chatParts[3]);
+const modalsSource = (await Promise.all(['src/AgentModal.jsx', 'src/GroupModal.jsx', 'src/SettingsPanel.jsx'].map(file => fs.readFile(path.join(root, file), 'utf8')))).join('\n');
 const i18nSource = await fs.readFile(path.join(root, 'src/i18n.jsx'), 'utf8');
 const storeSource = await fs.readFile(path.join(root, 'src/store.jsx'), 'utf8');
 const mcpConfigSource = await fs.readFile(path.join(root, 'src/McpConfig.jsx'), 'utf8');
@@ -27,6 +30,7 @@ const taskGraphPanelSource = await fs.readFile(path.join(root, 'src/TaskGraphPan
 const workflowProblemDialogSource = await fs.readFile(path.join(root, 'src/WorkflowProblemDialog.jsx'), 'utf8');
 const workflowLayoutSource = await fs.readFile(path.join(root, 'src/workflow-layout.js'), 'utf8');
 const workflowPortabilitySource = await fs.readFile(path.join(root, 'src/workflow-portability.js'), 'utf8');
+const taskTicketSource = await fs.readFile(path.join(root, 'src/task-ticket.js'), 'utf8');
 const memoryProviderSource = await fs.readFile(path.join(root, 'src/memory-provider.js'), 'utf8');
 const reviewWindowSource = await fs.readFile(path.join(root, 'src/ReviewWindow.jsx'), 'utf8');
 const reviewEnvironmentSource = await fs.readFile(path.join(root, 'src/review-environment.js'), 'utf8');
@@ -38,10 +42,30 @@ const hiddenStarterSource = await fs.readFile(path.join(root, 'start.vbs'), 'utf
 assert.match(electronMainSource, /let taskWindow;/);
 assert.match(apiServerSource, /language: this\.store\.get\('language'\) \|\| 'de'/);
 assert.match(chatViewSource, /requestId: agentRequestId,\s+language,/);
+assert.match(
+  chatViewSource,
+  /import\s*\{[\s\S]*?\bTASK_STATUS\b[\s\S]*?\}\s*from '\.\/task-graph(?:\.js)?';/,
+  'ChatView must import TASK_STATUS before rendering workflow problem details',
+);
+assert.match(chatViewSource, /TASK_STATUS\[problemNode\.status\]/);
 assert.match(electronMainSource, /if \(taskWindow && !taskWindow\.isDestroyed\(\)\)[\s\S]*taskWindow\.focus\(\)/);
 assert.match(electronMainSource, /taskWindow = new BrowserWindow\(/);
 assert.match(electronMainSource, /taskWindow\.loadFile\(distFile, \{ query: \{ taskWindow: '1' \} \}\)/);
 assert.match(preloadSource, /openTaskWindow:[\s\S]*onTaskWindowAction:/);
+assert.match(preloadSource, /onLlmProgress:[\s\S]*llm-progress/);
+assert.match(preloadSource, /codexStatus: \(options = \{\}\)[\s\S]*codex-status/);
+assert.match(modalsSource, /codexStatus\(\{ force: true \}\)[\s\S]*codexLoginStartedAtRef[\s\S]*>= 120000[\s\S]*loginPending/);
+assert.match(electronMainSource, /sendLlmProgress[\s\S]*llm-progress/);
+assert.match(chatViewSource, /onLlmProgress[\s\S]*partialText/);
+assert.match(chatViewSource, /TypingBubble[\s\S]*typing-stream-preview/);
+assert.match(indexCssSource, /\.typing-stream-preview[\s\S]*\.typing-stream-cursor/);
+assert.match(llmStreamSource, /function createTextProgress[\s\S]*function postEventStream/);
+assert.match(taskTicketStoreSource, /\.agent-teams'[\s\S]*tickets[\s\S]*atomicWriteJson[\s\S]*history\.jsonl/);
+assert.match(preloadSource, /reconcileTaskTickets:[\s\S]*saveTaskTickets:[\s\S]*archiveTaskTickets:/);
+assert.match(storeSource, /migrateGraphTickets[\s\S]*reconcileTaskTickets[\s\S]*saveTaskTickets/);
+assert.match(taskGraphPanelSource, /workflow-ticket-priority[\s\S]*Priorität/);
+assert.match(taskGraphPanelSource, /Letzte Codex-Laufzeit[\s\S]*firstTextMs[\s\S]*reasoningEffort/);
+assert.match(chatViewSource, /buildTaskTicketContext[\s\S]*UNABHÄNGIGE TICKET-PRÜFUNG/);
 assert.match(rendererEntrySource, /isTaskWindow[\s\S]*<TaskGraphWindow \/>/);
 assert.doesNotMatch(chatViewSource, /createPortal|FloatingTaskGraphWindow|floating-task-window/);
 assert.equal((chatViewSource.match(/openTaskGraphWindow\(/g) || []).length, 2);
@@ -50,7 +74,7 @@ assert.ok(
   'chatAgents must be initialized before the workflow-window callback reads it',
 );
 assert.match(chatViewSource, /title=\{t\('Workflow'\)\}[\s\S]*onClick=\{\(\) => openTaskGraphWindow\(\)\}/);
-assert.match(appSource, /groups\.map\(group =>[\s\S]*<ChatView[\s\S]*onEditGroup=\{editedGroup =>/);
+assert.match(appSource, /groups\.map\(group =>[\s\S]*<ChatView[\s\S]*onEditGroup=\{\(editedGroup, options = \{\}\) =>/);
 assert.match(appSource, /<CrossGroupCoordinator \/>/);
 assert.match(appSource, /chat-view-slot[\s\S]*active=\{activeChat\?\.id === group\.id\}/);
 assert.match(chatViewSource, /chat\.type === 'group' && !projectPath[\s\S]*project-folder-notice[\s\S]*Zielordner auswählen/);
@@ -74,6 +98,10 @@ assert.match(electronMainSource, /ensureOfficialMcpPreset\(store\)/);
 assert.match(electronMainSource, /brandedWindowTitle\(nextState\.windowTitle \|\| 'Workflow'\)/);
 assert.match(taskGraphWindowSource, /document\.title = `Agent Teams – \$\{detail\}`/);
 assert.match(taskGraphWindowSource, /acceptance-decision/);
+assert.match(taskGraphWindowSource, /run-acceptance-tests/);
+assert.match(taskGraphPanelSource, /AcceptanceTestView[\s\S]*workflow-tab-tests/);
+assert.match(taskGraphPanelSource, /ManualAcceptanceDialog[\s\S]*Begründung \/ Prüfnachweis/);
+assert.match(chatViewSource, /runAcceptanceTests[\s\S]*reviewRun\(chat\.id, 'test'\)[\s\S]*allowManualOverride/);
 assert.match(taskGraphPanelSource, /Abnahmekriterien[\s\S]*criterion\.verification === 'user'[\s\S]*onAcceptanceDecision/);
 assert.match(taskGraphPanelSource, /workflow-canvas/);
 assert.match(taskGraphPanelSource, /centeredViewportForScale[\s\S]*element\.clientWidth - scaledWidth[\s\S]*element\.clientHeight - scaledHeight/);
@@ -115,16 +143,19 @@ assert.match(taskGraphPanelSource, /workflow-play-button[\s\S]*onClick=\{startWo
 assert.match(taskGraphPanelSource, /if \(running\) onPauseWorkflow\?\.\(\)[\s\S]*Workflow unterbrechen/);
 assert.match(taskGraphWindowSource, /onPauseWorkflow=\{\(\) => sendAction\('pause-workflow'\)\}/);
 assert.match(chatViewSource, /action\.type === 'pause-workflow'[\s\S]*handleCancelRun\(\)/);
-assert.match(chatViewSource, /const persistActiveWork = \(\) => \{[\s\S]*runIdRef\.current !== myRunId/);
+assert.match(chatViewSource, /onSnapshot: activeTasks => \{[\s\S]*runIdRef\.current !== myRunId/);
 assert.match(chatViewSource, /else if \(pm && agent\.id !== pm\.id\)[\s\S]*problemTrigger[\s\S]*buildTimeoutRecoveryTask[\s\S]*recoveryStatus: 'pm'/);
 assert.match(chatViewSource, /task\.runtimeRecovery && pm && agent\.id === pm\.id[\s\S]*buildRecoveryUserQuestion[\s\S]*recoveryStatus: 'user'/);
 assert.match(chatViewSource, /shouldStartQualityRecovery[\s\S]*isTaskComplexityFailure[\s\S]*const problemTrigger[\s\S]*trigger: problemTrigger/);
 assert.match(chatViewSource, /recoveredOriginalNodeId[\s\S]*approveAgentDoneTasks[\s\S]*PM hat die Recovery abgeschlossen/);
 assert.match(taskGraphPanelSource, /recoveryStatus[\s\S]*PM analysiert Timeout/);
 assert.match(taskGraphPanelSource, /recovering && <span className="workflow-recovery-badge"/);
-assert.match(taskGraphPanelSource, /timedOut && !recovering && !active[\s\S]*workflow-timeout-fix-button[\s\S]*onTimeoutRepair/);
+assert.match(taskGraphPanelSource, /repairable && !recovering && !active[\s\S]*workflow-timeout-fix-button[\s\S]*onTimeoutRepair/);
 assert.match(taskGraphWindowSource, /onTimeoutRepair=\{taskId => sendAction\('repair-timeout-task'/);
-assert.match(chatViewSource, /action\.type === 'repair-timeout-task'[\s\S]*buildTimeoutRecoveryTask[\s\S]*recoveryStatus: 'pm'[\s\S]*Workflow-Fixer/);
+assert.match(chatViewSource, /const startWorkflowRecovery[\s\S]*buildTimeoutRecoveryTask[\s\S]*invalidateTaskRecoveryBranch[\s\S]*recoveryStatus: 'pm'/);
+assert.match(chatViewSource, /action\.type === 'repair-timeout-task'[\s\S]*startWorkflowRecovery/);
+assert.match(workflowProblemDialogSource, /Hauptplan überarbeiten[\s\S]*Ausführung reparieren/);
+assert.match(taskGraphWindowSource, /resolve-workflow-problem'[\s\S]*mode/);
 assert.match(indexCssSource, /\.workflow-timeout-fix-button[\s\S]*\.workflow-timeout-fix-button:hover/);
 assert.match(taskGraphPanelSource, /startWorkflow[\s\S]*onStartWorkflow\?\.\(readyParallelNodeIds\.length >= 2 \? readyParallelNodeIds : \[\]\)/);
 assert.match(indexCssSource, /\.workflow-play-button[\s\S]*linear-gradient[\s\S]*\.workflow-play-button\.running/);
@@ -162,7 +193,7 @@ assert.match(chatViewSource, /activatePlanningMode\(\{ fresh: true, resetRequire
 assert.match(chatViewSource, /workflow-reset-input-required-[\s\S]*gelöschte Workflow wird nicht aus dem alten Chat rekonstruiert/);
 assert.match(preloadSource, /exportWorkflowFile:[\s\S]*workflow-file-export[\s\S]*importWorkflowFile:[\s\S]*workflow-file-import/);
 assert.match(electronMainSource, /MAX_WORKFLOW_FILE_BYTES = 1024 \* 1024[\s\S]*handleIpc\('workflow-file-export'[\s\S]*handleIpc\('workflow-file-import'/);
-assert.match(taskGraphPanelSource, /workflow-file-button import[\s\S]*onWorkflowImport[\s\S]*workflow-file-button export[\s\S]*onWorkflowExport/);
+assert.match(taskGraphPanelSource, /workflow-file-button export[\s\S]*onWorkflowExport[\s\S]*workflow-file-button import[\s\S]*onWorkflowImport/);
 assert.match(taskGraphPanelSource, /WorkflowImportDialog[\s\S]*workflow-import-mappings[\s\S]*Workflow als Entwurf importieren/);
 assert.match(taskGraphWindowSource, /import-workflow[\s\S]*export-workflow[\s\S]*map-workflow-import-slot[\s\S]*apply-workflow-import/);
 assert.match(chatViewSource, /createWorkflowExportDocument[\s\S]*suggestWorkflowAgentMappings[\s\S]*createImportedTaskGraph/);
@@ -179,11 +210,11 @@ assert.match(taskGraphWindowSource, /pendingQuestions=\{state\.pendingQuestions 
 assert.match(taskGraphPanelSource, /WorkflowQuestionDialog[\s\S]*workflow-question-answer/);
 assert.match(taskGraphPanelSource, /pendingQuestion[\s\S]*workflow-question-badge[\s\S]*onQuestionOpen/);
 assert.match(indexCssSource, /\.workflow-question-badge[\s\S]*\.workflow-question-overlay[\s\S]*\.workflow-question-dialog textarea/);
-assert.match(workflowProblemDialogSource, /WorkflowProblemDialog[\s\S]*workflow-problem-answer[\s\S]*Lösung an PM senden/);
+assert.match(workflowProblemDialogSource, /WorkflowProblemDialog[\s\S]*workflow-problem-answer[\s\S]*Hauptplan überarbeiten[\s\S]*Ausführung reparieren/);
 assert.match(taskGraphPanelSource, /workflowProblem[\s\S]*workflow-problem-badge[\s\S]*onProblemOpen/);
 assert.match(taskGraphWindowSource, /workflowProblems=\{state\.workflowProblems \|\| \[\]\}[\s\S]*resolve-workflow-problem/);
 assert.match(chatViewSource, /collectWorkflowProblems[\s\S]*workflowProblemKey[\s\S]*Workflow-Problem bei/);
-assert.match(chatViewSource, /resolveWorkflowProblem[\s\S]*@PM: Löse das folgende Workflow-Problem[\s\S]*planningOnly: true/);
+assert.match(chatViewSource, /resolveWorkflowProblem[\s\S]*startWorkflowRecovery[\s\S]*beginPMPlanRevision[\s\S]*planningOnly: true/);
 assert.match(chatViewSource, /messageWorkflowProblem[\s\S]*label: t\('Lösen'\)[\s\S]*setOpenWorkflowProblem/);
 assert.match(indexCssSource, /\.workflow-problem-badge[\s\S]*\.workflow-problem-dialog/);
 assert.match(indexCssSource, /\.system-message-action\.problem/);
@@ -223,7 +254,8 @@ assert.doesNotMatch(chatViewSource, /workflowSolution|solution-tip/);
 assert.doesNotMatch(chatViewSource, /pm-plan-takeover|restore-pm-plan-origin|beginPmPlanOverride|restorePmPlanOrigin/);
 assert.match(taskGraphPanelSource, /workflow-node/);
 assert.match(workflowLayoutSource, /buildWorkflowLayout[\s\S]*workflowPosition[\s\S]*workflowEdgePath/);
-assert.match(chatViewSource, /planning-mode-bar[\s\S]*Planversion freigeben & Workflow starten/);
+assert.match(chatViewSource, /className="input-area"[\s\S]*className="composer-plan-actions"[\s\S]*handleScheduleChoice[\s\S]*disabled=\{workflowStartDisabled\}[\s\S]*Plan freigeben & starten/,
+  'Planfreigabe muss mit bestehenden Freigabeprüfungen direkt beim Eingabefeld stehen.');
 assert.match(chatViewSource, /handleDeactivatePlanningMode[\s\S]*planningSuspended: true[\s\S]*discardConversationCheckpoint/);
 assert.match(chatViewSource, /currentGraph\?\.planningSuspended[\s\S]*suspendedPlanningCheckpoint[\s\S]*workflowState: 'planning'/);
 assert.match(chatViewSource, /planning-mode-close[\s\S]*Planungsmodus deaktivieren/);
@@ -241,7 +273,7 @@ assert.match(chatViewSource, /validateApprovedTaskExecution[\s\S]*status: 'needs
 assert.match(chatViewSource, /source: runtimeRecovery \? plannedNode\.source : 'approved-workflow'/);
 assert.match(chatViewSource, /checkpoint\.mode === 'planning' \? lockTaskGraphPlan\(scheduledGraph\) : scheduledGraph|checkpoint\.mode !== 'planning'/);
 assert.match(chatViewSource, /action\.type === 'update-task-position'[\s\S]*updateWorkflowViewPosition/);
-assert.match(taskGraphPanelSource, /Modell für diese Aufgabe[\s\S]*Planversion freigeben & Workflow starten/);
+assert.match(taskGraphPanelSource, /Modell für diese Aufgabe[\s\S]*Plan freigeben & starten/);
 assert.match(taskGraphPanelSource, /Plan bearbeiten/);
 assert.match(taskGraphPanelSource, /Aufgabe erneut versuchen/);
 assert.match(taskGraphPanelSource, /workflow-retry-actions[\s\S]*workflow-retry-task[\s\S]*onRetryTask/);
@@ -272,18 +304,26 @@ assert.match(chatViewSource, /reviewStop\(chat\.id, 'test'\)/);
 assert.match(chatViewSource, /memAPI\.handoff\(memoryNamespace, handoff\)/);
 assert.match(memoryProviderSource, /createCrossGroupResultEntry[\s\S]*dedupeKey: `cross-group-result:\$\{normalizedRequestId\}`[\s\S]*async writeOnce/);
 assert.match(crossGroupCoordinatorSource, /persistCrossGroupResultMemory[\s\S]*destinationsByKey[\s\S]*\.writeOnce\([\s\S]*memoryStoredAt:/);
-assert.equal((chatViewSource.match(/openReviewWindow\(/g) || []).length, 1);
+assert.equal((chatViewSource.match(/openReviewWindow\(/g) || []).length, 2);
 assert.match(chatViewSource, /typing-agent-name[\s\S]*agent\?\.name[\s\S]*typing-agent-role[\s\S]*agent\?\.role[\s\S]*typing-indicator/);
-assert.match(chatViewSource, /buildRelevantConversationHistory\(\{[\s\S]*includeGroupContext: !isDirectChat && task\.source === 'user'/);
+assert.match(chatViewSource, /buildRelevantConversationHistory\(\{[\s\S]*includeGroupContext: isOrchestrator && task\.source === 'user'/);
 assert.match(chatViewSource, /onCreateEntry=\{handleCreateMemoryEntry\}/);
-const messageComposerTextarea = chatViewSource.match(/<textarea[\s\S]*?className="message-input"[\s\S]*?\/>/)?.[0] || '';
+const messageComposerTextarea = chatViewSource.match(/<textarea(?:(?!<textarea)[\s\S])*?className="message-input"[\s\S]*?\/>/)?.[0] || '';
 assert.match(messageComposerTextarea, /autoFocus/);
 assert.doesNotMatch(messageComposerTextarea, /disabled=\{running\}/);
 assert.doesNotMatch(indexCssSource, /body\s*\{[^}]*user-select:\s*none/);
 assert.match(indexCssSource, /input, textarea, \[contenteditable="true"\][\s\S]*-webkit-user-select: text;[\s\S]*user-select: text;/);
 assert.match(indexCssSource, /\.message-input \{[\s\S]*pointer-events: auto;[\s\S]*user-select: text;/);
+assert.match(appSource, /className="app-shell"/);
+assert.match(chatViewSource, /className="composer-message-row"[\s\S]*className="message-input"[\s\S]*className="send-btn"/);
+assert.match(indexCssSource, /#root, \.app-shell[\s\S]*min-height: 0;[\s\S]*\.app-layout[\s\S]*min-width: 0;[\s\S]*min-height: 0;/);
+assert.match(indexCssSource, /\.chat-area[\s\S]*min-width: 0;[\s\S]*\.composer-message-row[\s\S]*min-width: 0;/);
+assert.match(indexCssSource, /\.message-input \{[\s\S]*width: 0;[\s\S]*min-width: 0;[\s\S]*overflow-y: auto;/);
+assert.match(indexCssSource, /@media \(max-width: 720px\)[\s\S]*\.sidebar:not\(\.collapsed\)[\s\S]*\.input-area[\s\S]*flex-direction: column/);
+assert.match(indexCssSource, /@media \(max-width: 520px\) and \(max-height: 520px\)[\s\S]*\.project-folder-notice \{ display: none; \}[\s\S]*\.planning-mode-bar[\s\S]*max-height: 100px/);
+assert.match(chatViewSource, /input \? Math\.min\(textarea\.scrollHeight, 120\) : 40[\s\S]*new ResizeObserver\(scheduleResize\)/);
 assert.match(chatViewSource, /const selectionStart = textarea\.selectionStart;[\s\S]*textarea\.focus\(\{ preventScroll: true \}\);[\s\S]*textarea\.setSelectionRange\(selectionStart, selectionEnd\)/);
-const messageComposerSendButton = chatViewSource.match(/<button[\s\S]*?className="send-btn"[\s\S]*?>➤<\/button>/)?.[0] || '';
+const messageComposerSendButton = chatViewSource.match(/<button(?:(?!<button)[\s\S])*?className="send-btn"[\s\S]*?<\/button>/)?.[0] || '';
 assert.match(messageComposerSendButton, /disabled=\{!input\.trim\(\) && !pendingAttachments\.length\}/);
 assert.doesNotMatch(messageComposerSendButton, /disabled=\{[^}]*running/);
 assert.match(chatViewSource, /queueBehindActiveRun[\s\S]*enqueueUserRequest/);
@@ -299,7 +339,7 @@ assert.match(chatViewSource, /mcp-inline-permission-actions[\s\S]*onDecision\('d
 assert.match(chatViewSource, /typingAgents[\s\S]*mcpApproval && <McpPermissionPrompt request=\{mcpApproval\}/);
 assert.doesNotMatch(chatViewSource, /mcp-permission-overlay|McpPermissionDialog/);
 assert.match(indexCssSource, /\.mcp-inline-permission[\s\S]*\.mcp-inline-permission-actions/);
-assert.match(chatViewSource, /requestPermission: requestMcpPermission/);
+assert.match(chatViewSource, /requestPermission: request =>[\s\S]*requestMcpPermission\(request\)/);
 assert.match(chatViewSource, /onPermissionConsumed: handleMcpPermissionConsumed/);
 assert.doesNotMatch(chatViewSource, /mcpChatPermissionGrants/);
 assert.match(chatViewSource, /savedGrant\?\.scope === 'chat'/);
@@ -344,22 +384,33 @@ assert.match(modalsSource, /OpenAI-kompatibel[\s\S]*Anthropic Messages[\s\S]*Goo
 
 const delegationSource = await fs.readFile(path.join(root, 'src/delegation.js'), 'utf8');
 const delegationUrl = `data:text/javascript;base64,${Buffer.from(delegationSource).toString('base64')}`;
+const taskTicketUrl = `data:text/javascript;base64,${Buffer.from(taskTicketSource).toString('base64')}`;
+const taskTicket = await import(taskTicketUrl);
 
 async function importSource(relativePath) {
+  if (relativePath === 'src/quality-cascade.js') return import(pathToFileURL(path.join(root, 'electron/quality-cascade.mjs')).href);
   const source = (await fs.readFile(path.join(root, relativePath), 'utf8'))
-    .replace(/from '\.\/delegation';/g, `from '${delegationUrl}';`);
+    .replace("from './streaming-plan.mjs';", `from '${pathToFileURL(path.join(root, 'src/streaming-plan.mjs')).href}';`)
+    .replace(/from '\.\/delegation(?:\.js)?';/g, `from '${delegationUrl}';`)
+    .replace(/from '\.\/task-ticket';/g, `from '${taskTicketUrl}';`);
   return import(`data:text/javascript;base64,${Buffer.from(source).toString('base64')}`);
 }
 
 const orchestration = await importSource('src/orchestrator.js');
+const streamedTicket = { id: 'live-1', title: 'Erstes Ticket', agent: 'Coder', description: 'Liste: {a} und "b"', acceptanceCriteria: ['Prüfbar'] };
+const planPrefix = `[[TASK_PLAN]]\n{"version":2,"tasks":[${JSON.stringify(streamedTicket)}`;
+assert.equal(orchestration.extractStreamingTaskPlan(planPrefix.slice(0, -1)), null);
+assert.equal(orchestration.extractStreamingTaskPlan(`${planPrefix},{"id":"live-2","title":"Halb` ).tasks.length, 1);
+assert.equal(orchestration.extractStreamingTaskPlan(planPrefix).tasks[0].description, streamedTicket.description);
+assert.equal(orchestration.extractStreamingTaskPlan('Kein Plan'), null);
+assert.equal(orchestration.extractStreamingTaskPlan(`${planPrefix}]}[[/TASK_PLAN]]`).tasks.length, 1);
+const agentRuntime = await importSource('src/agent-runtime.js');
 const memoryRules = await importSource('src/memory.js');
-const taskGraphPreparedSource = (await fs.readFile(path.join(root, 'src/task-graph.js'), 'utf8'))
-  .replace(/from '\.\/delegation';/g, `from '${delegationUrl}';`);
-const taskGraphUrl = `data:text/javascript;base64,${Buffer.from(taskGraphPreparedSource).toString('base64')}`;
+const taskGraphUrl = pathToFileURL(path.join(root, 'src/task-graph.js')).href;
 const taskGraph = await import(taskGraphUrl);
 const workflowPortabilityPreparedSource = workflowPortabilitySource
   .replace(/from '\.\/task-graph';/g, `from '${taskGraphUrl}';`)
-  .replace(/from '\.\/delegation';/g, `from '${delegationUrl}';`);
+  .replace(/from '\.\/delegation(?:\.js)?';/g, `from '${delegationUrl}';`);
 const workflowPortability = await import(`data:text/javascript;base64,${Buffer.from(workflowPortabilityPreparedSource).toString('base64')}`);
 const workflowLayout = await importSource('src/workflow-layout.js');
 const llm = await importSource('src/llm.js');
@@ -375,6 +426,16 @@ const delegation = await import(delegationUrl);
 assert.equal(llm.normalizeConversationLanguage('en'), 'en');
 assert.equal(llm.normalizeConversationLanguage('de'), 'de');
 assert.equal(llm.normalizeConversationLanguage('fr'), 'de');
+assert.equal(agentRuntime.shouldEnableProjectTools({ projectPath: 'C:\\Project', objective: 'Warum ist die Antwort langsam?', source: 'user' }), false);
+assert.equal(agentRuntime.shouldEnableProjectTools({ projectPath: 'C:\\Project', objective: 'Ändere die React-Komponente', source: 'user' }), true);
+assert.equal(agentRuntime.shouldEnableProjectTools({ projectPath: 'C:\\Project', objective: 'Plane die Änderung', planningOnly: true }), false);
+assert.equal(agentRuntime.shouldEnableProjectTools({ projectPath: 'C:\\Project', objective: 'Task', source: 'approved-workflow' }), true);
+assert.equal(agentRuntime.codexReasoningEffortForTask({ planningOnly: true, complexity: 'high' }), 'low');
+assert.equal(agentRuntime.codexReasoningEffortForTask({ complexity: 'low' }), 'low');
+assert.equal(agentRuntime.codexReasoningEffortForTask({ complexity: 'medium' }), 'medium');
+assert.equal(agentRuntime.codexReasoningEffortForTask({ complexity: 'high' }), 'high');
+assert.equal(agentRuntime.codexReasoningEffortForTask({ runtimeRecovery: true, qualityMode: 'fast' }), 'high');
+assert.equal(agentRuntime.codexReasoningEffortForTask({ escalated: true }), 'high');
 assert.match(llm.buildResponseLanguageInstruction('en'), /Write every user-visible sentence in English/);
 assert.match(llm.buildResponseLanguageInstruction('en'), /PM plans[\s\S]*@Agent delegations[\s\S]*final answers/);
 assert.match(llm.buildResponseLanguageInstruction('de'), /jeden für den User sichtbaren Satz auf Deutsch/);
@@ -486,7 +547,7 @@ assert.match(chatViewSource, /status: 'limit-reached'/);
 assert.doesNotMatch(chatViewSource, /maxTurns: 12/);
 assert.doesNotMatch(chatViewSource, /500 \+ Math\.min\(taskQueue\.turns/);
 assert.match(chatViewSource, /findSafeAutoParallelTaskIds[\s\S]*taskQueue\.prioritize/);
-assert.match(chatViewSource, /runWorkConservingApprovedBatch[\s\S]*Promise\.race/);
+assert.match(chatViewSource, /runWorkConservingApprovedBatch[\s\S]*runTaskPool/);
 assert.match(chatViewSource, /enqueueReadyApprovedWorkflowTasks[\s\S]*isTaskNodeReady/);
 assert.match(chatViewSource, /nextMatching[\s\S]*!activeAgentIds\.has\(candidate\.agent\.id\)/);
 assert.match(chatViewSource, /enqueueDependencyPreparationTasks[\s\S]*findDependencyPreparationCandidateIds/);
@@ -915,7 +976,7 @@ assert.equal(quality.resolveQualityPolicy({
 assert.equal(quality.getEscalationAgent(qualityAgent, { escalationProvider: 'openai', escalationModel: 'o1-mini' }).provider, 'openai');
 assert.equal(quality.getEscalationAgent(
   { ...coder, provider: 'api-openrouter-test', model: 'cheap-model' },
-  { escalationProvider: 'same' }, {},
+  { escalationProvider: 'same', escalationModel: 'strong-model' }, {},
   { 'api-openrouter-test': ['cheap-model', 'strong-model'] },
 ).model, 'strong-model');
 assert.deepEqual(quality.evaluateResponseQuality({
@@ -1023,6 +1084,20 @@ assert.equal(await llm.callLLM({
   history: [{ agentId: 'user', senderName: 'User', text: 'Teste den API-Weg.' }],
 }), 'Anthropic-API-Antwort');
 assert.equal(directAnthropicCallCount, 1);
+window.electronAPI.codexCall = async params => {
+  assert.equal(params.reasoningEffort, 'low');
+  return { error: 'Codex ist nicht angemeldet.', status: 401 };
+};
+await assert.rejects(
+  () => llm.callLLM({
+    apiKeys: { codexCli: true },
+    agent: { ...coder, provider: 'codex', model: 'gpt-5.6-sol' },
+    history: [{ agentId: 'user', senderName: 'User', text: 'Plane den Task.' }],
+    reasoningEffort: 'low',
+  }),
+  error => error.status === 401 && /nicht angemeldet/i.test(error.message),
+);
+delete window.electronAPI.codexCall;
 window.electronAPI.llmCall = async params => {
   assert.equal(params.provider, 'api-openrouter-test');
   assert.equal(params.model, '~openai/gpt-latest');
@@ -1501,7 +1576,22 @@ assert.ok(userEditedPlan.nodes.find(node => node.id === manualTask.id).planOrder
 userEditedPlan = taskGraph.splitPlanningTask(userEditedPlan, manualTask.id);
 assert.equal(userEditedPlan.nodes.filter(node => node.source === 'User-Plan' && taskGraph.inferTaskNodeType(node) === 'task').length, 2);
 const splitSuccessor = userEditedPlan.nodes.find(node => node.source === 'User-Plan' && taskGraph.inferTaskNodeType(node) === 'task' && node.id !== manualTask.id);
+assert.notEqual(splitSuccessor.ticketId, userEditedPlan.nodes.find(node => node.id === manualTask.id).ticketId);
 assert.equal(userEditedPlan.edges.some(edge => edge.kind === 'dependency' && edge.from === manualTask.id && edge.to === splitSuccessor.id), true);
+const splitFixture = { nodes: [
+  { id: 'before', nodeType: 'task' },
+  { id: 'original', ticketId: 'original-ticket', planTaskId: 'original-ticket', title: 'Arbeit', nodeType: 'task', planRootId: 'root' },
+  { id: 'after', nodeType: 'task' },
+], edges: [{ id: 'in', from: 'before', to: 'original', kind: 'dependency' }, { id: 'out', from: 'original', to: 'after', kind: 'review' }],
+  flowPoints: [{ id: 'junction' }], flowEdges: [{ id: 'manual-out', from: 'original', to: 'junction' }] };
+const splitGraph = taskGraph.splitPlanningTask(splitFixture, 'original');
+const secondPart = splitGraph.nodes.find(node => !splitFixture.nodes.some(old => old.id === node.id));
+assert.ok(splitGraph.edges.some(edge => edge.from === 'before' && edge.to === 'original'));
+assert.ok(splitGraph.edges.some(edge => edge.from === 'original' && edge.to === secondPart.id && edge.kind === 'dependency'));
+assert.ok(splitGraph.edges.some(edge => edge.from === secondPart.id && edge.to === 'after' && edge.kind === 'review'));
+assert.ok(splitGraph.flowEdges.some(edge => edge.from === secondPart.id && edge.to === 'junction'));
+assert.ok(splitGraph.edges.every(edge => Boolean(edge.id)));
+assert.notEqual(secondPart.ticketId, 'original-ticket');
 userEditedPlan = taskGraph.removePlanningTask(userEditedPlan, splitSuccessor.id);
 assert.equal(userEditedPlan.nodes.some(node => node.id === splitSuccessor.id), false);
 const revisedPlannedGraph = taskGraph.materializeTaskPlan(plannedGraph, {
@@ -1641,12 +1731,58 @@ assert.equal(taskGraph.validateApprovedTaskExecution(approvedRecoveryGraph, {
 }).ok, false);
 assert.equal(taskGraph.validateApprovedTaskExecution(approvedRecoveryGraph, {
   ...approvedRecovery,
+  source: 'timeout-recovery-step',
+  agent: tester,
+  recovery: { ...approvedRecovery.recovery, allowedAgentIds: [coder.id, tester.id] },
+}).ok, true);
+assert.equal(taskGraph.validateApprovedTaskExecution(approvedRecoveryGraph, {
+  ...approvedRecovery,
   runtimeRecovery: false,
 }).ok, false);
 assert.equal(taskGraph.validateApprovedTaskExecution(taskGraph.createTaskGraph('free-mode'), {
   graphNodeId: 'dynamic-task',
   agent: coder,
 }).mode, 'free');
+const notedRecoveryGraph = taskGraph.appendTaskRecoveryNote(approvedRecoveryGraph, plannedIds.implement, {
+  text: 'Prüfe zuerst die Parsergrenze.',
+  problem: 'Ausgabe bleibt leer.',
+});
+assert.equal(notedRecoveryGraph.nodes.find(node => node.id === plannedIds.implement).recoveryNotes.length, 1);
+const invalidatedRecoveryGraph = taskGraph.invalidateTaskRecoveryBranch(notedRecoveryGraph, plannedIds.implement, {
+  recoveryAttempt: 1,
+  reason: 'Ausgabe bleibt leer.',
+});
+assert.equal(invalidatedRecoveryGraph.nodes.find(node => node.id === plannedIds['final-review']).status, 'stale_dependency');
+assert.equal(invalidatedRecoveryGraph.nodes.find(node => node.id === plannedIds.implement).recoveryAttempt, 1);
+const recoveryDag = taskGraph.materializeRuntimeRecoveryPlan(invalidatedRecoveryGraph, {
+  rootNodeId: 'plan-root',
+  controllerNodeId: 'runtime-recovery-review',
+  recovery: {
+    ...approvedRecovery.recovery,
+    attempt: 1,
+    batchId: 'batch-1',
+    planRootId: 'plan-root',
+  },
+  tasks: [
+    { id: 'analyse', title: 'Ursache analysieren', agentId: coder.id, agentName: coder.name, dependsOn: [], order: 0 },
+    { id: 'fix', title: 'Korrektur prüfen', agentId: tester.id, agentName: tester.name, dependsOn: ['analyse'], order: 1 },
+  ],
+});
+const recoveryAnalyseId = `${plannedIds.implement}:recovery:1:analyse`;
+const recoveryFixId = `${plannedIds.implement}:recovery:1:fix`;
+assert.equal(taskGraph.isTaskNodeReady(recoveryDag, recoveryAnalyseId), true);
+assert.equal(taskGraph.isTaskNodeReady(recoveryDag, recoveryFixId), false);
+assert.equal(recoveryDag.edges.some(edge => edge.from === recoveryAnalyseId && edge.to === recoveryFixId && edge.kind === 'dependency'), true);
+assert.equal(recoveryDag.nodes.find(node => node.id === plannedIds.implement).recoveryPlan.batchId, 'batch-1');
+const pmRevisionDraft = taskGraph.beginPMPlanRevision(approvedRecoveryGraph, {
+  taskId: plannedIds.implement,
+  note: 'Architektur ändern',
+  problem: 'Der Plan ist strukturell falsch.',
+});
+assert.equal(pmRevisionDraft.workflowState, 'planning');
+assert.equal(pmRevisionDraft.revisionStatus, 'revision_required');
+assert.equal(pmRevisionDraft.changeRequest.reason, 'pm-proposed-revision');
+assert.deepEqual(pmRevisionDraft.changeRequest.taskIds, [plannedIds.implement]);
 let preparationGraph = taskGraph.lockTaskGraphPlan(plannedGraph);
 preparationGraph = taskGraph.updateTaskNodeStatus(preparationGraph, plannedIds.implement, 'running');
 assert.deepEqual(taskGraph.findDependencyPreparationCandidateIds(preparationGraph, {
@@ -1794,6 +1930,55 @@ assert.equal(acceptanceSummary.ready, true);
 assert.equal(acceptanceSummary.passed, 2);
 assert.equal(acceptanceGraph.nodes.find(node => node.id === deliverableNodeId).status, 'completed');
 
+let manualAcceptanceGraph = taskGraph.createTaskGraph('manual-acceptance', 'Manuelle Freigabe');
+manualAcceptanceGraph = taskGraph.upsertTaskNode(manualAcceptanceGraph, {
+  id: 'manual-result', title: 'Ergebnis ohne AC', agentId: coder.id, agentName: coder.name,
+  source: 'PM', nodeType: 'task', status: 'agent_done', acceptanceCriteria: [],
+});
+manualAcceptanceGraph = taskGraph.approveAgentDoneTasks(manualAcceptanceGraph);
+assert.equal(manualAcceptanceGraph.nodes[0].status, 'agent_done', 'a ticket without AC must not auto-complete');
+assert.equal(taskGraph.summarizeAcceptance(manualAcceptanceGraph).ready, false, 'missing AC require user approval');
+manualAcceptanceGraph = taskGraph.ensureManualAcceptanceCriterion(manualAcceptanceGraph, 'manual-result', { requestedBy: 'Sarah' });
+assert.equal(manualAcceptanceGraph.nodes[0].acceptanceCriteria[0].verification, 'user');
+assert.equal(manualAcceptanceGraph.nodes[0].manualAcceptanceRequestedBy, 'Sarah');
+manualAcceptanceGraph = taskGraph.applyAcceptanceDecisions(manualAcceptanceGraph, [{
+  taskId: 'manual-result', criterionId: 'manual-result-manual-release', status: 'passed', note: 'Vom User vollständig geprüft.',
+}], { reviewer: 'User', userOnly: true, allowManualOverride: true });
+assert.equal(manualAcceptanceGraph.nodes[0].status, 'completed');
+
+let automaticAcceptanceGraph = taskGraph.createTaskGraph('automatic-acceptance', 'Automatische Prüfung');
+automaticAcceptanceGraph = taskGraph.upsertTaskNode(automaticAcceptanceGraph, {
+  id: 'automatic-result', title: 'Automatisch prüfen', agentId: coder.id, agentName: coder.name,
+  source: 'PM', nodeType: 'task', status: 'agent_done',
+  acceptanceCriteria: taskGraph.normalizeAcceptanceCriteria([{
+    id: 'lint-clean', text: 'Der Linter meldet keine Fehler.', verification: 'automatic', required: true,
+  }], { taskId: 'automatic-result' }),
+});
+automaticAcceptanceGraph = taskGraph.updateAcceptanceTestRun(automaticAcceptanceGraph, ['automatic-result'], {
+  id: 'run-1', status: 'running', sourceRevision: 2,
+});
+automaticAcceptanceGraph = taskGraph.updateAcceptanceTestRun(automaticAcceptanceGraph, ['automatic-result'], {
+  id: 'run-1', status: 'passed', command: 'npm test', output: 'ok',
+});
+assert.deepEqual(automaticAcceptanceGraph.nodes[0].acceptanceTestRuns.map(run => run.status), ['passed']);
+automaticAcceptanceGraph = taskGraph.applyAcceptanceDecisions(automaticAcceptanceGraph, [{
+  taskId: 'automatic-result', criterionId: 'lint-clean', status: 'passed', note: 'npm test: ok',
+}], { reviewer: 'Automatischer Prüflauf' });
+assert.equal(automaticAcceptanceGraph.nodes[0].status, 'completed');
+
+let overrideGraph = taskGraph.createTaskGraph('manual-override', 'Ausnahmefreigabe');
+overrideGraph = taskGraph.upsertTaskNode(overrideGraph, {
+  id: 'override-result', title: 'Extern prüfen', agentId: coder.id, nodeType: 'task', status: 'retryable',
+  acceptanceCriteria: taskGraph.normalizeAcceptanceCriteria([{
+    id: 'external-ok', text: 'Externer Nachweis liegt vor.', verification: 'automatic', required: true, status: 'failed',
+  }], { taskId: 'override-result' }),
+});
+overrideGraph = taskGraph.applyAcceptanceDecisions(overrideGraph, [{
+  taskId: 'override-result', criterionId: 'external-ok', status: 'waived', note: 'Externer Bericht wurde manuell geprüft.',
+}], { reviewer: 'User', userOnly: true, allowManualOverride: true });
+assert.equal(overrideGraph.nodes[0].status, 'completed');
+assert.equal(overrideGraph.nodes[0].acceptanceCriteria[0].evidence.at(-1).kind, 'user-override');
+
 let agentHandoffGraph = taskGraph.upsertTaskNode(graph, { id: 'qa-fix', title: 'Spezialprüfung', agentId: tester.id, agentName: tester.name, source: 'Max', parentNodeId: 'frontend', status: 'planned' });
 agentHandoffGraph = taskGraph.addTaskEdge(agentHandoffGraph, { from: 'frontend', to: 'qa-fix', kind: 'delegation' });
 assert.equal(taskGraph.projectTaskTree(agentHandoffGraph).primaryParentByNode.get('qa-fix'), 'frontend');
@@ -1884,8 +2069,8 @@ const selectedGroupContext = orchestration.buildRelevantConversationHistory({
   chatType: 'group',
   includeGroupContext: true,
 });
-assert.equal(selectedGroupContext.length, 12);
-assert.equal(selectedGroupContext[0].text, 'Gruppennachricht 1');
+assert.equal(selectedGroupContext.length, 8);
+assert.equal(selectedGroupContext[0].text, 'Gruppennachricht 5');
 assert.equal(selectedGroupContext.at(-1).text, 'Gruppennachricht 12');
 assert.deepEqual(orchestration.buildRelevantConversationHistory({
   history: groupContextSource,
@@ -1958,6 +2143,16 @@ const sessionA = orchestration.buildAgentSession({ agent: coder, taskCapsule: ca
 const sessionB = orchestration.buildAgentSession({ agent: coder, taskCapsule: capsule });
 assert.notEqual(sessionA.sessionId, sessionB.sessionId);
 assert.equal(sessionA.messages.length, 1);
+assert.equal(orchestration.buildAgentSession({ agent: coder, taskCapsule: capsule, lastUserMessage: 'Feature prüfen' }).messages.length, 1);
+const boundedCapsule = orchestration.buildTaskCapsule({ agentName: 'Max', agentRole: 'Developer',
+  objective: 'MANDATORY_OBJECTIVE', acceptanceCriteria: [{ id: 'required', text: 'MANDATORY_CRITERION' }],
+  handoff: { from: 'PM', summary: 'x'.repeat(10000), findings: Array(100).fill('y'.repeat(10000)), openQuestions: ['Wichtige Rückfrage'] },
+});
+assert.ok(boundedCapsule.length < 12000);
+assert.match(boundedCapsule, /MANDATORY_OBJECTIVE/);
+assert.match(boundedCapsule, /MANDATORY_CRITERION/);
+assert.match(boundedCapsule, /Wichtige Rückfrage/);
+assert.match(boundedCapsule, /gekürzt/);
 
 const handoffs = orchestration.extractHandoffsFromReply(
   '@Max: Implementiere die Seite.\n@Lisa: Prüfe danach die Navigation.\n@user: Optionales Feedback.',
@@ -2117,7 +2312,14 @@ assert.equal(timeoutRecoveryTask.recovery.originalGraphNodeId, 'approved-origina
 assert.equal(timeoutRecoveryTask.recovery.pmAgentId, pm.id);
 assert.equal(timeoutRecoveryTask.runtimeRecovery, true);
 assert.equal(timeoutRecoveryTask.planRootId, 'approved-plan-root');
-assert.match(timeoutRecoveryTask.handoff.summary, /ausschließlich den ersten ausführbaren Schritt/);
+assert.match(timeoutRecoveryTask.handoff.summary, /Recovery-Teilplan/);
+assert.match(timeoutRecoveryTask.handoff.summary, /Versuch 1\/2/);
+assert.equal(orchestration.buildTimeoutRecoveryTask({
+  pm,
+  originalAgent: coder,
+  objective: 'Noch ein Versuch',
+  previousRecovery: { ...timeoutRecoveryTask.recovery, attempt: orchestration.MAX_PM_RECOVERY_ATTEMPTS },
+}), null);
 const qualityRecoveryTask = orchestration.buildTimeoutRecoveryTask({
   pm,
   originalAgent: coder,
@@ -2165,8 +2367,9 @@ const workflowRecoveryPrompt = orchestration.buildIsolatedSystemPrompt({
   userOwnedWorkflow: true,
   recoveryMode: true,
 });
-assert.match(workflowRecoveryPrompt, /automatisch ausgelöste Timeout-Recovery/);
-assert.match(workflowRecoveryPrompt, /höchstens EINEN kleinen/);
+assert.match(workflowRecoveryPrompt, /automatisch ausgelöste Ausführungs-Recovery/);
+assert.match(workflowRecoveryPrompt, /\[\[RECOVERY_PLAN\]\]/);
+assert.match(workflowRecoveryPrompt, /Schritte ohne gegenseitige Abhängigkeit werden parallel gestartet/);
 assert.match(workflowRecoveryPrompt, /freigegebene User-Plan bleibt unverändert/);
 const turnLimitReviewTask = orchestration.buildTurnLimitReviewTask({
   pm,
@@ -2302,7 +2505,7 @@ assert.match(reviewEvidence, /## Bedienung/);
 const structuredPlanReply = [
   '[[TASK_PLAN]]',
   '{"tasks":[',
-  '{"id":"implement","title":"CMD implementieren","agent":"Max","type":"task","parentId":null,"dependsOn":[],"acceptanceCriteria":[{"id":"starts","text":"Die CMD-Datei startet den vorgesehenen Ablauf.","required":true,"verification":"automatic"}]},',
+  '{"id":"implement","title":"CMD implementieren","description":"Startskript robust umsetzen","priority":"high","agent":"Max","type":"task","parentId":null,"dependsOn":[],"acceptanceCriteria":[{"id":"starts","text":"Die CMD-Datei startet den vorgesehenen Ablauf.","required":true,"verification":"automatic"}]},',
   '{"id":"qa","title":"CMD testen","agent":"Lisa","type":"task","parentId":null,"dependsOn":["implement"]},',
   '{"id":"final-review","title":"Finale PM-Abnahme","agent":"PM","type":"review","parentId":null,"dependsOn":["qa"]}',
   ']}',
@@ -2313,11 +2516,30 @@ const structuredPlanReply = [
 const structuredPlan = orchestration.extractTaskPlan(structuredPlanReply);
 assert.deepEqual(structuredPlan.tasks.map(task => task.id), ['implement', 'qa', 'final-review']);
 assert.deepEqual(structuredPlan.tasks[1].dependsOn, ['implement']);
+assert.equal(structuredPlan.tasks[0].description, 'Startskript robust umsetzen');
+assert.equal(structuredPlan.tasks[0].priority, 'high');
 assert.deepEqual(structuredPlan.tasks[0].acceptanceCriteria, [{
   id: 'starts', text: 'Die CMD-Datei startet den vorgesehenen Ablauf.', required: true, verification: 'automatic',
 }]);
 assert.doesNotMatch(orchestration.cleanAgentReply(structuredPlanReply), /TASK_PLAN|"dependsOn"/);
 assert.match(orchestration.cleanAgentReply(structuredPlanReply), /vollständige Weg/);
+const structuredRecoveryReply = [
+  '[[RECOVERY_PLAN]]',
+  '{"tasks":[',
+  '{"id":"analyse","title":"Ursache isolieren","agent":"Max","dependsOn":[]},',
+  '{"id":"fix","title":"Korrektur umsetzen","agent":"Lisa","dependsOn":["analyse"],"acceptanceCriteria":[{"id":"regression","text":"Der Fehler ist reproduzierbar behoben."}]}',
+  ']}',
+  '[[/RECOVERY_PLAN]]',
+].join('\n');
+const structuredRecovery = orchestration.extractRecoveryPlan(structuredRecoveryReply);
+assert.deepEqual(structuredRecovery.tasks.map(task => task.id), ['analyse', 'fix']);
+assert.deepEqual(structuredRecovery.tasks[1].dependsOn, ['analyse']);
+assert.doesNotMatch(orchestration.cleanAgentReply(structuredRecoveryReply), /RECOVERY_PLAN|Ursache isolieren/);
+assert.equal(orchestration.extractRecoveryPlan([
+  '[[RECOVERY_PLAN]]',
+  '{"tasks":[{"id":"a","title":"A","agent":"Max","dependsOn":["b"]},{"id":"b","title":"B","agent":"Lisa","dependsOn":["a"]}]}',
+  '[[/RECOVERY_PLAN]]',
+].join('\n')), null);
 const genericPlan = orchestration.extractTaskPlan([
   '[[TASK_PLAN]]',
   '{"tasks":[',
@@ -2328,6 +2550,11 @@ const genericPlan = orchestration.extractTaskPlan([
 ].join('\n'));
 assert.deepEqual(genericPlan.tasks.map(task => task.acceptanceCriteria[0].id), ['sources', 'audience']);
 assert.equal(genericPlan.tasks[1].acceptanceCriteria[0].verification, 'user');
+assert.deepEqual([
+  { priority: 'low', planOrder: 0 },
+  { priority: 'critical', planOrder: 4 },
+  { priority: 'medium', planOrder: 1 },
+].sort(taskTicket.compareTicketPriority).map(task => task.priority), ['critical', 'medium', 'low']);
 const evidenceReply = [
   'Ergebnis fertig.',
   '[[TASK_EVIDENCE]]',
@@ -2392,12 +2619,12 @@ const projectPrompt = orchestration.buildIsolatedSystemPrompt({
 });
 assert.match(projectPrompt, /````file:relativer\/pfad\.ext/);
 assert.match(projectPrompt, /\[\[PROJECT_DONE\]\]/);
-assert.match(projectPrompt, /Abschluss-Review durch, sofern einer vorgesehen ist/);
+assert.match(projectPrompt, /unabhängigen Review[\s\S]*vollständig entschieden und belegt/);
 assert.match(projectPrompt, /Ist noch etwas offen/);
 assert.match(projectPrompt, /keine zusätzlichen README-/);
 assert.match(projectPrompt, /AUFGABENPLAN/);
 assert.match(projectPrompt, /\[\[TASK_PLAN\]\]/);
-assert.match(projectPrompt, /acceptanceCriteria[\s\S]*\[\[ACCEPTANCE_REVIEW\]\]/);
+assert.match(projectPrompt, /acceptanceCriteria[\s\S]*reviewer-Kriterien noch unentschieden/);
 assert.match(projectPrompt, /Max \(Developer\)/);
 assert.match(projectPrompt, /Rollenpool mit mindestens zwei Agenten/);
 assert.match(projectPrompt, /gemeinsamen Arbeitsbereich freigegeben/);
@@ -2704,6 +2931,13 @@ assert.equal(claudeProjectArgs.includes('dontAsk'), true);
 const claudeProjectSettings = JSON.parse(claudeProjectArgs[claudeProjectArgs.indexOf('--settings') + 1]);
 assert.equal(claudeProjectSettings.permissions.deny.includes('Write(/.git/**)'), true);
 assert.equal(claudeProjectSettings.permissions.deny.includes('Edit(/node_modules/**)'), true);
+assert.equal(claudeProjectArgs.includes('stream-json'), true);
+assert.equal(claudeProjectArgs.includes('--include-partial-messages'), true);
+const claudeSessionArgs = claude.buildClaudeArgs({ sessionId: '00000000-0000-4000-8000-000000000001' }).args;
+assert.deepEqual(claudeSessionArgs.slice(-2), ['--session-id', '00000000-0000-4000-8000-000000000001']);
+const claudeResumeArgs = claude.buildClaudeArgs({ sessionId: '00000000-0000-4000-8000-000000000001', resumeSession: true }).args;
+assert.deepEqual(claudeResumeArgs.slice(-2), ['--resume', '00000000-0000-4000-8000-000000000001']);
+assert.equal(claude.parseClaudeStreamEvent({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Hallo' } } }).delta, 'Hallo');
 assert.match(claude.buildClaudePrompt({ systemContent: 'System', merged: [], attachments: [{ kind: 'file', path: claudeAttachmentPath }] }), /attachment\.bin/);
 const claudeStatus = await claude.getClaudeStatus();
 assert.equal(typeof claudeStatus.installed, 'boolean');
@@ -2724,15 +2958,13 @@ const providerServer = http.createServer((request, response) => {
   request.on('end', () => {
     const parsed = JSON.parse(body || '{}');
     providerRequests.push({ url: request.url, headers: request.headers, body: parsed });
-    response.setHeader('content-type', 'application/json');
+    response.setHeader('content-type', 'text/event-stream');
     if (request.url.endsWith('/chat/completions')) {
-      response.end(JSON.stringify({ choices: [{ message: { content: [
-        { type: 'text', text: 'OpenAI-kompatibel' }, { type: 'text', text: 'OK' },
-      ] } }] }));
+      response.end('data: {"choices":[{"delta":{"content":"OpenAI-kompatibel"}}]}\n\ndata: {"choices":[{"delta":{"content":"\\nOK"}}]}\n\ndata: [DONE]\n\n');
     } else if (request.url.endsWith('/messages')) {
-      response.end(JSON.stringify({ content: [{ type: 'text', text: 'Anthropic-kompatibel OK' }] }));
+      response.end('data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Anthropic-kompatibel OK"}}\n\n');
     } else {
-      response.end(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'Gemini OK' }] } }] }));
+      response.end('data: {"candidates":[{"content":{"parts":[{"text":"Gemini OK"}]}}]}\n\n');
     }
   });
 });
@@ -2740,31 +2972,38 @@ await new Promise(resolve => providerServer.listen(0, '127.0.0.1', resolve));
 try {
   const providerPort = providerServer.address().port;
   const base = `http://127.0.0.1:${providerPort}`;
+  const providerProgress = [];
   const openAIResult = await llmMain.callConfiguredProvider({
     connection: providerRuntime.normalizeProviderConnection({
       id: 'api-openai-fixture', name: 'Fixture OpenAI', protocol: 'openai', baseUrl: `${base}/v1`, models: ['fixture-model'],
     }),
     apiKey: 'fixture-openai-key', model: 'fixture-model', systemContent: 'System', messages: [{ role: 'user', content: 'Hallo' }],
+    onProgress: progress => providerProgress.push(progress),
   });
   const anthropicResult = await llmMain.callConfiguredProvider({
     connection: providerRuntime.normalizeProviderConnection({
       id: 'api-anthropic-fixture', name: 'Fixture Anthropic', protocol: 'anthropic', baseUrl: `${base}/v1`, models: ['fixture-model'],
     }),
     apiKey: 'fixture-anthropic-key', model: 'fixture-model', systemContent: 'System', messages: [{ role: 'user', content: 'Hallo' }],
+    onProgress: progress => providerProgress.push(progress),
   });
   const geminiResult = await llmMain.callConfiguredProvider({
     connection: providerRuntime.normalizeProviderConnection({
       id: 'api-gemini-fixture', name: 'Fixture Gemini', protocol: 'gemini', baseUrl: `${base}/v1beta`, models: ['gemini-test'],
     }),
     apiKey: 'fixture-gemini-key', model: 'gemini-test', systemContent: 'System', messages: [{ role: 'user', content: 'Hallo' }],
+    onProgress: progress => providerProgress.push(progress),
   });
   assert.equal(openAIResult.text, 'OpenAI-kompatibel\nOK');
   assert.equal(anthropicResult.text, 'Anthropic-kompatibel OK');
   assert.equal(geminiResult.text, 'Gemini OK');
+  assert.equal(providerRequests.every(request => request.body.stream !== false), true);
+  assert.equal(providerProgress.filter(progress => progress.phase === 'streaming').length >= 3, true);
+  assert.equal(providerProgress.some(progress => progress.partialText === 'OpenAI-kompatibel\nOK'), true);
   assert.equal(providerRequests[0].headers.authorization, 'Bearer fixture-openai-key');
   assert.equal(providerRequests[1].headers['x-api-key'], 'fixture-anthropic-key');
   assert.equal(providerRequests[2].headers['x-goog-api-key'], 'fixture-gemini-key');
-  assert.match(providerRequests[2].url, /models\/gemini-test:generateContent$/);
+  assert.match(providerRequests[2].url, /models\/gemini-test:streamGenerateContent\?alt=sse$/);
 } finally {
   await new Promise(resolve => providerServer.close(resolve));
 }
@@ -2784,6 +3023,7 @@ try {
 }
 
 const codex = require(path.join(root, 'electron/codex-main.js'));
+const codexAppServer = require(path.join(root, 'electron/codex-app-server.js'));
 assert.equal(codex.resolveCodexCommand({ platform: 'linux' }), 'codex');
 assert.equal(codex.resolveCodexCommand({
   platform: 'win32',
@@ -2794,6 +3034,55 @@ assert.equal(codex.resolveCodexCommand({
 assert.equal(codex.resolveCodexCommand({ platform: 'win32', env: {}, homeDir: '', existsSync: () => false }), 'codex.exe');
 assert.deepEqual(codex.codexImageArgs([{ kind: 'image', path: 'C:/tmp/image.png' }, { kind: 'file', path: 'C:/tmp/data.bin' }]), ['--image', 'C:/tmp/image.png']);
 assert.match(codex.buildCodexPrompt({ systemContent: 'System', merged: [], attachments: [{ kind: 'file', path: 'C:/tmp/data.bin' }] }), /data\.bin/);
+assert.doesNotMatch(codex.buildCodexResumePrompt({ merged: [{ role: 'user', content: 'Nur das Delta' }] }), /System/);
+assert.match(codex.buildCodexResumePrompt({ merged: [{ role: 'user', content: 'Nur das Delta' }] }), /Nur das Delta/);
+assert.equal(codex.normalizeCodexReasoningEffort('HIGH'), 'high');
+assert.equal(codex.normalizeCodexReasoningEffort('invalid'), 'medium');
+assert.equal(codex.sessionIdFromCodexEvent({ type: 'thread.started', thread_id: 'thread-123' }), 'thread-123');
+assert.equal(codex.isMissingCodexSessionError({ stderr: 'Thread not found: thread-123' }), true);
+assert.equal(codex.isMissingCodexSessionError({ stderr: 'Task failed because npm test failed' }), false);
+assert.deepEqual(codexAppServer.buildAppServerInput('Hallo', [
+  { kind: 'image', path: 'C:/tmp/image.png' },
+  { kind: 'file', path: 'C:/tmp/data.bin' },
+]), [
+  { type: 'text', text: 'Hallo' },
+  { type: 'localImage', path: 'C:/tmp/image.png' },
+]);
+assert.deepEqual(codexAppServer.appServerItemProgress({ type: 'commandExecution', command: 'npm test' }, false), {
+  phase: 'command', message: 'Befehl läuft: npm test',
+});
+assert.deepEqual(codexAppServer.appServerItemProgress({ type: 'commandExecution', exitCode: 0 }, true), {
+  phase: 'command', message: 'Befehl erfolgreich abgeschlossen.',
+});
+const appServerProgress = [];
+const appServerClient = new codexAppServer.CodexAppServerClient({
+  command: process.execPath,
+  args: [path.join(root, 'scripts/fixtures/codex-app-server.cjs')],
+});
+try {
+  const appServerResult = await appServerClient.run({
+    prompt: 'Hallo', requestId: 'fixture-run', onProgress: progress => appServerProgress.push(progress),
+  });
+  assert.equal(appServerResult.text, 'Hallo Codex');
+  assert.equal(appServerResult.sessionId, 'thread-fixture');
+  assert.equal(appServerResult.metrics.transport, 'app-server');
+  assert.equal(appServerProgress.some(progress => progress.phase === 'streaming' && progress.partialText === 'Hallo Codex'), true);
+} finally {
+  appServerClient.stop();
+}
+const persistentCodexArgs = codex.buildCodexExecArgs({
+  model: 'gpt-5.6-sol', cwd: 'C:/project', outputPath: 'C:/tmp/out.txt', reasoningEffort: 'low', persistSession: true,
+});
+assert.equal(persistentCodexArgs.resumed, false);
+assert.equal(persistentCodexArgs.args.includes('--ephemeral'), false);
+assert.ok(persistentCodexArgs.args.includes('model_reasoning_effort="low"'));
+const resumedCodexArgs = codex.buildCodexExecArgs({
+  model: 'gpt-5.6-sol', sessionId: 'thread-123', resumeSession: true, outputPath: 'C:/tmp/out.txt', reasoningEffort: 'high',
+});
+assert.equal(resumedCodexArgs.resumed, true);
+assert.deepEqual(resumedCodexArgs.args.slice(0, 2), ['exec', 'resume']);
+assert.ok(resumedCodexArgs.args.includes('thread-123'));
+assert.ok(resumedCodexArgs.args.includes('model_reasoning_effort="high"'));
 assert.deepEqual(codex.describeCodexEvent({ type: 'turn.started' }), {
   phase: 'analysis', message: 'Prüft Anforderungen und plant die nächsten Schritte.',
 });
@@ -2801,6 +3090,11 @@ assert.deepEqual(codex.describeCodexEvent({
   type: 'item.started', item: { type: 'command_execution', command: 'npm test' },
 }), {
   phase: 'command', message: 'Befehl läuft: npm test',
+});
+assert.deepEqual(codex.describeCodexEvent({
+  type: 'item.completed', item: { type: 'error', message: 'Connection failed' },
+}), {
+  phase: 'error', message: 'Connection failed',
 });
 assert.equal(codex.cancelCodexRun('nicht-vorhanden').ok, false);
 const codexStatus = await codex.getCodexStatus();
@@ -2833,7 +3127,7 @@ try {
 
 console.log(JSON.stringify({
   ok: true,
-  checks: ['portable-workflow-import-export', 'cross-group-memory-writeback', 'no-artificial-agent-delay', 'safe-auto-parallel-batching', 'work-conserving-workflow-scheduler', 'lean-fast-mode', 'configurable-run-limits', 'pm-turn-limit-review', 'resumable-run-segments', 'agent-teams-window-branding', 'typing-agent-identity', 'always-focused-chat-composer', 'draft-while-agent-runs', 'persistent-user-request-queue', 'global-agent-role-catalog', 'legacy-agent-role-migration', 'routing', 'direct-chat-conversation-history', 'directed-group-context-window', 'direct-specialist-without-pm-review', 'explicit-memory-commands', 'manual-memory-entry', 'quality-cascade-policy', 'quality-deterministic-gates', 'quality-chat-controls', 'custom-provider-quality-cascade', 'direct-chat-without-pm', 'mixed-provider-routing', 'generic-provider-presets', 'encrypted-provider-credentials', 'provider-protocol-routing', 'claude-cli-oauth-routing', 'anthropic-api-key-routing', 'claude-rate-limit-metadata', 'retryable-provider-queue', 'retry-after-parsing', 'claude-opus-sonnet-fallback', 'claude-cli-status', 'claude-windows-native-path', 'group-output-folder-notice', 'browser-file-attachments', 'persistent-file-attachments', 'provider-native-file-payloads', 'cli-file-access', 'detached-singleton-task-window', 'memory-entry-delete-controls', 'multi-handoffs', 'strict-line-start-mentions', 'left-aligned-mention-layout', 'code-block-mention-isolation', 'direct-user-question-display', 'multi-turn-task-queue', 'direct-handoff-priority', 'deferred-pm-handoff', 'timeout-detection', 'immediate-pm-timeout-recovery', 'stepwise-timeout-review', 'persistent-conversation-checkpoint', 'interrupted-agent-checkpoint', 'resume-without-restarting-pm', 'short-agent-activity', 'pm-final-review-rules', 'pause-resume-user-handoff', 'persistent-task-graph', 'generic-acceptance-evidence-gate', 'initial-pm-plan-protocol', 'upfront-plan-materialization', 'planned-future-gating', 'dependency-readiness-guard', 'agent-role-pool-distribution', 'delegation-tree-hierarchy', 'dependency-cross-links', 'multi-result-review-placement', 'legacy-graph-tree-migration', 'agent-subtask-branching', 'graph-dependencies', 'parallel-selection-validation', 'parallel-batch-execution', 'parallel-file-conflict-guard', 'pm-task-approval', 'project-artifact-protocol', 'nested-markdown-artifact-fences', 'project-review-evidence', 'rephrased-file-task-loop-guard', 'persistent-loop-guard', 'safe-project-writes', 'project-completion-signal', 'task-capsules', 'isolated-sessions', 'shared-local-memory', 'shared-json-file-memory', 'versioned-memory-file', 'legacy-memory-file-migration', 'mcp-global-group-merge', 'mcp-official-excalidraw-preset', 'mcp-official-perplexity-preset', 'mcp-direct-chat-global-access', 'mcp-tool-permission-gate', 'mcp-global-tool-catalog', 'mcp-global-tool-policy', 'mcp-unknown-tool-asks', 'full-screen-settings', 'mcp-persistent-chat-grants', 'mcp-once-grant-consumed-on-invocation', 'mcp-timeout-keeps-pending-once-grant', 'mcp-permission-wording-recovery', 'mcp-neutral-json-planner', 'mcp-ui-result-short-circuit', 'mcp-denied-tool-path', 'mcp-app-tool-filtering', 'excalidraw-inline-preview', 'mcp-call-protocol', 'mcp-provider-neutral-tool-loop', 'mcp-stdio-integration', 'codex-progress-events', 'codex-cancel-routing', 'codex-status'],
+  checks: ['portable-workflow-import-export', 'cross-group-memory-writeback', 'no-artificial-agent-delay', 'safe-auto-parallel-batching', 'work-conserving-workflow-scheduler', 'lean-fast-mode', 'selective-project-tools', 'provider-neutral-streaming', 'resumable-cli-sessions', 'configurable-run-limits', 'pm-turn-limit-review', 'resumable-run-segments', 'agent-teams-window-branding', 'typing-agent-identity', 'always-focused-chat-composer', 'draft-while-agent-runs', 'persistent-user-request-queue', 'global-agent-role-catalog', 'legacy-agent-role-migration', 'routing', 'direct-chat-conversation-history', 'directed-group-context-window', 'direct-specialist-without-pm-review', 'explicit-memory-commands', 'manual-memory-entry', 'quality-cascade-policy', 'quality-deterministic-gates', 'quality-chat-controls', 'custom-provider-quality-cascade', 'direct-chat-without-pm', 'mixed-provider-routing', 'generic-provider-presets', 'encrypted-provider-credentials', 'provider-protocol-routing', 'claude-cli-oauth-routing', 'anthropic-api-key-routing', 'claude-rate-limit-metadata', 'retryable-provider-queue', 'retry-after-parsing', 'claude-opus-sonnet-fallback', 'claude-cli-status', 'claude-windows-native-path', 'group-output-folder-notice', 'browser-file-attachments', 'persistent-file-attachments', 'provider-native-file-payloads', 'cli-file-access', 'detached-singleton-task-window', 'memory-entry-delete-controls', 'multi-handoffs', 'strict-line-start-mentions', 'left-aligned-mention-layout', 'code-block-mention-isolation', 'direct-user-question-display', 'multi-turn-task-queue', 'direct-handoff-priority', 'deferred-pm-handoff', 'timeout-detection', 'immediate-pm-timeout-recovery', 'stepwise-timeout-review', 'persistent-conversation-checkpoint', 'interrupted-agent-checkpoint', 'resume-without-restarting-pm', 'short-agent-activity', 'pm-final-review-rules', 'pause-resume-user-handoff', 'persistent-task-graph', 'generic-acceptance-evidence-gate', 'initial-pm-plan-protocol', 'upfront-plan-materialization', 'planned-future-gating', 'dependency-readiness-guard', 'agent-role-pool-distribution', 'delegation-tree-hierarchy', 'dependency-cross-links', 'multi-result-review-placement', 'legacy-graph-tree-migration', 'agent-subtask-branching', 'graph-dependencies', 'parallel-selection-validation', 'parallel-batch-execution', 'parallel-file-conflict-guard', 'pm-task-approval', 'project-artifact-protocol', 'nested-markdown-artifact-fences', 'project-review-evidence', 'rephrased-file-task-loop-guard', 'persistent-loop-guard', 'safe-project-writes', 'project-completion-signal', 'task-capsules', 'isolated-sessions', 'shared-local-memory', 'shared-json-file-memory', 'versioned-memory-file', 'legacy-memory-file-migration', 'mcp-global-group-merge', 'mcp-official-excalidraw-preset', 'mcp-official-perplexity-preset', 'mcp-direct-chat-global-access', 'mcp-tool-permission-gate', 'mcp-global-tool-catalog', 'mcp-global-tool-policy', 'mcp-unknown-tool-asks', 'full-screen-settings', 'mcp-persistent-chat-grants', 'mcp-once-grant-consumed-on-invocation', 'mcp-timeout-keeps-pending-once-grant', 'mcp-permission-wording-recovery', 'mcp-neutral-json-planner', 'mcp-ui-result-short-circuit', 'mcp-denied-tool-path', 'mcp-app-tool-filtering', 'excalidraw-inline-preview', 'mcp-call-protocol', 'mcp-provider-neutral-tool-loop', 'mcp-stdio-integration', 'codex-progress-events', 'codex-cancel-routing', 'codex-status'],
   codex: codexStatus,
   claude: claudeStatus,
 }, null, 2));

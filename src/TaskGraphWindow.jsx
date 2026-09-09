@@ -18,6 +18,7 @@ const EMPTY_STATE = {
   resumeRetrySeconds: 0,
   canUndo: false,
   canDeleteWorkflow: false,
+  testConfigured: false,
   workflowImport: null,
   workflowFileStatus: { busy: '', message: '', error: '' },
   awaitingSchedule: false,
@@ -38,11 +39,15 @@ export default function TaskGraphWindow() {
   useEffect(() => {
     document.body.classList.add('task-window-mode');
     let active = true;
+    let receivedUpdate = false;
     window.electronAPI?.getTaskWindowState?.().then(initialState => {
-      if (active && initialState) setState(initialState);
+      if (active && !receivedUpdate && initialState) setState(initialState);
     }).catch(() => null);
     const unsubscribe = window.electronAPI?.onTaskWindowState?.(nextState => {
-      if (nextState) setState(nextState);
+      if (active && nextState) {
+        receivedUpdate = true;
+        setState(nextState);
+      }
     });
     return () => {
       active = false;
@@ -68,6 +73,11 @@ export default function TaskGraphWindow() {
         activeTaskIds={state.activeTaskIds || []}
         pendingQuestions={state.pendingQuestions || []}
         workflowProblems={state.workflowProblems || []}
+        expertiseHelp={state.expertiseHelp || []}
+        onSearchExpert={taskId => sendAction('search-expertise', [], { taskId })}
+        onCreateExpert={taskId => sendAction('create-expert', [], { taskId })}
+        onAssignExpert={(taskId, agentId) => sendAction('assign-expert-task', [], { taskId, agentId })}
+        onConfigureExpertGroups={() => sendAction('configure-expertise-groups')}
         pendingDelegations={state.pendingDelegations || []}
         groupRequests={state.groupRequests || []}
         delegationEnabled={!!state.delegationEnabled}
@@ -77,6 +87,7 @@ export default function TaskGraphWindow() {
         resumeRetrySeconds={Number(state.resumeRetrySeconds) || 0}
         canUndo={!!state.canUndo}
         canDeleteWorkflow={!!state.canDeleteWorkflow}
+        testConfigured={!!state.testConfigured}
         awaitingSchedule={!!state.awaitingSchedule}
         structureEditable={!!state.structureEditable}
         nodesMovable
@@ -95,8 +106,10 @@ export default function TaskGraphWindow() {
         onWorkflowImportCancel={() => sendAction('cancel-workflow-import')}
         onWorkflowFileStatusClear={() => sendAction('clear-workflow-file-status')}
         onQuestionAnswer={(taskId, answer) => sendAction('answer-agent-question', [], { taskId, answer })}
-        onProblemResolve={(taskId, answer, problem) => sendAction('resolve-workflow-problem', [], { taskId, answer, problem })}
+        onProblemResolve={(taskId, answer, problem, mode) => sendAction('resolve-workflow-problem', [], { taskId, answer, problem, mode })}
         onPauseWorkflow={() => sendAction('pause-workflow')}
+        onPauseTask={taskId => sendAction('pause-task', [], { taskId })}
+        onResumeTask={taskId => sendAction('resume-task', [], { taskId })}
         onResumeWorkflow={() => sendAction('resume-workflow')}
         onEditWorkflow={() => sendAction('edit-workflow')}
         onRetryTask={taskId => sendAction('retry-task', [], { taskId })}
@@ -120,8 +133,11 @@ export default function TaskGraphWindow() {
         onAcceptanceCriteriaChange={(taskId, criteria) => sendAction('update-acceptance-criteria', [], { taskId, criteria })}
         onNodePositionChange={(taskId, position) => sendAction('update-task-position', [], { taskId, position })}
         onResetLayout={() => sendAction('reset-workflow-layout')}
-        onAcceptanceDecision={(taskId, criterionId, status) => sendAction('acceptance-decision', [], {
-          taskId, criterionId, status,
+        onConfigureTests={() => sendAction('configure-acceptance-tests')}
+        onOpenPreview={() => sendAction('open-acceptance-preview')}
+        onRunAcceptanceTests={taskIds => sendAction('run-acceptance-tests', taskIds)}
+        onAcceptanceDecision={(taskId, criterionId, status, note) => sendAction('acceptance-decision', [], {
+          taskId, criterionId, status, note,
         })}
       />
     </main>

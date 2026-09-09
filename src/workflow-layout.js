@@ -1,6 +1,6 @@
 const DEFAULTS = {
-  nodeWidth: 230,
-  nodeHeight: 124,
+  nodeWidth: 280,
+  nodeHeight: 160,
   horizontalGap: 118,
   verticalGap: 28,
   padding: 56,

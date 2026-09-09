@@ -2,11 +2,83 @@
 
 All notable changes are documented here. The project follows semantic versioning while APIs remain subject to beta changes.
 
+## 1.1.0-beta.11 - 2026-09-09
+
+### Changed
+
+- Refactored Workflow
+
+## Unreleased
+
+### Added
+
+- Local experience harness for desktop tasks, cross-group calls and local API
+  calls. Repeated quality-gate failures select up to three predefined hints,
+  with evidence thresholds for transfer between project areas and exclusion of
+  hints that repeatedly fail to prevent the same error.
+- Learning controls, experience counters, estimated additional harness tokens
+  and a global delete action in the Quality Cascading settings. Records contain
+  bounded metadata and hashed project identifiers rather than conversation text.
+- Regression coverage for promotion thresholds, complexity isolation, discarded
+  untrusted text, ineffective hints, concurrent persistence, deletion, disabled
+  learning and storage-failure tolerance in `scripts/learning-harness-test.mjs`.
+
 ## 1.1.0-beta.10 - 2026-09-07
 
 ### Changed
 
 - new workflow window
+- Model output is now streamed through one provider-neutral progress channel for
+  Codex, Claude Code CLI, OpenAI, Anthropic, Gemini and compatible custom
+  providers. The chat shows bounded live answer text and first-text latency while
+  retaining the final message as the authoritative result.
+- Codex now uses a long-lived local App Server for incremental
+  `item/agentMessage/delta` text and lower per-turn startup overhead. It falls
+  back to `codex exec --json` only when the server cannot initialize before a
+  turn starts.
+- Claude Code task continuations reuse an isolated CLI session when the model is
+  unchanged. Model escalation starts a fresh session, and missing or expired
+  sessions safely fall back to a complete one-shot prompt.
+- Codex now reuses isolated sessions for the same agent, ticket and model, falls
+  back safely when a stored session is unavailable, and applies low/medium/high
+  reasoning effort according to planning, normal execution and quality/recovery
+  work. Bounded authentication caching, compact group context, activity
+  heartbeats and persisted runtime metrics reduce overhead and make delays
+  diagnosable without changing provider-neutral Quality Cascading.
+- Codex connection checks now distinguish CLI installation and completed
+  authentication without blocking each run on an unrelated API endpoint probe. The settings dialog polls the
+  browser login to completion without stale status caching, repeated network
+  reconnects fail with a bounded diagnostic, and affected workflow tickets pause
+  for login instead of entering unrelated PM recovery.
+- Low-complexity fast-mode requests can remain on the lean execution path even
+  when a project folder is configured. Expensive workspace tools and project
+  inventory are now attached only to tasks whose objective can use them.
+- The group-chat composer now remains inside the visible chat area at narrow,
+  zoomed and short viewports. Responsive sidebar/header reflow, complete flex
+  shrink boundaries, dynamic viewport height and bounded textarea growth prevent
+  the input and actions from being clipped behind application chrome.
+- Workflow nodes now have persistent project-local task tickets with stable IDs,
+  descriptions, four priorities, assignments, dependencies, acceptance evidence,
+  checkpoints and bounded transition history. Existing graphs migrate into
+  `.agent-teams/tickets`, requests are mirrored under `.agent-teams/requests`, and
+  workflow deletion archives both before clearing the UI.
+- Ticket priority now controls the order of ready and safe-preparation work without
+  bypassing graph dependencies. The workflow details expose ticket ID and editable
+  priority during planning, and import/export preserves priority.
+- Reviewer acceptance is now independent of implementation: a different agent can
+  decide submitted criteria from a planned review ticket. Failed criteria return
+  the same implementation ticket for rework and repeat the same review ticket;
+  the PM only checks that acceptance decisions and evidence are complete.
+- The workflow window now includes a parallel ticket-derived test lane. Automatic
+  criteria use only the trusted group test command and retain bounded run output;
+  user decisions and exceptional overrides require an auditable note. Tickets
+  without criteria request manual `@user` approval instead of completing silently.
+- Execution failures now offer two explicit paths in the shared problem dialog:
+  a bounded PM-authored recovery DAG inside the approved contract, or a new
+  PM-prepared plan revision that still requires user approval. Recovery tickets
+  may run safely in parallel across suitable group agents, persist user notes and
+  dependencies, invalidate only affected downstream results, and escalate to the
+  user after two unsuccessful PM rounds.
 
 ## 1.1.0-beta.9 - 2026-08-31
 

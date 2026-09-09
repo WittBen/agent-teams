@@ -159,13 +159,17 @@ function operateMemoryFile({ filePath, action, namespace, query = '', limit = 5,
     return entries;
   }
 
-  if (action === 'write') {
+  if (action === 'write' || action === 'writeOnce') {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
       throw new Error('Der neue Memory-Eintrag ist ungültig.');
     }
+    if (action === 'writeOnce') {
+      const existing = entries.find(item => item.id === entry.id || (entry.dedupeKey && item.dedupeKey === entry.dedupeKey));
+      if (existing) return { created: false, entry: existing };
+    }
     document.namespaces[normalizedNamespace] = [...entries, entry];
     writeMemoryDocument(filePath, document);
-    return entry;
+    return action === 'writeOnce' ? { created: true, entry } : entry;
   }
   if (action === 'update') {
     const index = entries.findIndex(item => item?.id === id);

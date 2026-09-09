@@ -258,12 +258,12 @@ export default function ReviewWindow() {
           <span>{state.chatName} · 📁 {state.projectName} · {files.length} {t('Dateien')}</span>
         </div>
         <div className="review-window-actions">
-          {state.profile.hasTestCommand && <button className="btn btn-secondary" disabled={busy} onClick={() => runCommand('test')}>▶ {t('Prüfung starten')}</button>}
-          {state.profile.hasPreviewCommand && !previewRunning && <button className="btn btn-secondary" disabled={busy} onClick={() => runCommand('preview')}>🚀 {t('Vorschau starten')}</button>}
-          {previewRunning && <button className="btn btn-danger" onClick={stopPreview}>■ {t('Vorschau stoppen')}</button>}
           {state.profile.previewUrl && <button className="btn btn-secondary" onClick={openPreviewUrl}>🌐 {t('Vorschau öffnen')}</button>}
           <button className="icon-btn" title={t('Aktualisieren')} onClick={refreshCurrent}>↻</button>
           <button className="icon-btn" title={t('Fenster schließen')} onClick={() => window.electronAPI.closeReviewWindow()}>✕</button>
+          {state.profile.hasTestCommand && <button className="btn btn-secondary" disabled={busy} onClick={() => runCommand('test')}>▶ {t('Prüfung starten')}</button>}
+          {state.profile.hasPreviewCommand && !previewRunning && <button className="btn btn-secondary" disabled={busy} onClick={() => runCommand('preview')}>🚀 {t('Vorschau starten')}</button>}
+          {previewRunning && <button className="btn btn-danger" onClick={stopPreview}>■ {t('Vorschau stoppen')}</button>}
         </div>
       </header>
 

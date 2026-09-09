@@ -2,7 +2,7 @@
 
 Agent Teams is a local-first Electron and React desktop application for configurable AI agents, direct chats and coordinated multi-agent groups. Groups can share structured memory, use project folders, connect to MCP servers and maintain a task graph.
 
-> **Status:** `1.1.0-beta.10`. This project is in public beta. Keep backups of important project data and review every MCP server before granting access.
+> **Status:** `1.1.0-beta.11`. This project is in public beta. Keep backups of important project data and review every MCP server before granting access.
 
 ## Download
 
@@ -34,6 +34,12 @@ Read [SECURITY.md](SECURITY.md), [THREAT_MODEL.md](THREAT_MODEL.md) and [PRIVACY
 
 macOS and Linux are Electron build targets, but are not yet part of the supported release matrix.
 
+| Platform | Verification and support |
+| --- | --- |
+| Windows 10/11 | Tested desktop target. Individual OS-permission-dependent checks may be skipped and are reported by the test suite. |
+| macOS | Untested build target; no supported desktop release yet. |
+| Linux | Untested build target; no supported desktop release yet. |
+
 ## Development
 
 ```bash
@@ -63,7 +69,7 @@ The release checklist, including Windows code signing, is documented in
 [ARCHITECTURE.md](ARCHITECTURE.md) and [THREAT_MODEL.md](THREAT_MODEL.md).
 
 Pushing a version tag that exactly matches `package.json`, for example
-`v1.1.0-beta.10`, runs the release workflow. GitHub Actions verifies the project,
+`v1.1.0-beta.11`, runs the release workflow. GitHub Actions verifies the project,
 builds the Windows installer, generates `SHA256SUMS.txt` and publishes a beta
 tag as the latest public release while retaining the beta label in its version
 and release notes.
@@ -79,11 +85,26 @@ ANTHROPIC_API_KEY
 
 Codex CLI and Claude Code CLI sign-in remain independent options. The app invokes the authenticated local CLI session and does not require an additional API key for those routes.
 
-Additional connections can be created from presets for OpenRouter, Groq, Mistral AI, Google Gemini, xAI, DeepSeek, Together AI, Ollama and LM Studio. A custom connection can use an OpenAI-compatible Chat Completions API, an Anthropic-compatible Messages API or the Google Gemini `generateContent` API. Enter the provider's base URL and one or more exact model IDs, then select that connection on any agent. Local Ollama and LM Studio presets do not require a key by default.
+Additional connections can be created from presets for OpenRouter, Groq, Mistral AI, Google Gemini, xAI, DeepSeek, Together AI, Ollama and LM Studio. A custom connection can use an OpenAI-compatible Chat Completions API, an Anthropic-compatible Messages API or the Google Gemini content API. Enter the provider's base URL and one or more exact model IDs, then select that connection on any agent. Local Ollama and LM Studio presets do not require a key by default.
 
 Custom does not mean every arbitrary HTTP API: its request and response format must match one of the three supported protocols. HTTPS is required for remote endpoints; cleartext HTTP is accepted only for `localhost`, `127.0.0.1` or IPv6 loopback. Base URLs containing credentials, query parameters or fragments are rejected.
 
 Provider configuration is available globally to direct and group-chat agents. Quality Cascading can also escalate to a model on a configured connection. Keys are sent only to the selected provider as part of authenticated API requests. Prompt content, attachments and relevant conversation context are also sent to that provider.
+
+The desktop app streams visible answer progress for every supported route:
+OpenAI, Anthropic, Gemini, compatible custom providers, Codex and Claude Code
+CLI. Codex uses a long-lived local App Server for incremental answer deltas and
+falls back to `codex exec --json` if that transport cannot start. Streaming makes
+the first result visible sooner; it does not make the model
+finish its work sooner. The live preview is bounded and temporary, and the final
+chat message remains the saved result. Claude Code can reuse the isolated session
+of a continuing task. Codex does the same for a matching agent, ticket and model;
+planning, preparation and simple work use low reasoning effort, normal-complexity
+execution uses medium, and difficult or escalated recovery uses high. A model change intentionally
+starts a new isolated session. Codex workflow details retain total runtime,
+first-activity/first-text latency, reasoning effort and prompt size for diagnosis.
+Project tools are started only for tasks that actually need the configured
+workspace, reducing avoidable prompt and CLI overhead for ordinary questions.
 
 Protocol references: [OpenRouter](https://openrouter.ai/docs/quickstart), [Groq](https://console.groq.com/docs/openai), [Mistral AI](https://docs.mistral.ai/api/endpoint/chat), [Google Gemini](https://ai.google.dev/api), [xAI](https://docs.x.ai/developers/model-capabilities/text/comparison), [DeepSeek](https://api-docs.deepseek.com/guides/function_calling), [Together AI](https://docs.together.ai/docs/api-keys-authentication), [Ollama](https://docs.ollama.com/api/openai-compatibility) and [LM Studio](https://lmstudio.ai/docs/developer).
 
@@ -105,11 +126,40 @@ The global MCP settings include disabled official presets for Excalidraw and Per
 Every planned group task can carry required or optional acceptance criteria.
 Criteria are domain-neutral and may be checked by a reviewer, by an available
 deterministic check, or through explicit user approval. Agents attach concise
-evidence to the criteria they worked on; a user-configured review task can record
-passed, failed or waived decisions. User-approval criteria remain under user control
-in the detached workflow window. A group run cannot report project completion while
-required criteria are still open, merely submitted or rejected. Plans without
-acceptance criteria from older app versions continue to use the legacy flow.
+evidence to the criteria they worked on; a user-configured review ticket assigned
+to a different agent records passed, failed or waived decisions. A failed required
+criterion returns the same implementation ticket for another attempt and schedules
+the same review ticket again. The PM checks only that decisions and evidence are
+complete. The workflow window contains a separate **Prüfungen** tab derived from
+the tickets. Criteria marked `automatic` run through the group's already configured
+and trusted test command; the run is persisted with result and bounded output and
+may be repeated after changes. These checks run independently of the main agent
+workflow. User criteria remain under user control and always require a written
+verification note. If a ticket has no criteria, the PM asks `@user` and the app
+creates a manual overall approval instead of completing it silently. A reviewer or
+automatic criterion can be waived by the user only as an explicitly reasoned
+exception. A group run cannot report project completion while required criteria
+are still open, merely submitted or rejected.
+
+## Persistent task tickets
+
+Workflow tasks are persisted as project-local JSON tickets below
+`.agent-teams/tickets/<group-id>/`. Each ticket contains a stable ID, title,
+description, priority, assignment, dependencies, status, acceptance criteria,
+evidence, test runs, manual approval requests, checkpoints, recovery notes/plans
+and a bounded transition history. `workflow.json` retains
+the complete graph contract, while `history.jsonl` records persistence revisions.
+Existing stored graphs are migrated automatically and reconciled with the project
+copy when the app starts. The files are written through the Electron main process
+using bounded, atomic replacements; the renderer cannot choose an arbitrary path.
+
+The workflow window is a projection of these tickets. Ticket ID and priority are
+visible in task details, priority can be changed during planning, and ready work is
+scheduled `critical` → `high` → `medium` → `low` without bypassing dependencies.
+Agents receive only the relevant ticket, dependency results and acceptance state
+inside their isolated task capsule. Cross-group questions are persisted separately
+under `.agent-teams/requests/`. Deleting a workflow archives its tickets, history
+and related request files under `.agent-teams/archive/` before starting fresh.
 
 ## Cross-group collaboration and task delegation
 
@@ -150,15 +200,57 @@ request's **Fast**, **Automatic** or **Thorough** mode follows it through nested
 group requests. An explicit model selected in an approved workflow remains fixed,
 because silently replacing it would change the user-approved execution contract.
 
+“Quality” means structural completeness and configured evidence checks, not proof of factual correctness. Explicit requirements, output contracts and JSON validation work independently of response language; DE/EN text heuristics remain a fallback for unstructured requests. Model compatibility defaults live in `electron/quality-model-catalog.mjs`; a provider's model list is never treated as a strength ranking. Set an explicit escalation model for unsupported/custom aliases.
+
 Model context is selected per task. Specialists receive their task capsule,
-direct/transitive dependency results, relevant memory and knowledge-base hits,
+direct/transitive dependency results and PM-selected memory excerpts,
 and only matching project filenames. They do not receive unrelated parallel
 results or the full workflow. PM planning/review may receive the complete plan
 when that overview is required. Cross-group PMs receive at most a bounded set of
 conversation messages that match the incoming question; group specialists receive
-only their subtask, the necessary original request excerpt and attachments.
+only their subtask and explicitly selected attachments. The PM retains general memory and knowledge-base retrieval access.
+
+## Learning from project experience
+
+The desktop app and local API use an adaptive experience harness by default.
+Completed quality-cascade runs retain recognized quality-gate failures and select
+up to three short, application-owned checklist hints for later tasks of the same
+complexity. Repeated local failures can activate a hint; transfer to another
+project area requires observations from at least two areas. Hints that repeatedly
+fail to prevent their associated error are excluded from selection.
+
+Under **Settings → API access → Quality Cascading**, use **Aus Projekterfahrungen
+lernen** and save the settings to enable or disable collection and retrieval.
+The experience panel shows observed runs, project areas, final gate acceptances
+and estimated additional harness tokens. **Aktualisieren** refreshes the counters;
+**Erfahrungen löschen** clears the global experience register immediately.
+Disabling learning preserves existing records. Clearing experiences while work is
+running does not prevent that work from recording another observation later.
+
+The register stores fixed error/rule codes, complexity, final gate acceptance,
+token estimates, timestamps and hashed project identifiers locally. It does not
+store prompt text, responses or project files. A project area uses the execution
+project path when supplied, otherwise the chat/group ID. It is separate from
+Shared Memory and is not removed when a group is deleted. At most 1,000 records
+are retained after a write; observations older than 90 days are excluded from
+retrieval and counters and removed from storage on the next write.
+
+Learning requires no extra model call. It adapts a predefined set of hints; it
+does not train model weights, generate new rules or rewrite the app. It currently
+observes quality-cascade gates, not later reviewer decisions, automatic test runs
+or user approvals. Existing task-context limits and acceptance requirements still
+apply. Token counts are estimates of additional prompt text, not demonstrated
+savings or provider billing. Quality improvements must be evaluated in actual use.
+See [ARCHITECTURE.md](ARCHITECTURE.md#adaptive-experience-harness) and
+[PRIVACY.md](PRIVACY.md) for selection and storage details.
 
 ## Planning mode and workflows
+
+The PM streams complete ticket objects into the draft as it writes the plan. Completed objects are persisted and displayed immediately; incomplete objects are ignored. Plan approval is still required before execution. Existing user-edited plans retain their edit protections.
+
+An approved workflow's task cards provide **Pause task** and **Resume task**. A pause cancels the current model request and prevents subsequent tool calls. A tool already running must settle before the agent becomes free. Independent ready tasks can then use that agent; tasks depending on the paused result remain blocked. The pause survives restarts. Splitting a task preserves incoming dependencies and connects part 1 → part 2 → existing successors, including manually drawn routes.
+
+**Group settings → General → Shared group AI** selects a common provider/model template for all members, including the PM. Individual roles and skills remain intact. Other groups and direct chats retain their own settings; explicit task models and quality routing retain their documented precedence. Group import/export includes this template without credentials.
 
 In a group chat, start planning mode from the header before describing the
 work. A temporary infobar above the composer shows that specialists have not
@@ -166,8 +258,9 @@ started. The PM may create the initial draft; once the user edits it, the user
 keeps approval control, while the PM may continue maintaining the draft during
 planning. A complete PM draft replaces the previous draft and may omit obsolete
 or invalid tasks to remove them; unaffected user decisions should be retained.
-The detached workflow window shows freely editable tasks, dependencies,
-acceptance criteria and assigned agents. Dependencies alone determine ordering: ready independent tasks may run
+The detached workflow window shows freely editable ticket titles, descriptions,
+priorities, dependencies, acceptance criteria and assigned agents. Dependencies
+determine readiness: ready independent tasks may run
 in parallel, while connected successors wait. Per-task models can be overridden
 from the assigned agent's provider. Only **Approve plan version & start workflow**
 releases a versioned plan. Ordinary chat messages never approve it.
@@ -192,10 +285,11 @@ remains disabled until blocking structural or provider errors have been fixed.
 Tasks carrying the amber **Problem** badge show their concrete diagnostics and
 task-specific repair suggestions at the top of the detail panel when selected.
 An additional exclamation button opens a focused problem prompt. The same
-problem is posted once in the chat with a **Resolve** action. Answers from either
-surface are sent to the PM as a planning instruction; the PM may revise the
-draft or name the exact group, agent or provider configuration that still needs
-manual correction.
+problem is posted once in the chat with a **Resolve** action. The shared dialog
+always accepts optional user context and separates two decisions: **Repair
+execution** creates runtime-only recovery tickets, while **Revise main plan**
+opens a PM-prepared draft that cannot run until the user explicitly approves the
+new version. Structural/provider preflight problems offer only the revision path.
 
 Planning mode is active by default for every unused group. Closing its infobar
 with the X explicitly suspends it for that group; **Free mode** is therefore a
@@ -221,14 +315,18 @@ and never prevents the later full task.
 Recovery remains runtime-only but is fully visible in the workflow. A real
 timeout keeps the original task marked as timed out; a result that still fails
 automatic quality gates after model escalation is marked as a quality problem.
-Other execution errors also go to the PM first. The PM creates one small recovery
-step at a time and must explicitly confirm a solved problem. If no safe solution
-inside the approved plan exists, or the PM recovery itself fails, the task waits
-for a concrete user decision with diagnosis and options. Provider rate limits
-remain automatically retryable. Recovery nodes, their status and the model
-actually used appear in the graph and in the original task's recovery history;
-Quality Cascading may select a stronger model for these runtime steps without
-rewriting the plan.
+Other execution errors also go to the PM first. The PM creates a bounded recovery
+DAG of small tickets, selects suitable local agents by their roles/capabilities,
+sets only necessary dependencies and lets independent branches run in parallel.
+The approved main contract is not rewritten. Downstream tickets whose results
+depend on the failed ticket become stale and are rerun/reviewed after recovery;
+successful unrelated branches remain untouched. The PM must explicitly confirm
+the recovered result and its acceptance evidence. After at most two PM recovery
+rounds the task waits for the user; new user information may start a fresh bounded
+cycle. If the plan itself is structurally wrong, the alternative revision path
+preserves the approved snapshot and presents a diff for user approval. Provider
+rate limits remain automatically retryable. Every user note, attempt, recovery
+plan, status and actual model is persisted in the corresponding ticket.
 
 Workflow nodes remain freely movable before and after approval. Their coordinates
 live in separate view state and therefore never change the approved execution
